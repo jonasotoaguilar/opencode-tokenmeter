@@ -5,7 +5,7 @@ context: |
   Tech stack: TypeScript + Solid JSX (@opentui/solid 0.4.5), Bun 1.3.11, @opencode-ai/plugin (>=1.14.50 <2)
   Architecture: read-only OpenCode TUI plugin — sidebar_content slot (order 95), event -> invalidation -> reconcile flow, client SDK is source of truth (replace, never merge); see ARCHITECTURE.md + docs/adr/
   UI: @opentui/solid panel; theme-role colors, glyphs, width clamping (DESIGN.md); motion is off-contract
-  Testing: bun:test (90 tests / 3 files), @opentui/solid headless preload harness, dist artifact regression; coverage via bun test --coverage with an 80/80/80 (statements/functions/lines) per-file gate — Bun 1.3.11 has no branch coverage metric; dist/** is excluded as generated output
+  Testing: bun:test (90 tests / 3 files), @opentui/solid headless preload harness, dist artifact regression (test:dist); coverage gate runs the src unit suites (84 tests) via bun test --coverage with an 80/80/80 (statements/functions/lines) per-file gate — Bun 1.3.11 has no branch coverage metric; dist/** is excluded as generated output and artifact tests stay out of the coverage gate because they need the built dist
   Style: Biome 2.5.7 (indent 2 spaces, double quotes, semicolons as-needed, lf); conventional commits; tag-driven release (push vX.Y.Z → npm publish with provenance + GitHub Release)
   Docs: English; PRD.md, ARCHITECTURE.md, DESIGN.md, docs/CODEBASE-GUIDE.md, docs/adr/ are authoritative
 
