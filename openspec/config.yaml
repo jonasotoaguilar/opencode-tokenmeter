@@ -1,0 +1,57 @@
+# openspec/config.yaml — SDD project config for opencode-tokenmeter
+schema: spec-driven
+
+context: |
+  Tech stack: TypeScript + Solid JSX (@opentui/solid 0.4.5), Bun 1.3.11, @opencode-ai/plugin (>=1.14.50 <2)
+  Architecture: read-only OpenCode TUI plugin — sidebar_content slot (order 95), event -> invalidation -> reconcile flow, client SDK is source of truth (replace, never merge); see ARCHITECTURE.md + docs/adr/
+  UI: @opentui/solid panel; theme-role colors, glyphs, width clamping (DESIGN.md); motion is off-contract
+  Testing: bun:test (90 tests / 3 files), @opentui/solid headless preload harness, dist artifact regression; coverage via bun test --coverage with an 80/80/80 (statements/functions/lines) per-file gate — Bun 1.3.11 has no branch coverage metric; dist/** is excluded as generated output
+  Style: Biome 2.5.7 (indent 2 spaces, double quotes, semicolons as-needed, lf); conventional commits; tag-driven release (push vX.Y.Z → npm publish with provenance + GitHub Release)
+  Docs: English; PRD.md, ARCHITECTURE.md, DESIGN.md, docs/CODEBASE-GUIDE.md, docs/adr/ are authoritative
+
+strict_tdd: true
+
+testing:
+  runner: "bun test"
+  framework: bun:test
+  command: "bun run test"
+  coverage_command: "bun run coverage"
+  typecheck_command: "bun run typecheck"
+  lint_command: "bun run biome:check"
+  format_command: "bun run biome:format"
+  layers:
+    unit: bun:test
+    integration: "@opentui/solid/preload headless render harness"
+    e2e: none
+  coverage: "lcov + text reporters (bun test --coverage)"
+
+rules:
+  proposal:
+    - Include intent, scope, and approach; reference PRD/ARCHITECTURE/DESIGN when relevant
+    - PRs must reference an approved issue and carry exactly one type:* label (AGENTS.md)
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+    - Client SDK data is the source of truth; never spec in-memory mirrors winning over fresh client data
+  design:
+    - Document architecture decisions with rationale (docs/adr/)
+    - Follow the event -> invalidation -> reconcile flow and failure invariants in ARCHITECTURE.md
+    - Include sequence diagrams for complex flows
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+  apply:
+    guidelines:
+      - Follow existing code patterns; authoritative skill: skills/opencode-plugin/SKILL.md
+      - Never touch dist/ manually; produced by bun run build and asserted
+    tdd: true
+    test_command: "bun run test"
+  verify:
+    test_command: "bun run test"
+    build_command: "bun run build"
+    coverage_command: "bun run coverage"
+    typecheck_command: "bun run typecheck"
+    lint_command: "bun run biome:check"
+    coverage_threshold: 0.8
+  archive:
+    - Warn before merging destructive deltas
