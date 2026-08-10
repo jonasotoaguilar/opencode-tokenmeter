@@ -26,13 +26,17 @@ export type TokenUsage = {
 
 export type MessageUsage = TokenUsage & {
   cost: number
-  /** One context snapshot: tokens.total when present, else input+raw output+raw reasoning+cache. */
+  /**
+   * ONE no-cache context snapshot: `input + output + reasoning` ONLY.
+   * `tokens.total` is intentionally unused for context (it may include
+   * cache); cache lives only in the separate cache metrics.
+   */
   context: number
 }
 
 export type SessionUsage = TokenUsage & {
   cost: number
-  /** Context snapshot: max observed per-message context across the session. */
+  /** Context snapshot: max observed no-cache per-message context across the session. */
   total: number
   /** cacheRead + cacheWrite (cumulative). */
   cache: number
@@ -83,9 +87,14 @@ export type ProjectUsage = {
   sessions: number
   cost: number
   /**
-   * Headline context: input + raw output + raw reasoning per session (cache
-   * EXCLUDED — it lives only in the separate `cache` metric), summed across
-   * the project's sessions, since the session-level list payload has no total.
+   * Headline context: ONE no-cache context snapshot per session
+   * (`input + output + reasoning` — the same formula as the Session
+   * hourglass), summed across the project's sessions. Observed sessions
+   * contribute their max no-cache message snapshot; payload-only sessions
+   * contribute the same no-cache formula. Cache never enters context — it
+   * lives only in the separate cumulative `cache` metric. Because the
+   * project contains its current Session, the Project headline is always
+   * >= the Session headline by membership, never by cache.
    */
   context: number
   /** Cumulative raw visible output (OpenCode reports output minus reasoning). */
@@ -112,6 +121,14 @@ export type ProjectLedgerEntry = {
   reasoning: number
   /** cacheRead + cacheWrite (cumulative). */
   cache: number
+  /**
+   * ONE no-cache context snapshot: the max observed per-message context
+   * (`input + output + reasoning`) for observed sessions, or the same
+   * no-cache formula for payload-only sessions. Absent on entries written
+   * before this field existed; readers fall back to
+   * `input + output + reasoning` so persisted history is preserved.
+   */
+  context?: number
   /** ISO timestamp of the last refresh that listed this session as live. */
   lastSeen?: string
   /** ISO timestamp set once the session left the live list (or was deleted). */

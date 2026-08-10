@@ -60,6 +60,7 @@ import {
 import {
   forgetSession,
   invalidateUsage,
+  observedSessionUsage,
   removeMessageUsage,
   setStatus,
   upsertMessageUsage,
@@ -134,8 +135,10 @@ const tui: TuiPlugin = async (api) => {
         const info = e.properties.info
         // Persist the deleted session into the Project ledger BEFORE the
         // refresh: when the delete payload carries token/cost data it becomes
-        // the final snapshot, otherwise the last known snapshot survives.
-        persistDeletedSession(api.kv, info)
+        // the final snapshot, otherwise the plugin's observed aggregate
+        // (captured before the store forgets the session) fills the entry,
+        // and failing that the last known snapshot survives.
+        persistDeletedSession(api.kv, info, observedSessionUsage(info?.id))
         forgetSession(info?.id)
         // Pass the deleted session's projectID as a refresh hint: right after
         // a delete the context may not resolve project.current() yet, and the

@@ -274,16 +274,16 @@ describe("render-level live refresh", () => {
     ]
     fire("message.updated", { info: state.sessions[rootID][0] })
     await waitFor(
-      () => snapshot()?.rootID === rootID && snapshot()?.totalTokens === 42000,
+      () => snapshot()?.rootID === rootID && snapshot()?.totalTokens === 41000,
     )
     // The Project section also lands (default working fake project), so no
     // placeholder survives anywhere in the frame.
     await waitFor(() => projectSnapshot() !== null)
     await setup.waitForFrame(
-      (frame) => frame.includes("42.0k") && !frame.includes("…"),
+      (frame) => frame.includes("41.0k") && !frame.includes("…"),
     )
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("42.0k")
+    expect(frame).toContain("41.0k")
     expect(frame).toContain("Session")
     expect(frame).not.toContain("Sessions")
     expect(frame).not.toContain("…")
@@ -317,14 +317,14 @@ describe("render-level live refresh", () => {
         height: 20,
       },
     )
-    await setupA.waitForFrame((frame) => frame.includes("42.0k"))
+    await setupA.waitForFrame((frame) => frame.includes("41.0k"))
 
     // Switching chats changes the route; the plugin's route effect must
     // reactivate the new root WITHOUT any event and without remounting the
     // panel instance that published the previous snapshot.
     setRoute({ name: "session", params: { sessionID: bID } })
     await waitFor(
-      () => snapshot()?.rootID === bID && snapshot()?.totalTokens === 720000,
+      () => snapshot()?.rootID === bID && snapshot()?.totalTokens === 705000,
     )
     const setupB = await testRender(
       () => slot({ theme: THEME }, { session_id: bID }) as never,
@@ -333,7 +333,7 @@ describe("render-level live refresh", () => {
         height: 20,
       },
     )
-    await setupB.waitForFrame((frame) => frame.includes("720.0k"))
+    await setupB.waitForFrame((frame) => frame.includes("705.0k"))
     disposeReconcile()
     dispose()
   }, 20000)
@@ -359,7 +359,7 @@ describe("render-level live refresh", () => {
       },
     )
     await waitFor(() => snapshot()?.rootID === rootID)
-    await setup.waitForFrame((frame) => frame.includes("42.0k"))
+    await setup.waitForFrame((frame) => frame.includes("41.0k"))
 
     // The session grows while open: a patch tool completes and a new message
     // with higher context lands. The part event must invalidate and rehydrate
@@ -377,11 +377,11 @@ describe("render-level live refresh", () => {
         state: { status: "completed" },
       },
     })
-    await waitFor(() => snapshot()?.totalTokens === 720000)
-    await setup.waitForFrame((frame) => frame.includes("720.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 705000)
+    await setup.waitForFrame((frame) => frame.includes("705.0k"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("720.0k")
-    expect(after).not.toContain("42.0k")
+    expect(after).toContain("705.0k")
+    expect(after).not.toContain("41.0k")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -409,12 +409,12 @@ describe("render-level live refresh", () => {
     // NO event is fired: the mount-time activation must reconcile and
     // populate the panel on its own. The placeholder "…" must be gone.
     await waitFor(
-      () => snapshot()?.rootID === rootID && snapshot()?.totalTokens === 42000,
+      () => snapshot()?.rootID === rootID && snapshot()?.totalTokens === 41000,
     )
     await waitFor(() => projectSnapshot() !== null)
     await setup.renderOnce()
     const before = setup.captureCharFrame()
-    expect(before).toContain("42.0k")
+    expect(before).toContain("41.0k")
     expect(before).not.toContain("…")
 
     // The final message.updated is MISSED (simulated): only the current
@@ -425,11 +425,11 @@ describe("render-level live refresh", () => {
       msg("r2", rootID, { input: 700000, output: 5000, total: 720000 }, 0.02),
     ]
     fire("session.idle", { sessionID: rootID })
-    await waitFor(() => snapshot()?.totalTokens === 720000)
-    await setup.waitForFrame((frame) => frame.includes("720.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 705000)
+    await setup.waitForFrame((frame) => frame.includes("705.0k"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("720.0k")
-    expect(after).not.toContain("42.0k")
+    expect(after).toContain("705.0k")
+    expect(after).not.toContain("41.0k")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -461,9 +461,9 @@ describe("render-level live refresh", () => {
       },
     )
     await waitFor(
-      () => snapshot()?.rootID === rootID && snapshot()?.totalTokens === 42000,
+      () => snapshot()?.rootID === rootID && snapshot()?.totalTokens === 41000,
     )
-    await setup.waitForFrame((frame) => frame.includes("42.0k"))
+    await setup.waitForFrame((frame) => frame.includes("41.0k"))
 
     // The session updates while open, but the TUI's in-memory mirror LAGS:
     // it still holds the old one-message list while the client is fresh.
@@ -482,11 +482,11 @@ describe("render-level live refresh", () => {
         state: { status: "completed" },
       },
     })
-    await waitFor(() => snapshot()?.totalTokens === 720000)
-    await setup.waitForFrame((frame) => frame.includes("720.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 705000)
+    await setup.waitForFrame((frame) => frame.includes("705.0k"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("720.0k")
-    expect(after).not.toContain("42.0k")
+    expect(after).toContain("705.0k")
+    expect(after).not.toContain("41.0k")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -518,7 +518,7 @@ describe("render-level live refresh", () => {
       },
     )
     await waitFor(() => snapshot()?.rootID === rootID)
-    await setup.waitForFrame((frame) => frame.includes("42.0k"))
+    await setup.waitForFrame((frame) => frame.includes("41.0k"))
 
     // The child is created while still invisible to client.session.children,
     // and the event carries NO parentID: the whole tree cache is purged, but
@@ -537,10 +537,10 @@ describe("render-level live refresh", () => {
     fire("message.updated", { info: state.sessions[childID][0] })
     await sleep(RECONCILE_DELAY + 100)
     expect(snapshot()!.delegations).toBe(0)
-    expect(snapshot()?.totalTokens).toBe(42000)
+    expect(snapshot()?.totalTokens).toBe(41000)
     const stuck = setup.captureCharFrame()
-    expect(stuck).toContain("42.0k")
-    expect(stuck).not.toContain("52.5k")
+    expect(stuck).toContain("41.0k")
+    expect(stuck).not.toContain("51.5k")
     expect(stuck).not.toContain("↳")
 
     // The 2s maintenance tick purges the tree cache and re-discovers the
@@ -549,12 +549,12 @@ describe("render-level live refresh", () => {
     await waitFor(
       () =>
         snapshot()!.delegations === 1 &&
-        snapshot()?.totalTokens === 42000 + 10500,
+        snapshot()?.totalTokens === 41000 + 10500,
       6000,
     )
-    await setup.waitForFrame((frame) => frame.includes("52.5k"))
+    await setup.waitForFrame((frame) => frame.includes("51.5k"))
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("52.5k")
+    expect(frame).toContain("51.5k")
     expect(frame).toContain(GLYPH.tasks + "  1")
     expect(frame).toContain("↳")
 
@@ -637,7 +637,7 @@ describe("render-level live refresh", () => {
     // Session rows: headline context · thinking · cost; three-value breakdown.
     expect(frame).toContain(
       GLYPH.hourglass +
-        " 16.5k · " +
+        " 16.0k · " +
         GLYPH.reasoning +
         "  0 · " +
         GLYPH.fire +
@@ -776,7 +776,7 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
       },
     )
     await waitFor(() => snapshot()?.rootID === rootID)
-    await setup.waitForFrame((frame) => frame.includes("42.0k"))
+    await setup.waitForFrame((frame) => frame.includes("41.0k"))
     // Give the debounced (300ms) failed project refresh time to run, then
     // drive the repaint: the section must surface a visible error line in
     // theme().error with ONLY the stable message — the `…` placeholder is
@@ -796,7 +796,7 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
     expect(frame).not.toContain("undefined is not an object")
     expect(frame).not.toContain("…")
     expect(frame).toContain("Session")
-    expect(frame).toContain("42.0k")
+    expect(frame).toContain("41.0k")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -1062,11 +1062,64 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
     // and no loading character is left anywhere in the frame.
     await waitForFrameDriven(
       setup,
-      (frame) => !frame.includes("…") && frame.includes("42.0k"),
+      (frame) => !frame.includes("…") && frame.includes("41.0k"),
     )
     const settled = setup.captureCharFrame()
     for (const ch of spinnerChars) expect(settled).not.toContain(ch)
     expect(settled).toContain("Project")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("REGRESSION: deleting a session observed via messages keeps its usage in the Project total (real payloads carry no usage)", async () => {
+    const rootID = "ses_observed_delete"
+    const state: MutableApi = {
+      sessions: { [rootID]: [] },
+      children: {},
+      metas: { [rootID]: { id: rootID, title: "Root" } },
+    }
+    const project: ProjectState = {
+      current: { id: "proj_del", worktree: "/wt" },
+      // REAL session.list shape: the payload carries no token/cost fields —
+      // usage only ever lives on the session's messages.
+      sessions: [{ id: "s_obs", projectID: "proj_del" }],
+    }
+    purgeTreeCache()
+    const { fire, slot, dispose } = await mountEntry(state, project)
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      {
+        width: 60,
+        height: 20,
+      },
+    )
+    // The mount-time refresh settles with no usage (payload has none).
+    await waitFor(() => projectSnapshot() !== null)
+    // The session's usage is observed through its messages (authoritative
+    // client data), then a project refresh must persist it into the ledger.
+    fire("message.updated", {
+      info: msg(
+        "m1",
+        "s_obs",
+        { input: 1000, output: 500, reasoning: 200, total: 1700 },
+        0.01,
+      ),
+    })
+    fire("project.updated", {})
+    await waitFor(() => projectSnapshot()?.sessions === 1)
+    expect(projectSnapshot()?.context).toBe(1700)
+    await setup.waitForFrame((frame) => frame.includes("1.7k"))
+
+    // The session is deleted with a usage-less payload: the entry handler
+    // persists the observed snapshot and the total must survive.
+    fire("session.deleted", {
+      info: { id: "s_obs", projectID: "proj_del", title: "gone" },
+    })
+    await waitFor(() => projectSnapshot()?.sessions === 1)
+    expect(projectSnapshot()?.context).toBe(1700)
+    await setup.waitForFrame((frame) => frame.includes("1.7k"))
+    const after = setup.captureCharFrame()
+    expect(after).toContain("1.7k")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -1104,10 +1157,10 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
       msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
     ]
     fire("message.removed", { sessionID: rootID, messageID: "r2" })
-    await waitFor(() => snapshot()?.totalTokens === 42000)
-    await setup.waitForFrame((frame) => frame.includes("42.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 41000)
+    await setup.waitForFrame((frame) => frame.includes("41.0k"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("42.0k")
+    expect(after).toContain("41.0k")
     expect(after).not.toContain("62.0k")
     disposeReconcile()
     dispose()
@@ -1133,8 +1186,8 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
         height: 20,
       },
     )
-    await waitFor(() => snapshot()?.totalTokens === 42000)
-    await setup.waitForFrame((frame) => frame.includes("42.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 41000)
+    await setup.waitForFrame((frame) => frame.includes("41.0k"))
 
     // The client grows, but a non-idle status must NOT invalidate: the next
     // reconcile keeps the cheap in-memory mirror (42.0k) instead of forcing
@@ -1145,17 +1198,17 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
     ]
     fire("session.status", { sessionID: rootID, status: { type: "running" } })
     await sleep(50)
-    expect(snapshot()?.totalTokens).toBe(42000)
-    expect(setup.captureCharFrame()).toContain("42.0k")
+    expect(snapshot()?.totalTokens).toBe(41000)
+    expect(setup.captureCharFrame()).toContain("41.0k")
 
     // The idle status invalidates: the mounted panel rehydrates from the
     // authoritative client and repaints with the new total.
     fire("session.status", { sessionID: rootID, status: { type: "idle" } })
-    await waitFor(() => snapshot()?.totalTokens === 720000)
-    await setup.waitForFrame((frame) => frame.includes("720.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 705000)
+    await setup.waitForFrame((frame) => frame.includes("705.0k"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("720.0k")
-    expect(after).not.toContain("42.0k")
+    expect(after).toContain("705.0k")
+    expect(after).not.toContain("41.0k")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -1180,19 +1233,19 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
         height: 20,
       },
     )
-    await waitFor(() => snapshot()?.totalTokens === 42000)
-    await setup.waitForFrame((frame) => frame.includes("42.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 41000)
+    await setup.waitForFrame((frame) => frame.includes("41.0k"))
 
     state.sessions[rootID] = [
       msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
       msg("r2", rootID, { input: 700000, output: 5000, total: 720000 }, 0.02),
     ]
     fire("session.compacted", { sessionID: rootID })
-    await waitFor(() => snapshot()?.totalTokens === 720000)
-    await setup.waitForFrame((frame) => frame.includes("720.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 705000)
+    await setup.waitForFrame((frame) => frame.includes("705.0k"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("720.0k")
-    expect(after).not.toContain("42.0k")
+    expect(after).toContain("705.0k")
+    expect(after).not.toContain("41.0k")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -1217,8 +1270,8 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
         height: 20,
       },
     )
-    await waitFor(() => snapshot()?.totalTokens === 42000)
-    await setup.waitForFrame((frame) => frame.includes("42.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 41000)
+    await setup.waitForFrame((frame) => frame.includes("41.0k"))
 
     // With a sessionID the session is invalidated and rehydrated from the
     // client; the panel must never blank out on an error event.
@@ -1227,14 +1280,14 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
       msg("r2", rootID, { input: 700000, output: 5000, total: 720000 }, 0.02),
     ]
     fire("session.error", { sessionID: rootID })
-    await waitFor(() => snapshot()?.totalTokens === 720000)
-    await setup.waitForFrame((frame) => frame.includes("720.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 705000)
+    await setup.waitForFrame((frame) => frame.includes("705.0k"))
     // Without a sessionID the handler still schedules a refresh and the
     // mounted panel keeps its data.
     fire("session.error", {})
     await sleep(50)
-    expect(snapshot()?.totalTokens).toBe(720000)
-    expect(setup.captureCharFrame()).toContain("720.0k")
+    expect(snapshot()?.totalTokens).toBe(705000)
+    expect(setup.captureCharFrame()).toContain("705.0k")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -1259,19 +1312,19 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
         height: 20,
       },
     )
-    await waitFor(() => snapshot()?.totalTokens === 42000)
-    await setup.waitForFrame((frame) => frame.includes("42.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 41000)
+    await setup.waitForFrame((frame) => frame.includes("41.0k"))
 
     state.sessions[rootID] = [
       msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
       msg("r2", rootID, { input: 700000, output: 5000, total: 720000 }, 0.02),
     ]
     fire("message.part.removed", { sessionID: rootID, messageID: "r2" })
-    await waitFor(() => snapshot()?.totalTokens === 720000)
-    await setup.waitForFrame((frame) => frame.includes("720.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 705000)
+    await setup.waitForFrame((frame) => frame.includes("705.0k"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("720.0k")
-    expect(after).not.toContain("42.0k")
+    expect(after).toContain("705.0k")
+    expect(after).not.toContain("41.0k")
     disposeReconcile()
     dispose()
   }, 20000)

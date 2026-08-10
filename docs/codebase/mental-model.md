@@ -63,7 +63,7 @@ Two independent data paths feed one panel: the **Session** path (active session 
 - The client SDK is the source of truth; a stale non-empty mirror can never win (replace, never merge).
 - Totals are sums over unique keys (message ID / session ID): repeated events and refreshes never double-count.
 - Raw output and raw reasoning stay separate; the displayed output real (`output + reasoning`) is computed exactly once at the formatting boundary.
-- A session's headline context is one max-observed snapshot; cache is excluded from context by design.
+- A session's headline context is one max-observed no-cache snapshot (`input + output + reasoning`); cache is excluded from context by design in both the Session and Project hourglass headlines (it lives only in its own metric).
 - Deleted sessions keep contributing (tombstones); a live list never zeroes a ledger.
 - Every line is column-aware and truncated — the terminal never wraps mid-word.
 - Hooks never throw; a Project failure shows the stable error line and nothing else.

@@ -52,6 +52,7 @@ import {
   writeLedger,
 } from "./ledger"
 import { sumLedgerProject, sumProjectSessions } from "./math"
+import { observedSessionUsage } from "./store"
 import type { ProjectSessionLike, ProjectUsage } from "./types"
 
 export const [projectSnapshot, setProjectSnapshot] =
@@ -151,12 +152,24 @@ export async function refreshProject(
       // Project the live list visibly carries tokens for. Fall back to the
       // LIVE total and rebuild (normalize + persist) the ledger from the
       // live sessions so the next refresh persists normally.
-      upsertLiveSessions(ledger, project.id, projectSessions)
+      upsertLiveSessions(
+        ledger,
+        project.id,
+        projectSessions,
+        undefined,
+        observedSessionUsage,
+      )
       writeLedger(api.kv, ledger)
       setProjectSnapshot(live)
       return
     }
-    upsertLiveSessions(ledger, project.id, projectSessions)
+    upsertLiveSessions(
+      ledger,
+      project.id,
+      projectSessions,
+      undefined,
+      observedSessionUsage,
+    )
     writeLedger(api.kv, ledger)
     // Full ledger sum (live entries by ID + historical tombstones) — the
     // live list was upserted INTO the ledger, never added on top of it.

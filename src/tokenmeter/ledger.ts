@@ -17,6 +17,7 @@ import type {
   ProjectLedger,
   ProjectLedgerEntry,
   ProjectSessionLike,
+  SessionUsage,
 } from "./types"
 
 export const PROJECT_HISTORY_KEY = "tokenmeter.project.history.v1"
@@ -59,7 +60,12 @@ export function writeLedger(kv: LedgerKv, ledger: ProjectLedger): void {
   kv.set(PROJECT_HISTORY_KEY, ledger)
 }
 
-/** Per-session snapshot extracted from a list/delete payload; null when the payload carries no usage. */
+/**
+ * Per-session snapshot extracted from a list/delete payload; null when the
+ * payload carries no usage. Context is the no-cache formula
+ * `input + output + reasoning` — the same quantity the Session hourglass
+ * shows; cache never enters context.
+ */
 export function entryOfSession(
   session: ProjectSessionLike,
 ): ProjectLedgerEntry | null {
@@ -70,7 +76,51 @@ export function entryOfSession(
   const cache = num(tokens?.cache?.read) + num(tokens?.cache?.write)
   const cost = num(session.cost)
   if (cost + input + output + reasoning + cache === 0) return null
-  return { cost, input, output, reasoning, cache }
+  return {
+    cost,
+    input,
+    output,
+    reasoning,
+    cache,
+    context: input + output + reasoning,
+  }
+}
+
+/**
+ * Per-session snapshot from the plugin's OWN observed aggregate (summed from
+ * the authoritative client messages in the store). Real-world list/delete
+ * payloads do not reliably carry token/cost data, so the ledger falls back
+ * to this when a payload entry is absent. Raw fields are cumulative (cache
+ * is the read+write sum); `context` is the session's max observed no-cache
+ * message context snapshot — the same quantity the Session headline shows.
+ */
+function entryOfSessionUsage(
+  usage: SessionUsage | null | undefined,
+): ProjectLedgerEntry | null {
+  if (!usage) return null
+  return {
+    cost: usage.cost,
+    input: usage.input,
+    output: usage.output,
+    reasoning: usage.reasoning,
+    cache: usage.cache,
+    context: usage.total,
+  }
+}
+
+/**
+ * Merges a payload entry with the observed entry: the payload keeps raw-field
+ * precedence (existing behavior), but when the session was observed its max
+ * context snapshot is authoritative for `context` so the ledger matches the
+ * Session headline. Neither present yields null.
+ */
+function resolveEntry(
+  payload: ProjectLedgerEntry | null,
+  observed: ProjectLedgerEntry | null,
+): ProjectLedgerEntry | null {
+  if (!payload) return observed
+  if (!observed) return payload
+  return { ...observed, ...payload, context: observed.context }
 }
 
 /**
@@ -78,12 +128,18 @@ export function entryOfSession(
  * lastSeen refreshed, deletedAt cleared when the session is live again) and
  * tombstones ledger entries of this project that no longer appear in the
  * live list. Idempotent: running twice with the same list changes nothing.
+ *
+ * When a list payload carries no token/cost data, the entry falls back to
+ * the plugin's observed per-session aggregate via `observed` (keyed by
+ * sessionID); a session with neither payload usage nor observed usage gets
+ * no entry.
  */
 export function upsertLiveSessions(
   ledger: ProjectLedger,
   projectID: string,
   sessions: ProjectSessionLike[],
   now: number = Date.now(),
+  observed?: (sessionID: string) => SessionUsage | null,
 ): void {
   const timestamp = new Date(now).toISOString()
   let project = ledger.projects[projectID]
@@ -95,7 +151,10 @@ export function upsertLiveSessions(
   for (const session of sessions) {
     if (!session || session.projectID !== projectID) continue
     seen.add(session.id)
-    const entry = entryOfSession(session)
+    const entry = resolveEntry(
+      entryOfSession(session),
+      entryOfSessionUsage(observed?.(session.id)),
+    )
     if (!entry) continue
     project[session.id] = {
       ...project[session.id],
@@ -114,10 +173,16 @@ export function upsertLiveSessions(
 /**
  * Persists a deleted session into the ledger before the next refresh. When
  * the delete payload carries token/cost data it becomes the final snapshot;
- * otherwise the last known snapshot is kept. A session that was never
- * observed (no payload usage, no ledger entry) leaves no phantom entry.
+ * otherwise the plugin's observed aggregate (`observed`, captured before the
+ * store forgets the session) fills the entry; failing that the last known
+ * snapshot is kept. A session that was never observed (no payload usage, no
+ * observed usage, no ledger entry) leaves no phantom entry.
  */
-export function persistDeletedSession(kv: LedgerKv, info: unknown): void {
+export function persistDeletedSession(
+  kv: LedgerKv,
+  info: unknown,
+  observed?: SessionUsage | null,
+): void {
   const session = info as ProjectSessionLike | undefined
   if (!session?.id || !session.projectID) return
   const ledger = readLedger(kv)
@@ -126,12 +191,15 @@ export function persistDeletedSession(kv: LedgerKv, info: unknown): void {
     project = {}
     ledger.projects[session.projectID] = project
   }
-  const payload = entryOfSession(session)
+  const finalEntry = resolveEntry(
+    entryOfSession(session),
+    entryOfSessionUsage(observed),
+  )
   const existing = project[session.id]
-  if (!payload && !existing) return
+  if (!finalEntry && !existing) return
   project[session.id] = {
     ...existing,
-    ...(payload ?? ({} as ProjectLedgerEntry)),
+    ...(finalEntry ?? ({} as ProjectLedgerEntry)),
     deletedAt: new Date().toISOString(),
   }
   writeLedger(kv, ledger)

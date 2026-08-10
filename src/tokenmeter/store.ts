@@ -10,11 +10,12 @@
  * authoritative client messages instead.
  */
 import { createSignal } from "solid-js"
-import { usageOf } from "./math"
+import { sumMessages, usageOf } from "./math"
 import { forgetSessionMeta, purgeTreeCache } from "./tree"
 import type {
   MessageUsage,
   SessionStatusType,
+  SessionUsage,
   UsageMessage,
   UsageSnapshot,
 } from "./types"
@@ -37,6 +38,19 @@ export function usageMap(sessionID: string): Map<string, MessageUsage> {
 
 export function hasUsage(sessionID: string): boolean {
   return msgUsage.has(sessionID)
+}
+
+/**
+ * The plugin's OWN observed aggregate for a session (summed from its
+ * message-usage map, which is rebuilt from the authoritative client
+ * messages on every load). Null when the session has no observed usage.
+ * The Project ledger falls back to this when list/delete payloads carry
+ * no token/cost data (the real-world shape).
+ */
+export function observedSessionUsage(sessionID: string): SessionUsage | null {
+  const map = msgUsage.get(sessionID)
+  if (!map || map.size === 0) return null
+  return sumMessages(map)
 }
 
 export function upsertMessageUsage(message: UsageMessage): boolean {

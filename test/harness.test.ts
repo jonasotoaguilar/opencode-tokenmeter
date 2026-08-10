@@ -97,7 +97,9 @@ import {
 import {
   forgetSession,
   invalidateUsage,
+  observedSessionUsage,
   snapshot,
+  upsertMessageUsage,
 } from "../src/tokenmeter/store"
 import {
   clampSidebarWidth,
@@ -171,8 +173,10 @@ async function waitFor(check: () => boolean, timeout = 2000): Promise<void> {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 describe("context snapshot policy (math.ts)", () => {
-  test("usageOf uses tokens.total when present", () => {
-    const usage = usageOf(
+  test("usageOf context is input + output + reasoning — tokens.total unused, cache excluded", () => {
+    // The provider total is NOT used for the displayed context (it may
+    // include cache); context is always the no-cache formula.
+    const withTotal = usageOf(
       msg("m1", "ses_root", {
         input: 100,
         output: 20,
@@ -181,29 +185,18 @@ describe("context snapshot policy (math.ts)", () => {
         total: 200,
       }),
     )
-    expect(usage?.context).toBe(200)
-  })
-
-  test("usageOf falls back to input+output+reasoning+cache when total is absent or zero", () => {
+    expect(withTotal?.context).toBe(125)
+    expect(withTotal?.cacheRead).toBe(10)
+    expect(withTotal?.cacheWrite).toBe(5)
     const absent = usageOf(
-      msg("m1", "ses_root", {
-        input: 100,
-        output: 20,
-        reasoning: 5,
-        cache: { read: 10, write: 5 },
-      }),
-    )
-    expect(absent?.context).toBe(140)
-    const zero = usageOf(
       msg("m2", "ses_root", {
         input: 100,
         output: 20,
         reasoning: 5,
         cache: { read: 10, write: 5 },
-        total: 0,
       }),
     )
-    expect(zero?.context).toBe(140)
+    expect(absent?.context).toBe(125)
   })
 
   test("non-assistant messages produce no usage", () => {
@@ -265,7 +258,7 @@ describe("output real accounting (raw output + raw reasoning, exactly once)", ()
     expect(usage.context).toBe(2 * (10 + 20 + 5))
   })
 
-  test("REGRESSION: Project context excludes cache even when the cache is enormous", () => {
+  test("REGRESSION: a huge cache changes ONLY the cache metric, never either hourglass headline", () => {
     const sessions: ProjectSessionLike[] = [
       {
         id: "a",
@@ -289,8 +282,9 @@ describe("output real accounting (raw output + raw reasoning, exactly once)", ()
       },
     ]
     const usage = sumProjectSessions("p", sessions)
-    // The clock context stays input + raw output + raw reasoning; the huge
-    // cache appears ONLY in the separate cache metric, never in context.
+    // Context is ONE no-cache snapshot per session (input + raw output +
+    // raw reasoning); the enormous cache appears ONLY in the cache metric,
+    // never in either hourglass headline.
     expect(usage.context).toBe(1700 + 3000)
     expect(usage.cache).toBe(9500000 + 8000000)
     expect(realOutput(usage.output, usage.reasoning)).toBe(1700)
@@ -348,7 +342,8 @@ describe("session aggregation (max context, cumulative breakdowns)", () => {
       )!,
     )
     const s = sumMessages(map)
-    expect(s.total).toBe(700)
+    // Context is the max no-cache snapshot (500+100+50), never tokens.total.
+    expect(s.total).toBe(650)
     expect(s.input).toBe(1000)
     expect(s.output).toBe(200)
     expect(s.reasoning).toBe(100)
@@ -597,6 +592,233 @@ describe("project aggregation (project.ts)", () => {
     persistDeletedSession(kvEnv.kv, { id: "ghost", projectID: "proj1" })
     ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
     expect(ledger.projects["proj1"]["ghost"]).toBeUndefined()
+    disposeProjectRefresh()
+  })
+
+  test("REGRESSION: a session observed via messages keeps its usage in the ledger when list and delete payloads carry no usage", async () => {
+    setProjectSnapshot(null)
+    const kvEnv = makeKv()
+    // The plugin observed the session's messages (authoritative client data);
+    // the REAL list/delete payload shapes carry no token/cost fields.
+    upsertMessageUsage(
+      msg(
+        "m1",
+        "s1",
+        { input: 1000, output: 500, reasoning: 200, total: 1700 },
+        0.01,
+      ),
+    )
+    await refreshProject(
+      projApi(
+        { id: "proj1" },
+        [{ id: "s1", projectID: "proj1" }],
+        kvEnv,
+      ) as never,
+    )
+    expect(projectSnapshot()?.sessions).toBe(1)
+    expect(projectSnapshot()?.context).toBe(1700)
+    expect(projectSnapshot()?.cost).toBeCloseTo(0.01)
+    // session.deleted with a usage-less payload: the observed snapshot must
+    // be persisted BEFORE the store forgets the session, and the total must
+    // survive the post-delete refresh (tombstone keeps contributing).
+    persistDeletedSession(
+      kvEnv.kv,
+      { id: "s1", projectID: "proj1", title: "gone" },
+      observedSessionUsage("s1"),
+    )
+    await refreshProject(projApi({ id: "proj1" }, [], kvEnv) as never)
+    expect(projectSnapshot()?.sessions).toBe(1)
+    expect(projectSnapshot()?.context).toBe(1700)
+    expect(projectSnapshot()?.cost).toBeCloseTo(0.01)
+    const ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
+    expect(ledger.projects["proj1"]["s1"].deletedAt).toBeDefined()
+    disposeProjectRefresh()
+    forgetSession("s1")
+  })
+
+  test("REGRESSION: observed-usage ledger entries are idempotent and replace, never accumulate", async () => {
+    setProjectSnapshot(null)
+    const kvEnv = makeKv()
+    upsertMessageUsage(
+      msg(
+        "m1",
+        "s1",
+        { input: 1000, output: 500, reasoning: 200, total: 1700 },
+        0.01,
+      ),
+    )
+    const live = [{ id: "s1", projectID: "proj1" }]
+    await refreshProject(projApi({ id: "proj1" }, live, kvEnv) as never)
+    await refreshProject(projApi({ id: "proj1" }, live, kvEnv) as never)
+    await refreshProject(projApi({ id: "proj1" }, live, kvEnv) as never)
+    const ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
+    expect(Object.keys(ledger.projects["proj1"])).toHaveLength(1)
+    expect(projectSnapshot()?.context).toBe(1700)
+    // The session grows (a second message lands): the observed snapshot is
+    // the session's cumulative sum and REPLACES the previous entry — still
+    // exactly one entry, never accumulated twice.
+    upsertMessageUsage(
+      msg(
+        "m2",
+        "s1",
+        { input: 2000, output: 700, reasoning: 300, total: 3000 },
+        0.02,
+      ),
+    )
+    await refreshProject(projApi({ id: "proj1" }, live, kvEnv) as never)
+    expect(Object.keys(ledger.projects["proj1"])).toHaveLength(1)
+    expect(projectSnapshot()?.sessions).toBe(1)
+    // Raw fields are cumulative; context is the max observed snapshot.
+    expect(projectSnapshot()?.context).toBe(3000)
+    disposeProjectRefresh()
+    forgetSession("s1")
+  })
+
+  test("REGRESSION: Project and Session hourglass headlines are the same no-cache quantity — Project >= a member Session by membership, not by cache", async () => {
+    setProjectSnapshot(null)
+    const kvEnv = makeKv()
+    // Exact screenshot fixture: input 29k, output 117, reasoning 103, cache
+    // 18k. The Session headline must be the no-cache context (29.2k), NOT
+    // 46k and NOT 47.2k — cache never enters either headline.
+    upsertMessageUsage(
+      msg(
+        "m1",
+        "s1",
+        {
+          input: 29000,
+          output: 117,
+          reasoning: 103,
+          cache: { read: 18000, write: 0 },
+          total: 46000,
+        },
+        1.23,
+      ),
+    )
+    const sessionContext = observedSessionUsage("s1")!.total
+    expect(sessionContext).toBe(29220)
+    await refreshProject(
+      projApi(
+        { id: "proj1" },
+        [{ id: "s1", projectID: "proj1" }],
+        kvEnv,
+      ) as never,
+    )
+    expect(projectSnapshot()?.sessions).toBe(1)
+    // Project is the sum of per-session no-cache contexts; the current
+    // session is a member, so Project >= Session by membership.
+    expect(projectSnapshot()?.context).toBe(sessionContext)
+    expect(projectSnapshot()?.context).toBeGreaterThanOrEqual(29220)
+    // The cache stays ONLY in the cache metric.
+    expect(projectSnapshot()?.cache).toBe(18000)
+    // The ledger entry carries the observed no-cache context snapshot.
+    const ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
+    expect(ledger.projects["proj1"]["s1"].context).toBe(29220)
+    // Deleting the session keeps the same no-cache context in the tombstone.
+    persistDeletedSession(
+      kvEnv.kv,
+      { id: "s1", projectID: "proj1" },
+      observedSessionUsage("s1"),
+    )
+    await refreshProject(projApi({ id: "proj1" }, [], kvEnv) as never)
+    expect(projectSnapshot()?.context).toBe(29220)
+    expect(projectSnapshot()?.cache).toBe(18000)
+    disposeProjectRefresh()
+    forgetSession("s1")
+  })
+
+  test("REGRESSION: observed ledger context is the MAX no-cache message context snapshot, never the cumulative sum", async () => {
+    setProjectSnapshot(null)
+    const kvEnv = makeKv()
+    upsertMessageUsage(
+      msg(
+        "m1",
+        "s1",
+        { input: 100, output: 10, reasoning: 5, total: 1000 },
+        0.01,
+      ),
+    )
+    upsertMessageUsage(
+      msg(
+        "m2",
+        "s1",
+        { input: 200, output: 20, reasoning: 10, total: 3000 },
+        0.02,
+      ),
+    )
+    await refreshProject(
+      projApi(
+        { id: "proj1" },
+        [{ id: "s1", projectID: "proj1" }],
+        kvEnv,
+      ) as never,
+    )
+    const ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
+    // Raw fields are cumulative; context is the max observed no-cache
+    // snapshot (230 = 200+20+10), never tokens.total (3000) and never the
+    // cumulative context sum (345 = 115+230).
+    expect(ledger.projects["proj1"]["s1"]).toMatchObject({
+      input: 300,
+      output: 30,
+      reasoning: 15,
+    })
+    expect(ledger.projects["proj1"]["s1"].context).toBe(230)
+    expect(projectSnapshot()?.context).toBe(230)
+    disposeProjectRefresh()
+    forgetSession("s1")
+  })
+
+  test("REGRESSION: payload-only ledger entries get no-cache context = input + output + reasoning", async () => {
+    setProjectSnapshot(null)
+    const kvEnv = makeKv()
+    await refreshProject(
+      projApi(
+        { id: "proj1" },
+        [
+          {
+            id: "s1",
+            projectID: "proj1",
+            cost: 0.01,
+            tokens: {
+              input: 1000,
+              output: 500,
+              reasoning: 200,
+              cache: { read: 100, write: 50 },
+            },
+          },
+        ],
+        kvEnv,
+      ) as never,
+    )
+    const ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
+    expect(ledger.projects["proj1"]["s1"].context).toBe(1700)
+    expect(projectSnapshot()?.context).toBe(1700)
+    expect(projectSnapshot()?.cache).toBe(150)
+    disposeProjectRefresh()
+  })
+
+  test("REGRESSION: pre-fix ledger entries without a context field keep contributing with the no-cache fallback", async () => {
+    setProjectSnapshot(null)
+    const kvEnv = makeKv()
+    kvEnv.kv.set(PROJECT_HISTORY_KEY, {
+      v: 1,
+      projects: {
+        proj1: {
+          s_old: {
+            cost: 0.01,
+            input: 1000,
+            output: 500,
+            reasoning: 200,
+            cache: 150,
+            deletedAt: new Date().toISOString(),
+          },
+        },
+      },
+    })
+    await refreshProject(projApi({ id: "proj1" }, [], kvEnv) as never)
+    expect(projectSnapshot()?.sessions).toBe(1)
+    // Pre-fix entry without context: no-cache fallback, cache excluded.
+    expect(projectSnapshot()?.context).toBe(1700)
+    expect(projectSnapshot()?.cache).toBe(150)
     disposeProjectRefresh()
   })
 
@@ -1171,7 +1393,8 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
     expect(snap.output).toBe(1500)
     expect(snap.reasoning).toBe(600)
     expect(realOutput(snap.output, snap.reasoning)).toBe(2100)
-    expect(snap.totalTokens).toBe(7000 + 2700)
+    // tokens.total (7000) is NOT used for context: 6400 = 5000+1000+400.
+    expect(snap.totalTokens).toBe(6400 + 2700)
     expect(snap.input).toBe(7000)
     expect(snap.groups[0].output).toBe(500)
     expect(snap.groups[0].reasoning).toBe(200)
@@ -1181,7 +1404,7 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
     disposeReconcile()
   })
 
-  test("tokens.total wins as the per-session context snapshot", async () => {
+  test("REGRESSION: per-session context is the no-cache snapshot — tokens.total and cache never enter it", async () => {
     const rootID = "ses_root_total"
     const childID = "ses_child_total"
     const sessions = {
@@ -1213,7 +1436,8 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
     )
     await waitFor(() => snapshot()?.rootID === rootID)
     const snap = snapshot()!
-    expect(snap.totalTokens).toBe(55000 + 10500)
+    // 52000 = 50000+2000 (cache 3000 excluded, tokens.total 55000 unused).
+    expect(snap.totalTokens).toBe(52000 + 10500)
     expect(snap.cache).toBe(3000)
     expect(snap.groups[0].total).toBe(10500)
     disposeReconcile()
@@ -1242,7 +1466,7 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
     invalidateUsage(rootID)
     await reconcile(fakeApi(sessions, {}, {}), rootID)
     await waitFor(() => snapshot()!.input === 2000)
-    expect(snapshot()!.totalTokens).toBe(2500)
+    expect(snapshot()!.totalTokens).toBe(2200)
     expect(snapshot()!.cost).toBeCloseTo(0.02)
     disposeReconcile()
   })
