@@ -1,0 +1,4 @@
+# CODEOWNERS — replace the global owner with real users or teams.
+# Add path-specific rules only when the repository requires them.
+
+* @jonasotoaguilar

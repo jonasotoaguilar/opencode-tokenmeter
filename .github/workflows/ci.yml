@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          version: 1.3.11
+
+      - name: Frozen install
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Unit tests with coverage
+        run: bun run coverage
+
+      - name: Build
+        run: bun run build
+
+      - name: Dist smoke test
+        run: bun run test:dist
+
+      - name: Audit
+        run: bun run audit
+
+      - name: Pack dry-run
+        run: bun run pack:dry-run
+
+      - name: Biome check
+        run: bun run biome:check
+
+      - name: Upload coverage
+        if: hashFiles('coverage/lcov.info') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage/lcov.info
