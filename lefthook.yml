@@ -1,0 +1,21 @@
+# Lefthook 2.x — repo-local pre-commit hooks.
+# Install with `bun run hooks:install` (writes .git/hooks only, never global).
+# Full runs (tests, coverage, build) stay in CI/pre-push — never per commit.
+# The Biome glob mirrors the repo's biome:check scope exactly (src, test,
+# root scripts, tsconfigs) — manifests and the skill's own script are not
+# part of that contract. Files are passed explicitly: `--staged` would check
+# the whole index.
+pre-commit:
+  parallel: true
+  commands:
+    biome-check:
+      glob:
+        - "src/**/*.{js,jsx,ts,tsx}"
+        - "test/**/*.{js,jsx,ts,tsx}"
+        - "scripts/**/*.{js,jsx,ts,tsx}"
+        - "tsconfig.json"
+        - "tsconfig.test.json"
+      run: bunx biome check --no-errors-on-unmatched {staged_files}
+    typecheck:
+      glob: "*.{ts,tsx}"
+      run: bun run typecheck

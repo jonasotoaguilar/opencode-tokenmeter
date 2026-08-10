@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Test coverage
+coverage/
+
+# Environment files
+.env
+.env.*
+
+# Skill registry cache and state (written by local tooling)
+.atl/
+
+# CodeGraph indexes
+.codegraph/
+src/.codegraph/
+
+# Local OpenCode skill mirror (untracked runtime copy)
+.agents/
