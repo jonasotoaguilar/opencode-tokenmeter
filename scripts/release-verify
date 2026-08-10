@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Release verification (read-only): confirms the published artifacts from
+# the outside — the npm registry serves the exact version with a tarball and
+# the GitHub Release exists for RELEASE_TAG. Fails closed when either is
+# missing; retries the registry a few times for propagation delay.
+#
+# Context (provided by .github/workflows/release.yml):
+#   RELEASE_TAG / RELEASE_REPOSITORY / GH_TOKEN
+
+PACKAGE_NAME="opencode-tokenmeter"
+
+: "${RELEASE_TAG:?release-verify: RELEASE_TAG is required (e.g. v1.2.3)}"
+: "${RELEASE_REPOSITORY:?release-verify: RELEASE_REPOSITORY is required (owner/repo)}"
+: "${GH_TOKEN:?release-verify: GH_TOKEN is required}"
+
+if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "::error::release-verify: RELEASE_TAG must be a stable vX.Y.Z tag (got ${RELEASE_TAG})"
+  exit 1
+fi
+
+VERSION="${RELEASE_TAG#v}"
+
+echo "::group::release-verify: npm registry"
+REGISTRY_INFO=""
+for _ in 1 2 3 4 5; do
+  if REGISTRY_INFO="$(npm view "${PACKAGE_NAME}@${VERSION}" version tarball 2>/dev/null)"; then
+    break
+  fi
+  sleep 5
+done
+if [[ -z "$REGISTRY_INFO" ]]; then
+  echo "::error::release-verify: ${PACKAGE_NAME}@${VERSION} not found on npm"
+  exit 1
+fi
+echo "npm entry:"
+echo "$REGISTRY_INFO"
+echo "npm url: https://registry.npmjs.org/${PACKAGE_NAME}/${VERSION}"
+echo "::endgroup::"
+
+echo "::group::release-verify: GitHub Release"
+if ! gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
+  echo "::error::release-verify: GitHub Release ${RELEASE_TAG} does not exist for ${RELEASE_REPOSITORY}"
+  exit 1
+fi
+echo "release url: https://github.com/${RELEASE_REPOSITORY}/releases/tag/${RELEASE_TAG}"
+echo "::endgroup::"
+
+echo "release-verify: OK — ${PACKAGE_NAME}@${VERSION} and ${RELEASE_TAG} are live"

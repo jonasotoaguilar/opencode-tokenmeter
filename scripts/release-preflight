@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Release preflight (read-only) for the tag-driven npm + GitHub Release
+# pipeline. Validates the tagged commit before any publication work and runs
+# the full CI gate set — the release must not start from a red tree or a
+# duplicate version. Fails closed: any failing check stops the release.
+#
+# Context (provided by .github/workflows/release.yml):
+#   RELEASE_TAG / RELEASE_COMMIT / RELEASE_REPOSITORY
+# Standalone use: set RELEASE_TAG (and RELEASE_REPOSITORY) for a local dry run.
+
+PACKAGE_NAME="opencode-tokenmeter"
+
+: "${RELEASE_TAG:?release-preflight: RELEASE_TAG is required (e.g. v1.2.3)}"
+: "${RELEASE_REPOSITORY:?release-preflight: RELEASE_REPOSITORY is required (owner/repo)}"
+
+if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "::error::release-preflight: RELEASE_TAG must be a stable vX.Y.Z tag (got ${RELEASE_TAG})"
+  exit 1
+fi
+
+VERSION="${RELEASE_TAG#v}"
+PKG_VERSION="$(jq -r .version package.json)"
+if [[ "$VERSION" != "$PKG_VERSION" ]]; then
+  echo "::error::release-preflight: package.json version (${PKG_VERSION}) does not match RELEASE_TAG (${VERSION}) — bump package.json before tagging"
+  exit 1
+fi
+
+echo "::group::release-preflight: gates"
+bun install --frozen-lockfile
+bun run typecheck
+bun run test
+bun run coverage
+bun run audit
+bun run build
+bun run test:dist
+bun run pack:dry-run
+bun run biome:check
+echo "::endgroup::"
+
+echo "::group::release-preflight: registry and release state"
+if npm view "${PACKAGE_NAME}@${VERSION}" version >/dev/null 2>&1; then
+  echo "::error::release-preflight: ${PACKAGE_NAME}@${VERSION} is already published on npm — cut a new version"
+  exit 1
+fi
+if gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
+  echo "::error::release-preflight: GitHub Release ${RELEASE_TAG} already exists for ${RELEASE_REPOSITORY}"
+  exit 1
+fi
+echo "::endgroup::"
+
+echo "release-preflight: OK"
+echo "  tag:        ${RELEASE_TAG}"
+echo "  version:    ${VERSION}"
+echo "  commit:     ${RELEASE_COMMIT}"
+echo "  repository: ${RELEASE_REPOSITORY}"
+echo "  npm:        https://registry.npmjs.org/${PACKAGE_NAME}/${VERSION} (will be created)"
+echo "  release:    https://github.com/${RELEASE_REPOSITORY}/releases/tag/${RELEASE_TAG} (will be created)"
