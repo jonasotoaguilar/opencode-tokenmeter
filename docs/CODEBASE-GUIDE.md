@@ -50,6 +50,7 @@ Every file belongs to exactly one concern: the entry (`tokenmeter.tsx`) only wir
 - `DESIGN.md` — panel layout, theme-role colors, glyphs, states.
 - `docs/adr/` — architecture decision records (build, reconcile, kv, external packages, width).
 - `docs/release-security.md` — release pipeline security controls, one-time npmjs trusted-publisher setup, maintainer drift checklist.
+- `docs/releases/` — the single current release document `vX.Y.Z.md`: curated narrative body used verbatim as the GitHub Release body. Lifecycle: `git mv` the previous release document to the new tag name, replace content, bump package, commit, tag; validated by `scripts/release-preflight` (exactly one document, name matches tag, body curated) before any tag publishes.
 - `docs/skill-style-guide.md` — how to author/update LLM-first skills in this repo.
 - `AGENTS.md` — agent working rules; the authoritative plugin-development skill.
 - `skills/opencode-plugin/SKILL.md` — the versioned plugin-development skill.
