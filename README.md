@@ -140,7 +140,7 @@ Open a session and check the right sidebar: a `TokenMeter 1.0.0` panel with `Pro
 
 <div align="center">
 
-<img src="docs/assets/brand/tokenmeter-sidebar.png" alt="TokenMeter sidebar screenshot" width="360">
+<img src="docs/assets/brand/tokenmeter-sidebar.png" alt="TokenMeter sidebar screenshot" width="100%">
 
 </div>
 
