@@ -1,5 +1,9 @@
 <div align="center">
 
+<p>
+<img src="docs/assets/brand/tokenmeter-banner.png" alt="TokenMeter banner" width="100%">
+</p>
+
 <h1>opencode-tokenmeter</h1>
 
 <p><strong>opencode-tokenmeter — a live token-usage, cost, and delegation-tree sidebar for the OpenCode TUI.</strong></p>
@@ -45,7 +49,7 @@ For every scope, cumulative token spend uses the same formula: `Σ input + Σ ou
 
 ### Displayed metrics
 
-The sidebar uses Nerd Font glyphs (PUA codepoints — a Nerd Font must be active in the terminal). GitHub Markdown cannot render private-use glyphs, so each icon below is a repo-owned SVG image (`docs/icons/`) whose outlines were extracted from the official Nerd Fonts source font; the exact codepoints and source icon names are documented in [docs/icons/README.md](docs/icons/README.md). Colors are the exact DESIGN.md reference values for the runtime theme roles — the sidebar itself stays theme-driven.
+The sidebar uses Nerd Font glyphs (PUA codepoints — a Nerd Font must be active in the terminal). GitHub Markdown cannot render private-use glyphs, so each icon below is a repo-owned SVG image (`docs/assets/icons/`) whose outlines were extracted from the official Nerd Fonts source font; the exact codepoints and source icon names are documented in [docs/assets/icons/README.md](docs/assets/icons/README.md). Colors are the exact DESIGN.md reference values for the runtime theme roles — the sidebar itself stays theme-driven.
 
 <table>
   <thead>
@@ -53,17 +57,17 @@ The sidebar uses Nerd Font glyphs (PUA codepoints — a Nerd Font must be active
   </thead>
   <tbody>
     <tr>
-      <td align="center"><img src="docs/icons/fa-coins.svg" alt="fa-coins icon" title="fa-coins" width="16" height="16"></td>
+      <td align="center"><img src="docs/assets/icons/fa-coins.svg" alt="fa-coins icon" title="fa-coins" width="16" height="16"></td>
       <td>Cumulative token spend</td>
       <td><code>Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write</code>; rendered in fixed coin gold <code>#D4AF37</code></td>
     </tr>
     <tr>
-      <td align="center"><img src="docs/icons/reasoning.svg" alt="reasoning icon" title="reasoning" width="16" height="16"></td>
+      <td align="center"><img src="docs/assets/icons/reasoning.svg" alt="reasoning icon" title="reasoning" width="16" height="16"></td>
       <td>Thinking</td>
       <td>Cumulative reasoning tokens; also included once in real output and total spend</td>
     </tr>
     <tr>
-      <td align="center"><img src="docs/icons/md-fire.svg" alt="md-fire icon" title="md-fire" width="16" height="16"></td>
+      <td align="center"><img src="docs/assets/icons/md-fire.svg" alt="md-fire icon" title="md-fire" width="16" height="16"></td>
       <td>Cost</td>
       <td>USD cost calculated by OpenCode from the model's input/output/cache rates</td>
     </tr>
@@ -78,17 +82,17 @@ The sidebar uses Nerd Font glyphs (PUA codepoints — a Nerd Font must be active
       <td>Cumulative visible output + reasoning tokens</td>
     </tr>
     <tr>
-      <td align="center"><img src="docs/icons/oct-database.svg" alt="oct-database icon" title="oct-database" width="16" height="16"></td>
+      <td align="center"><img src="docs/assets/icons/oct-database.svg" alt="oct-database icon" title="oct-database" width="16" height="16"></td>
       <td>Prompt cache</td>
       <td><code>R&lt;read&gt;|W&lt;write&gt;</code>; zero sides are omitted and both-zero renders <code>0</code></td>
     </tr>
     <tr>
-      <td align="center"><img src="docs/icons/md-robot.svg" alt="md-robot icon" title="md-robot" width="16" height="16"></td>
+      <td align="center"><img src="docs/assets/icons/md-robot.svg" alt="md-robot icon" title="md-robot" width="16" height="16"></td>
       <td>Agents</td>
       <td>Distinct delegated agent types and each group identity</td>
     </tr>
     <tr>
-      <td align="center"><img src="docs/icons/tasks.svg" alt="tasks icon" title="tasks" width="16" height="16"></td>
+      <td align="center"><img src="docs/assets/icons/tasks.svg" alt="tasks icon" title="tasks" width="16" height="16"></td>
       <td>Delegations/runs</td>
       <td>Recursive delegated session count or runs in an agent group</td>
     </tr>
@@ -133,6 +137,8 @@ Point at the built artifact (run `bun run build` first):
 ### 2. Verify
 
 Open a session and check the right sidebar: a `TokenMeter 1.0.0` panel with `Project` and `Session` metric rows appears. The `Subagents ▶` row expands the delegation list; the panel starts collapsed.
+
+<img src="docs/assets/brand/tokenmeter-sidebar.png" alt="TokenMeter sidebar screenshot" width="378">
 
 ---
 

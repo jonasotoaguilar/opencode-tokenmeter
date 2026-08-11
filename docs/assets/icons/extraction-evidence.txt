@@ -1,7 +1,7 @@
 Glyph extraction evidence — official Nerd Fonts v3.5.0 SymbolsNerdFont-Regular.ttf
 Source font SHA-256: 0546de2600fecaedb017a02acf4d4ee5b941eaf7afb589db9b4989ef19a4879b
 Transform: font y-up -> SVG y-down via y' = 2*bboxCenterY - y (TransformPen 1,0,0,-1,0,2cy); viewBox unchanged (mirror around bbox center).
-Fill colors: exact DESIGN.md reference values for the runtime semantic roles (see docs/icons/README.md); only fa-coins (SPEND_GOLD) is fixed at runtime, all other roles resolve from the host theme.
+Fill colors: exact DESIGN.md reference values for the runtime semantic roles (see docs/assets/icons/README.md); only fa-coins (SPEND_GOLD) is fixed at runtime, all other roles resolve from the host theme.
 
 U+EDE8 fa-coins         semantic=token spend — SPEND_GOLD (fixed, never theme-driven) fill=#D4AF37  mirror_y=1228.0 bbox=(0,-331,1890x1890) sha256=f698c14616a47951
 U+EE9C fa-brain         semantic=thinking — theme().accent fill=#F5BDE6  ref=active catppuccin-macchiato macPink  mirror_y=1228.0 bbox=(0,-331,1890x1890) sha256=0e020ba76adbf58c
