@@ -1,7 +1,7 @@
 <div align="center">
 
 <p>
-<img src="docs/assets/brand/tokenmeter-banner.png" alt="TokenMeter banner" width="720">
+<img src="docs/assets/brand/tokenmeter-banner.png" alt="TokenMeter banner" width="100%">
 </p>
 
 <h1>opencode-tokenmeter</h1>
