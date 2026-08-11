@@ -6,22 +6,21 @@ set -euo pipefail
 # provenance, and creates the GitHub Release for RELEASE_TAG with
 # Conventional-commit notes between the previous tag and this one.
 #
-# Credentials come from the release workflow env: block only, never from the
-# repository:
-#   NODE_AUTH_TOKEN — npmjs automation token (required; also passed as
-#                     NPM_TOKEN by the workflow)
-#   GH_TOKEN        — GitHub token (required; provided by the workflow)
+# npm authentication uses Trusted Publishing (OIDC): the job's `id-token:
+# write` lets npm exchange a short-lived GitHub OIDC assertion for a registry
+# token. No NPM_TOKEN/NODE_AUTH_TOKEN is read or expected — a broken
+# trusted-publisher binding must fail loudly, not fall back to a token.
+#   GH_TOKEN — GitHub token (required; provided by the workflow)
 # Context: RELEASE_TAG / RELEASE_COMMIT / RELEASE_REPOSITORY.
 # Fails closed: an already-published version or an existing release stops the
 # script before any write. No git tag or commit is created.
 
-PACKAGE_NAME="opencode-tokenmeter"
+PACKAGE_NAME="@jonasotoaguilar/opencode-tokenmeter"
 
 : "${RELEASE_TAG:?release-publish: RELEASE_TAG is required (e.g. v1.2.3)}"
 : "${RELEASE_REPOSITORY:?release-publish: RELEASE_REPOSITORY is required (owner/repo)}"
 : "${RELEASE_COMMIT:?release-publish: RELEASE_COMMIT is required}"
 : "${GH_TOKEN:?release-publish: GH_TOKEN is required}"
-: "${NODE_AUTH_TOKEN:?release-publish: NODE_AUTH_TOKEN is required}"
 
 if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "::error::release-publish: RELEASE_TAG must be a stable vX.Y.Z tag (got ${RELEASE_TAG})"
@@ -53,7 +52,7 @@ echo "::endgroup::"
 
 # Generated release material (notes file) lives under the workflow's
 # release-material dir so the `if: always()` cleanup step removes it on every
-# outcome. Auth material is setup-node's runner-local ~/.npmrc plumbing —
+# outcome. npm auth is OIDC-only: the registry token is minted per run and
 # never written to a committed file.
 MATERIAL_DIR="${RUNNER_TEMP:-/tmp}/release-material"
 mkdir -p "$MATERIAL_DIR"

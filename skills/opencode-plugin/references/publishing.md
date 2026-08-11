@@ -165,6 +165,15 @@ For local development (no npm), point config at the built output or source direc
    ```
 
    OpenCode automatically installs plugin dependencies at runtime.
+
+   > **TUI plugins** (e.g. `sidebar_content` slot) are NOT installed via `opencode.json` — register them in `tui.json` instead (see `references/tui-reactivity.md`):
+   >
+   > ```json
+   > {
+   >   "$schema": "https://opencode.ai/tui.json",
+   >   "plugin": ["<PACKAGE_NAME>"]
+   > }
+   > ```
    ````
 
 5. **Pre-publish gates (MUST all pass):**
