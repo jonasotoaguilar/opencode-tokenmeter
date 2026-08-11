@@ -4,7 +4,7 @@
 
 <overview>
 
-When users pin plugins to specific versions (e.g., `my-plugin@1.0.0`), OpenCode won't auto-update them. Plugins can check npm for newer versions and show a toast notification, letting users decide when to update.
+When users pin plugins to specific versions (e.g., `my-plugin@1.0.0`), OpenCode won't auto-update them. Plugins can check npm for newer versions and show a toast notification, letting users decide when to update. The toast MUST tell users the official update command — editing the config to `@latest` does NOT reinstall (see `updating-plugins.md`).
 
 </overview>
 
@@ -118,7 +118,7 @@ export function checkForUpdates(options: UpdateCheckOptions): void {
       await client.tui.showToast({
         body: {
           title: `${pluginName}: Update Available`,
-          message: `v${currentVersion} → v${latest}\nUpdate config to use @${latest}`,
+          message: `v${currentVersion} → v${latest}\nRun: opencode plugin ${packageName}@${latest} --force`,
           variant: "info",
           duration: 10000,
         },
@@ -194,22 +194,21 @@ const plugin: Plugin = async ({ client }) => {
 ## Toast Format
 
 ```
-┌─────────────────────────────────────┐
-│ My Plugin: Update Available         │
-│ v1.0.0 → v1.2.0                     │
-│ Update config to use @1.2.0         │
-└─────────────────────────────────────┘
+┌────────────────────────────────────────────┐
+│ My Plugin: Update Available                │
+│ v1.0.0 → v1.2.0                            │
+│ Run: opencode plugin my-plugin@1.2.0 --force │
+└────────────────────────────────────────────┘
 ```
 
-The message tells users to update their config, since OpenCode manages installation:
+The message tells users the official command, since OpenCode manages installation and only the CLI command guarantees a fresh install:
 
-```jsonc
-// Before
-{ "plugin": ["my-plugin@1.0.0"] }
-
-// After
-{ "plugin": ["my-plugin@1.2.0"] }
+```bash
+# The update (replaces the config entry and installs the new version)
+opencode plugin my-plugin@1.2.0 --force
 ```
+
+Editing the config alone is NOT a reliable update: changing `my-plugin` to `my-plugin@latest` keeps the existing `@latest` cache directory (cache-first install), so nothing is reinstalled. Only a version pin changes the cache directory. See `updating-plugins.md` for the full mechanism.
 
 </examples>
 

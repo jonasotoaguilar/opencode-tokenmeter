@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# update-plugin — update THIS plugin (the package this script ships with)
+# through the official OpenCode command (`opencode plugin <name>@<version>
+# --force`).
+#
+# Why this exists: OpenCode installs npm plugins cache-first. `Npm.add`
+# (packages/core/src/npm.ts) returns the existing
+# <cache>/packages/<spec>/node_modules/<name> directory when it exists and
+# never consults npm again — no TTL, no version comparison, no auto-update.
+# A bare name in the config normalizes to <name>@latest
+# (packages/opencode/src/plugin/shared.ts), and that @latest directory is a
+# label, not a live pointer: publishing a new version changes nothing for
+# existing users. The official update path is `opencode plugin <name>@<version>
+# --force`: the version pin creates a NEW cache directory (fresh install
+# guaranteed) and --force replaces the config entry.
+#
+# This script automates that path for the plugin it ships with — it reads its
+# own package name from the package.json next to it, finds that plugin's entry
+# in the opencode configs (global + local), compares the installed version
+# against the npm registry, and runs the official command when outdated. It
+# never touches other plugins' config entries.
+#
+# Usage:
+#   scripts/update-plugin              # update this plugin if outdated
+#   scripts/update-plugin --check      # report only; exit 2 if outdated
+#   scripts/update-plugin --dry-run    # show the command without running it
+#   scripts/update-plugin --global     # only the global config
+#   scripts/update-plugin --local      # only the local config
+#
+# Exit codes: 0 = up to date (or updated), 1 = error, 2 = --check found updates.
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+log() { printf '%s\n' "$*"; }
+die() { log "error: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Options
+# ---------------------------------------------------------------------------
+
+CHECK=0
+DRY_RUN=0
+SCOPE="both" # both | global | local
+
+usage() {
+  sed -n '4,30p' "$0" | sed 's/^# \{0,1\}//' >&2
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --check) CHECK=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    --global) SCOPE="global" ;;
+    --local) SCOPE="local" ;;
+    -h | --help) usage ;;
+    --*) die "unknown option: $1" ;;
+    *) die "unexpected argument: $1 (this script only updates its own plugin)" ;;
+  esac
+  shift
+done
+
+# ---------------------------------------------------------------------------
+# Identity: this script updates only the package it ships with
+# ---------------------------------------------------------------------------
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PKG_DIR="$(dirname "$SCRIPT_DIR")"
+PACKAGE_NAME="$(
+  node -e "console.log(require(process.argv[1]).name)" "$PKG_DIR/package.json" 2>/dev/null || true
+)"
+[[ -n "$PACKAGE_NAME" ]] || die "could not read package name from $PKG_DIR/package.json"
+
+# semver_gt A B — true when A is a newer semver than B (numeric, 3 parts)
+semver_gt() {
+  local -a a b
+  IFS='.' read -ra a <<< "${1#v}"
+  IFS='.' read -ra b <<< "${2#v}"
+  for i in 0 1 2; do
+    local ai="${a[$i]:-0}" bi="${b[$i]:-0}"
+    ((ai > bi)) && return 0
+    ((ai < bi)) && return 1
+  done
+  return 1
+}
+
+# split_spec SPEC — print "name\tversion" (version empty for bare or @latest)
+split_spec() {
+  local spec="$1" name="" version=""
+  case "$spec" in
+    @*/*@*)
+      name="${spec%@*}"
+      version="${spec##*@}"
+      ;;
+    @*/*)
+      name="$spec"
+      ;;
+    *@*)
+      name="${spec%@*}"
+      version="${spec##*@}"
+      ;;
+    *)
+      name="$spec"
+      ;;
+  esac
+  [[ "$version" == "latest" ]] && version=""
+  printf '%s\t%s\n' "$name" "$version"
+}
+
+# npm_latest NAME — the registry's latest version, empty on failure
+npm_latest() {
+  npm view "$1" version 2>/dev/null | tail -1 || true
+}
+
+# plugins_in FILE — print every plugin spec in an opencode config file
+plugins_in() {
+  local file="$1"
+  node - "$file" <<'NODE' 2>/dev/null || true
+const fs = require("fs");
+const file = process.argv[2];
+const src = fs
+  .readFileSync(file, "utf8")
+  .replace(/\/\*[\s\S]*?\*\//g, "")
+  .replace(/(^|[^:])\/\/.*$/gm, "$1")
+  .replace(/,(\s*[}\]])/g, "$1");
+let data;
+try {
+  data = JSON.parse(src);
+} catch {
+  process.exit(0);
+}
+const list = Array.isArray(data?.plugin) ? data.plugin : [];
+for (const item of list) {
+  const spec = Array.isArray(item) ? item[0] : item;
+  if (typeof spec === "string") console.log(spec);
+}
+NODE
+}
+
+# installed_version NAME CACHE_DIR_SPEC — the version actually installed in
+# the opencode package cache for the given cache-dir spec, empty if absent
+installed_version() {
+  local name="$1" dir_spec="$2"
+  local pkg="$CACHE_DIR/$dir_spec/node_modules/$name/package.json"
+  if [[ -f "$pkg" ]]; then
+    node -e "console.log(require(process.argv[1]).version)" "$pkg" 2>/dev/null || true
+  fi
+}
+
+# cache_dir_spec NAME VERSION — the cache directory opencode derives from a
+# config spec: <name>@latest for bare names, <name>@<version> for pins
+cache_dir_spec() {
+  if [[ -n "$2" ]]; then
+    printf '%s@%s' "$1" "$2"
+  else
+    printf '%s@latest' "$1"
+  fi
+}
+
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/opencode/packages"
+
+# ---------------------------------------------------------------------------
+# Find this plugin's entry in the opencode configs
+# ---------------------------------------------------------------------------
+
+GLOBAL_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+LOCAL_DIR="$PWD"
+
+declare -a ENTRIES=()     # specs (config string) for THIS plugin
+declare -a ENTRY_SCOPE=() # matching scope per entry
+
+add_config_entry() {
+  local file="$1" scope="$2"
+  [[ -f "$file" ]] || return 0
+  while IFS= read -r spec; do
+    [[ -n "$spec" ]] || continue
+    local name
+    IFS=$'\t' read -r name _ <<< "$(split_spec "$spec")"
+    [[ "$name" == "$PACKAGE_NAME" ]] || continue
+    ENTRIES+=("$spec")
+    ENTRY_SCOPE+=("$scope")
+  done < <(plugins_in "$file")
+}
+
+if [[ "$SCOPE" == "both" || "$SCOPE" == "global" ]]; then
+  for name in tui.json opencode.json tui.jsonc opencode.jsonc; do
+    add_config_entry "$GLOBAL_DIR/$name" "global"
+  done
+fi
+if [[ "$SCOPE" == "both" || "$SCOPE" == "local" ]]; then
+  for name in tui.json opencode.json tui.jsonc opencode.jsonc; do
+    add_config_entry "$LOCAL_DIR/$name" "local"
+  done
+  add_config_entry "$LOCAL_DIR/.opencode/tui.json" "local"
+  add_config_entry "$LOCAL_DIR/.opencode/opencode.json" "local"
+fi
+
+[[ ${#ENTRIES[@]} -eq 0 ]] && die "$PACKAGE_NAME is not registered in any opencode config (scope: $SCOPE) — add it to tui.json or opencode.json first"
+
+# ---------------------------------------------------------------------------
+# Check + update (only this plugin's entries)
+# ---------------------------------------------------------------------------
+
+UPDATES=0
+FAILS=0
+
+for i in "${!ENTRIES[@]}"; do
+  spec="${ENTRIES[$i]}"
+  scope="${ENTRY_SCOPE[$i]}"
+  IFS=$'\t' read -r name version <<< "$(split_spec "$spec")"
+
+  latest="$(npm_latest "$name")"
+  if [[ -z "$latest" ]]; then
+    log "skip $name — could not resolve latest version from registry"
+    FAILS=$((FAILS + 1))
+    continue
+  fi
+
+  current="$(installed_version "$name" "$(cache_dir_spec "$name" "$version")")"
+  if [[ -z "$current" ]]; then
+    log "info  $name — not found in cache ($(cache_dir_spec "$name" "$version")); pin it first"
+    FAILS=$((FAILS + 1))
+    continue
+  fi
+
+  if ! semver_gt "$latest" "$current"; then
+    log "ok    $name — installed $current = latest $latest (up to date)"
+    continue
+  fi
+
+  UPDATES=$((UPDATES + 1))
+  local_args=()
+  [[ "$scope" == "global" ]] && local_args+=(--global)
+
+  if [[ "$CHECK" -eq 1 || "$DRY_RUN" -eq 1 ]]; then
+    log "outdated $name — installed $current → latest $latest"
+    [[ "$DRY_RUN" -eq 1 ]] && log "  would run: opencode plugin $name@$latest --force ${local_args[*]}"
+    continue
+  fi
+
+  log "update $name — $current → $latest"
+  if ! opencode plugin "$name@$latest" --force "${local_args[@]}"; then
+    FAILS=$((FAILS + 1))
+  fi
+done
+
+if [[ "$CHECK" -eq 1 && "$UPDATES" -gt 0 ]]; then
+  exit 2
+fi
+[[ "$FAILS" -gt 0 ]] && exit 1
+exit 0

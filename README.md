@@ -120,6 +120,43 @@ Add the plugin to your TUI config (`~/.config/opencode/tui.json` user-level, `.o
 
 OpenCode resolves npm package names for TUI plugins and installs them automatically — there is no `npm install` step. The plugin registers the `sidebar_content` slot with `order: 95` on load — no manual slot configuration is needed. **Restart OpenCode** after changing a TUI plugin or its `tui.json` entry.
 
+### Updating
+
+OpenCode installs plugins **cache-first**: once `opencode-tokenmeter-tui` is in the package cache, it is reused forever and newer npm releases are never picked up automatically (there is no auto-update). To update, run the official command with the new version pinned:
+
+```bash
+opencode plugin opencode-tokenmeter-tui@1.0.1 --force
+```
+
+The version pin creates a fresh cache directory and `--force` replaces the config entry — do not delete the cache by hand.
+
+This repo also ships an update helper (also exposed as the `opencode-tokenmeter-tui` bin via `npx`):
+
+```bash
+scripts/update-plugin --check     # report if this plugin is outdated, change nothing
+scripts/update-plugin             # update this plugin via the official command
+scripts/update-plugin --dry-run   # show the exact command first
+```
+
+It reads your opencode configs (global + local), finds this plugin's entry, compares the installed version against the registry, and runs the official command when outdated. It only ever updates this plugin — other plugins are left untouched.
+
+**Quick reference** — see the versions and update from bash:
+
+```bash
+# Installed version (what opencode actually loads from its cache)
+scripts/update-plugin --check                      # "installed 1.0.1 = latest 1.0.1" or "installed 1.0.0 → latest 1.0.1"
+
+# Latest published version on npm (independent of your install)
+npm view opencode-tokenmeter-tui version
+
+# Update to the latest published version
+scripts/update-plugin                              # safe: runs `opencode plugin opencode-tokenmeter-tui@<latest> --force`
+# or manually:
+opencode plugin opencode-tokenmeter-tui@<latest> --force
+```
+
+`--check` exits `2` when an update is available (CI-friendly); the update itself prints the official command it runs. Restart OpenCode after updating.
+
 <details>
 <summary><strong>Local development instead of the npm package</strong></summary>
 
@@ -181,36 +218,6 @@ The suite runs **99 tests / 0 failures across 3 files** (899 `expect` calls) on 
 - Every release needs a **curated release notes body** in the single current release document `docs/releases/<tag>.md`. The lifecycle keeps exactly one document: for a new release, `git mv docs/releases/<old-tag>.md docs/releases/<new-tag>.md`, replace its content with the narrative body (meaningful sections, PR/issue links — see the template in the `ci-cd-and-automation` skill assets), bump the package version, commit, then tag. The release preflight fails the release when `docs/releases/` has zero or multiple documents, the document name does not match the tag, or the body is empty, placeholder-filled, malformed, or mismatched to the tag/version — the GitHub Release is created from that file only, never from a raw commit list.
 - Publishing uses npm **Trusted Publishing (OIDC)** with provenance: no npm tokens exist, and publication runs in the protected `release` environment.
 - The first-ever publish is a one-time **manual authenticated bootstrap** (dist-tag `bootstrap`); the procedure, the npmjs trusted-publisher binding, and the full control list live in [docs/release-security.md](docs/release-security.md).
-
----
-
-## Project structure
-
-```text
-.
-├── src/
-│   ├── tokenmeter.tsx         # entry: event wiring, kv state, slot registration
-│   └── tokenmeter/            # modules: store, reconcile, tree, groups,
-│                              #   project, db, math, numbers, format,
-│                              #   text, glyphs, types + panel/ (entry,
-│                              #   group-rows, project-section)
-├── test/                      # 107 bun:test tests (harness, render, artifact)
-├── scripts/
-│   ├── build.ts               # bundled dist with the reactive-binding guard
-│   └── release-*              # release pipeline hooks (preflight, publish, verify)
-├── skills/
-│   ├── opencode-plugin/       # versioned plugin-development skill (authoritative)
-│   └── npm-secure-config/     # npm/pnpm/Bun security-configuration skill
-├── docs/                      # CODEBASE-GUIDE, codebase/, adr/, releases/
-│                              #   (single current release document), icons/
-│                              #   (exact Nerd Font glyph SVGs), skill-style-guide
-├── openspec/                  # spec-driven requirements (specs/, changes/)
-├── PRD.md
-├── ARCHITECTURE.md
-├── DESIGN.md
-├── AGENTS.md
-└── package.json
-```
 
 ---
 
