@@ -33,6 +33,7 @@ Every file belongs to exactly one concern: the entry (`tokenmeter.tsx`) only wir
 | [src/tokenmeter/panel/](../src/tokenmeter/panel/) | Rendering and layout: panel composition, metric rows, group rows, scrollbox | `index.tsx`, `group-rows.tsx`, `project-section.tsx` |
 | [src/tokenmeter/math.ts](../src/tokenmeter/math.ts) | Pure helpers: usage math, numeric formatting, line formatting, column math, glyphs, types | `numbers.ts`, `format.ts`, `text.ts`, `glyphs.ts`, `types.ts` |
 | [scripts/build.ts](../scripts/build.ts) | Build and artifact guard: bundled dist, reactive-binding assertion, dist test | `test/artifact.test.ts` |
+| [scripts/update-plugin](../scripts/update-plugin) | Update helper (also the `opencode-tokenmeter-tui` bin): checks this plugin against the npm registry and runs the official `opencode plugin <name>@<version> --force` update | `package.json` (`bin`, `files`) |
 | [test/harness.test.ts](../test/harness.test.ts) | Test suites: harness (modules), render (panel), artifact (dist) | `test/render.test.tsx`, `test/artifact.test.ts` |
 
 ## Recommended Reading Path
