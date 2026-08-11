@@ -15,7 +15,10 @@
       "import": "./dist/tui.js"
     }
   },
-  "files": ["dist"],
+  "files": ["dist", "scripts/update-plugin"],
+  "bin": {
+    "opencode-tokenmeter-tui": "./scripts/update-plugin"
+  },
   "keywords": ["opencode", "opencode-plugin", "plugin", "tokenmeter", "tui"],
   "license": "MIT",
   "author": "jonasotoaguilar",
@@ -54,7 +57,8 @@
     "biome:check": "biome check src test scripts tsconfig.json tsconfig.test.json tsconfig.build.json",
     "biome:format": "biome format --write src test scripts tsconfig.json tsconfig.test.json tsconfig.build.json",
     "hooks:install": "lefthook install",
-    "pack:dry-run": "bun pm pack --dry-run"
+    "pack:dry-run": "bun pm pack --dry-run",
+    "update-plugin": "./scripts/update-plugin"
   },
   "publishConfig": {
     "access": "public",
