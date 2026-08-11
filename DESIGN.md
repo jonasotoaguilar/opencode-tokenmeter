@@ -90,7 +90,7 @@ The panel uses the terminal's own mono font — no sizes, weights, or families a
 
 Panel structure, top to bottom, with the content width = sidebar slot width − 2 (one host column each side):
 
-1. **Title row** — `TokenMeter` (`text`) + ` 1.0.0` (`textMuted`), flush left.
+1. **Title row** — `TokenMeter` (`text`) + ` 1.0.1` (`textMuted`), flush left.
 2. **Project section** — `Project` accent label + two metric rows (see below); `…` placeholder while no snapshot exists; a single `error` line replaces/joins it on failure.
 3. **Session section** — `Session` accent label + the same two metric rows.
 4. **Subagents row** — accent label + chevron (`▶` collapsed / `▼` expanded), the ONLY toggle; collapsed shows nothing below it.

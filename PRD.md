@@ -51,7 +51,7 @@ The TUI host gives plugins no session-select event and no persisted "usage" prim
 
 ### Non-functional
 
-- N1: The shipped `dist/tokenmeter.js` artifact must contain real Solid reactive bindings (`effect`/`insert`/`insertNode`) and zero eager `jsxDEV` usage — asserted post-build so a broken build cannot silently ship (a panel that never repaints is a hard failure).
+- N1: The shipped `dist/tui.js` artifact must contain real Solid reactive bindings (`effect`/`insert`/`insertNode`) and zero eager `jsxDEV` usage — asserted post-build so a broken build cannot silently ship (a panel that never repaints is a hard failure). The published package must expose the entrypoint pair `dist/tui.js` + `dist/tui.d.ts` via `exports["./tui"]` (OpenCode's resolution path for npm TUI plugins) and must never ship `index.*` — the package is TUI-only and has no plugin server/runtime.
 - N2: Refreshes are debounced (300 ms reconcile, 100 ms idle, 2 s maintenance tree tick, 2 s project poll) so an event burst yields one repaint; the project poll never overlaps an in-flight refresh and is disposed with the plugin.
 - N3: The suite runs with `bun test`: 107 tests across `test/harness.test.ts` (module behavior), `test/render.test.tsx` (real-panel repaint without remount), and `test/artifact.test.ts` (compiled-artifact regression guard including a `bun:sqlite` load check).
 - N4: CI gates: frozen install, typecheck, unit tests with coverage, build, dist smoke test, audit, pack dry-run, Biome check.
@@ -94,4 +94,4 @@ The TUI host gives plugins no session-select event and no persisted "usage" prim
 - **Polling cadence**: the ~2 s project poll bounds cross-process freshness but adds client round-trips; the poll never overlaps an in-flight refresh and is disposed with the plugin.
 - **Event ordering**: message/part events may arrive out of order; the generation counter drops stale async reconcile results, and upsert-by-ID makes totals order-independent.
 - **Font dependency**: without Nerd Fonts the PUA glyphs render as missing characters; the panel degrades but does not crash.
-- **Open question — panel version**: the title row currently shows a hardcoded `1.0.0`; whether it should track the package version is left to a later release.
+- **Open question — panel version**: the title row currently shows a hardcoded `1.0.1`; whether it should track the package version is left to a later release.

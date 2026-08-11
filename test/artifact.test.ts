@@ -9,25 +9,33 @@
  * source tests always run with the correct transform regardless of what the
  * production loading boundary does.
  *
- * This test inspects the COMPILED artifact (dist/tokenmeter.js)
- * produced by `bun run build`, not the source under the preload:
+ * This test inspects the COMPILED artifact (dist/tui.js) produced by
+ * `bun run build`, not the source under the preload:
  *  - the artifact must carry the Solid transform's reactive bindings
  *    (effect/insert/insertNode from @opentui/solid) and no eager jsxDEV
  *    runtime usage;
  *  - importing the artifact must yield the TokenMeter plugin module
  *    (default export with the "tokenmeter" id and a `tui` function)
  *    without starting any interactive TUI;
- *  - dist/tokenmeter.js must exist and be the compiled artifact, not the
- *    source .tsx, so the reactive bundle is what actually ships.
+ *  - dist/tui.js must exist and be the compiled artifact, not the source
+ *    .tsx, so the reactive bundle is what actually ships;
+ *  - the public surface is exactly dist/tui.js + dist/tui.d.ts — OpenCode
+ *    resolves npm TUI plugins through `exports["./tui"]`, so the obsolete
+ *    `dist/tokenmeter.js` and any `index.*` artifacts are a packaging bug
+ *    (the package failed to load as opencode-tokenmeter-tui@1.0.0 for
+ *    exactly that reason) and must never return.
  */
 import { describe, expect, test } from "bun:test"
-import { readFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+import { readdirSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
-const ARTIFACT_PATH = resolve(REPO_ROOT, "dist/tokenmeter.js")
+const ARTIFACT_PATH = resolve(REPO_ROOT, "dist/tui.js")
+const DECLARATION_PATH = resolve(REPO_ROOT, "dist/tui.d.ts")
+const DIST_DIR = resolve(REPO_ROOT, "dist")
 
-describe("production TokenMeter artifact (dist/tokenmeter.js)", () => {
+describe("production TokenMeter artifact (dist/tui.js)", () => {
   test("contains reactive OpenTUI bindings, not eager JSX", () => {
     const code = readFileSync(ARTIFACT_PATH, "utf8")
 
@@ -49,13 +57,14 @@ describe("production TokenMeter artifact (dist/tokenmeter.js)", () => {
   })
 
   test("exports the TokenMeter TUI plugin module without starting a TUI", async () => {
-    // The compiled artifact ships without a declaration file; it is the
-    // runtime plugin module under test.
-    // @ts-expect-error - dist/tokenmeter.js is untyped generated output
-    const mod = await import("../dist/tokenmeter.js")
+    // The path is runtime-computed, so TypeScript types this dynamic import
+    // as `any` whether or not dist/ exists (a fresh checkout has no build).
+    const mod = (await import(ARTIFACT_PATH)) as {
+      default?: { id?: unknown; tui?: unknown }
+    }
     expect(mod.default).toBeDefined()
-    expect(mod.default.id).toBe("tokenmeter")
-    expect(typeof mod.default.tui).toBe("function")
+    expect(mod.default?.id).toBe("tokenmeter")
+    expect(typeof mod.default?.tui).toBe("function")
   })
 
   test("REGRESSION: the artifact loads bun:sqlite and can execute a real SQLite statement", async () => {
@@ -69,8 +78,8 @@ describe("production TokenMeter artifact (dist/tokenmeter.js)", () => {
     // The artifact module graph loads in the Bun runtime (its top-level
     // bun:sqlite import resolves), and the runtime executes real SQLite
     // statements — the same path the TUI host will take.
-    // @ts-expect-error - dist/tokenmeter.js is untyped generated output
-    await import("../dist/tokenmeter.js")
+    const mod = (await import(ARTIFACT_PATH)) as { default?: unknown }
+    expect(mod.default).toBeDefined()
     const { Database } = await import("bun:sqlite")
     const db = new Database(":memory:")
     db.exec("CREATE TABLE t (id TEXT PRIMARY KEY)")
@@ -110,14 +119,35 @@ describe("production TokenMeter artifact (dist/tokenmeter.js)", () => {
     expect(code).toContain("Unable to load project data")
   })
 
-  test("dist/tokenmeter.js exists and is the compiled artifact, not the source .tsx", () => {
+  test("dist/tui.js exists and is the compiled artifact, not the source .tsx", () => {
     // There is no tui.json in this repository; the published package ships
-    // dist/tokenmeter.js. The artifact must be the compiled plugin module:
-    // the Solid transform's reactive bindings only exist in compiled output —
+    // dist/tui.js. The artifact must be the compiled plugin module: the
+    // Solid transform's reactive bindings only exist in compiled output —
     // the source .tsx never contains them.
     const code = readFileSync(ARTIFACT_PATH, "utf8")
     expect(code).toMatch(/effect as _\$effect/)
     expect(code).toMatch(/insertNode as _\$insertNode/)
+  })
+
+  test("REGRESSION: dist ships exactly tui.js + tui.d.ts — the broken tokenmeter.js and index.* names must never return", () => {
+    // The package failed to load as opencode-tokenmeter-tui@1.0.0 because it
+    // shipped dist/tokenmeter.js with no exports map. The dist surface is
+    // now contract: exactly the TUI entrypoint pair, nothing else.
+    const entries = readdirSync(DIST_DIR)
+      .filter((name) => name.endsWith(".js") || name.endsWith(".d.ts"))
+      .sort()
+    expect(entries).toEqual(["tui.d.ts", "tui.js"])
+  })
+
+  test("dist/tui.d.ts declares the real default export and is usable by TypeScript", () => {
+    // The declaration is emitted from the source entry by the project's own
+    // TypeScript during `bun run build`; it must describe the actual default
+    // export ({ id, tui }) with the host's TuiPlugin type.
+    const decl = readFileSync(DECLARATION_PATH, "utf8")
+    expect(decl).toContain("export default plugin")
+    expect(decl).toContain('from "@opencode-ai/plugin/tui"')
+    expect(decl).toContain("id: string")
+    expect(decl).toContain("tui: TuiPlugin")
   })
 })
 
@@ -140,5 +170,39 @@ describe("package manifest identity", () => {
       access: "public",
       provenance: true,
     })
+  })
+
+  test("REGRESSION: main/types/exports resolve the TUI entrypoint pair via the ./tui subpath", () => {
+    const manifest = JSON.parse(
+      readFileSync(resolve(REPO_ROOT, "package.json"), "utf8"),
+    )
+    expect(manifest.main).toBe("./dist/tui.js")
+    expect(manifest.types).toBe("./dist/tui.d.ts")
+    expect(manifest.exports).toEqual({
+      ".": { types: "./dist/tui.d.ts", import: "./dist/tui.js" },
+      "./tui": { types: "./dist/tui.d.ts", import: "./dist/tui.js" },
+    })
+    // A TUI-only package has no server/runtime entry: the exports map must
+    // never reference index.* — the missing exports["."] or a null exports
+    // map is exactly the defect that made 1.0.0 unloadable.
+    expect(JSON.stringify(manifest.exports)).not.toMatch(/index\./)
+  })
+
+  test("REGRESSION: the packed tarball ships dist/tui.js + dist/tui.d.ts and never the obsolete names", () => {
+    // Dry-run with --ignore-scripts: the tarball listing reflects the dist/
+    // on disk (built by test:dist), not a re-build. This is the exact gate
+    // a publisher runs before shipping — a stale dist/tokenmeter.js or an
+    // accidental index.* would fail right here.
+    const result = spawnSync(
+      "bun",
+      ["pm", "pack", "--dry-run", "--ignore-scripts"],
+      { cwd: REPO_ROOT, encoding: "utf8" },
+    )
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain("dist/tui.js")
+    expect(result.stdout).toContain("dist/tui.d.ts")
+    expect(result.stdout).not.toContain("dist/tokenmeter.js")
+    expect(result.stdout).not.toContain("dist/index.js")
+    expect(result.stdout).not.toContain("dist/index.d.ts")
   })
 })

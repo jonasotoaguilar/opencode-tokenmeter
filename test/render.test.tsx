@@ -1090,7 +1090,7 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
     const collapsedFrame = setupCollapsed.captureCharFrame()
     // Clean title: no leading gap (flush left like Project/Session), no
     // chevron, and the chevron lives after Subagents instead.
-    expect(collapsedFrame).toContain("TokenMeter 1.0.0")
+    expect(collapsedFrame).toContain("TokenMeter 1.0.1")
     expect(collapsedFrame).not.toContain(GLYPH.expand + " TokenMeter")
     // Minimized shows only the Subagents row with the chevron right after
     // the label (one visible space); no robot/count/task metrics, no group rows.

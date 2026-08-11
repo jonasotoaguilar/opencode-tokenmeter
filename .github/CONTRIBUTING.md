@@ -36,7 +36,7 @@ Run all of these locally; CI enforces the same gates:
 ```bash
 bun run typecheck    # tsc --noEmit over source and tests
 bun run test         # bun test (unit + render + artifact suites)
-bun run build        # bundle dist/tokenmeter.js with the Solid transform
+bun run build        # bundle dist/tui.js + dist/tui.d.ts with the Solid transform
 bun run test:dist    # build first, then the dist artifact regression test
 bun run audit        # bun audit — zero known vulnerabilities
 bun run pack:dry-run # inspect the published tarball contents

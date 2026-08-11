@@ -128,7 +128,7 @@ Point at the built artifact (run `bun run build` first):
 ```json
 {
   "$schema": "https://opencode.ai/tui.json",
-  "plugin": ["/abs/path/to/opencode-tokenmeter/dist/tokenmeter.js"]
+  "plugin": ["/abs/path/to/opencode-tokenmeter/dist/tui.js"]
 }
 ```
 
@@ -136,7 +136,7 @@ Point at the built artifact (run `bun run build` first):
 
 ### 2. Verify
 
-Open a session and check the right sidebar: a `TokenMeter 1.0.0` panel with `Project` and `Session` metric rows appears. The `Subagents ▶` row expands the delegation list; the panel starts collapsed.
+Open a session and check the right sidebar: a `TokenMeter 1.0.1` panel with `Project` and `Session` metric rows appears. The `Subagents ▶` row expands the delegation list; the panel starts collapsed.
 
 <img src="docs/assets/brand/tokenmeter-sidebar.png" alt="TokenMeter sidebar screenshot" width="378">
 
@@ -157,15 +157,15 @@ bun install          # frozen lockfile preferred after first install
 | `bun run typecheck` | `tsc -p tsconfig.json && tsc -p tsconfig.test.json` |
 | `bun run test` | Unit tests (bun:test) — no build required |
 | `bun run coverage` | Tests with coverage (lcov + text) — the gate keeps every source file at ≥80% statements/functions/lines; Bun has no branch metric; `dist/**` excluded as generated output |
-| `bun run build` | Bundles `src/tokenmeter.tsx` into `dist/tokenmeter.js` via `scripts/build.ts` |
-| `bun run test:dist` | `bun run build` first, then the artifact regression test against `dist/tokenmeter.js` |
+| `bun run build` | Bundles `src/tokenmeter.tsx` into `dist/tui.js` (with `dist/tui.d.ts`) via `scripts/build.ts` |
+| `bun run test:dist` | `bun run build` first, then the artifact regression test against `dist/tui.js` |
 | `bun run audit` | `bun audit` |
 | `bun run biome:check` | Read-only Biome gate: formatter + linter over `src`, `test`, `scripts`, TS configs |
 | `bun run biome:format` | Apply the Biome formatter to the same files |
 | `bun run hooks:install` | Install the repo-local Lefthook pre-commit hook |
 | `bun run pack:dry-run` | Inspect the tarball contents before publishing |
 
-The suite runs **99 tests / 0 failures across 3 files** (899 `expect` calls) on Bun 1.3.11. `test` and `test:dist` are distinct on purpose: the unit suite never needs a build, and the dist test is never silently skipped — it fails hard if `dist/tokenmeter.js` is missing or non-reactive.
+The suite runs **99 tests / 0 failures across 3 files** (899 `expect` calls) on Bun 1.3.11. `test` and `test:dist` are distinct on purpose: the unit suite never needs a build, and the dist test is never silently skipped — it fails hard if `dist/tui.js` is missing or non-reactive.
 
 ### The build guard
 

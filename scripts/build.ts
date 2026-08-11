@@ -15,16 +15,27 @@
  * The post-build assertion fails loudly if the artifact ever degrades back
  * to an eager JSX shape, so a broken build cannot silently ship.
  *
+ * The public entrypoints are exactly `dist/tui.js` + `dist/tui.d.ts`
+ * (OpenCode resolves npm TUI plugins through `exports["./tui"]`, never
+ * through `main`). The bundle derives its filename from the entry
+ * (`src/tokenmeter.tsx` → `tokenmeter.js`), so the build renames it to
+ * `tui.js` and emits the entry declaration with the project's own
+ * TypeScript as `tui.d.ts`. No `index.*` artifacts exist: this package is
+ * TUI-only and has no plugin server/runtime entry.
+ *
  * Usage: `bun run build` (or `bun scripts/build.ts`).
  */
-import { readFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+import { mkdirSync, readFileSync, renameSync, rmSync } from "node:fs"
 import { resolve } from "node:path"
 import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
 
 const ROOT = resolve(import.meta.dir, "..")
 const ENTRY = resolve(ROOT, "src/tokenmeter.tsx")
 const OUTDIR = resolve(ROOT, "dist")
-const ARTIFACT = resolve(OUTDIR, "tokenmeter.js")
+const ARTIFACT = resolve(OUTDIR, "tui.js")
+const DECLARATION = resolve(OUTDIR, "tui.d.ts")
+const DTS_OUT = resolve(OUTDIR, ".dts")
 
 // Shared runtime packages stay external, exactly like the working
 // opencode-subagent-statusline dist: the TUI host provides them at load
@@ -36,6 +47,10 @@ const EXTERNAL = [
   "@opentui/solid",
   "solid-js",
 ]
+
+// Fresh outdir: a stale `dist/tokenmeter.js` from an older build must never
+// survive into the shipped surface (the dist surface is exactly the TUI pair).
+rmSync(OUTDIR, { recursive: true, force: true })
 
 const result = await Bun.build({
   entrypoints: [ENTRY],
@@ -54,6 +69,11 @@ if (!result.success) {
   for (const log of result.logs) console.error(log)
   process.exit(1)
 }
+
+// The bundle is emitted as `tokenmeter.js` (derived from the entry file
+// name); the public artifact must be `dist/tui.js`. Rename before the
+// reactive-binding guard so the shipped name is what gets verified.
+renameSync(resolve(OUTDIR, "tokenmeter.js"), ARTIFACT)
 
 // Reactive-binding guard. The Solid transform emits imports of the form
 // `effect as _$effect` / `insert as _$insert` from @opentui/solid and calls
@@ -115,5 +135,25 @@ if (failures > 0) {
   process.exit(1)
 }
 
+// Public declaration: emit the entry's `.d.ts` deterministically with the
+// project's own TypeScript (declaration-only, scoped to the entry via
+// tsconfig.build.json) into a temporary folder, then keep exactly the entry
+// declaration as `dist/tui.d.ts`. The declaration describes the real default
+// export ({ id, tui }) and is usable by TypeScript consumers.
+rmSync(DTS_OUT, { recursive: true, force: true })
+mkdirSync(DTS_OUT, { recursive: true })
+const tsc = spawnSync(
+  resolve(ROOT, "node_modules/.bin/tsc"),
+  ["-p", resolve(ROOT, "tsconfig.build.json")],
+  { stdio: "inherit" },
+)
+if (tsc.status !== 0) {
+  console.error("TokenMeter declaration emit failed; refusing to ship")
+  process.exit(1)
+}
+renameSync(resolve(DTS_OUT, "tokenmeter.d.ts"), DECLARATION)
+rmSync(DTS_OUT, { recursive: true, force: true })
+
 console.log(`TokenMeter artifact: ${ARTIFACT}`)
+console.log(`TokenMeter declaration: ${DECLARATION}`)
 console.log(`Reactive bindings: effect + insert + insertNode, no eager JSX`)
