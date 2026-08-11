@@ -20,6 +20,7 @@ Load when creating or modifying OpenCode plugins: TUI plugins, sidebar UI, Solid
 - **Installed-type verification**: verify exact SDK method signatures against INSTALLED `@opencode-ai/plugin/dist/tui.d.ts` and `@opencode-ai/sdk/dist/v2/gen/sdk.gen.d.ts`; no `api.client.experimental.*` client path (`experimental.*` are hook names only); pass `directory` from `api.state.path.directory` to `project.current`/`session.list` — `references/tui-api.md`.
 - **Testing**: `references/testing.md`; TUI plugins also run the production artifact check — preload-backed render tests don't prove the `tui.json` loading boundary.
 - **Pre-publish gates**: `typecheck`, `test`, `audit --prod`, `pack --dry-run`, direct-dist testing — `references/build-and-release.md`.
+- **Runtime dependency packaging**: every module the compiled artifact imports at runtime MUST be declared in `dependencies` of the published package — consumers install only `dependencies`, never `devDependencies` (a TUI bundle importing `@opentui/solid`/`solid-js` that ships them only as devDeps fails to load after install). Check the bundle's bare imports before publishing — `references/publishing.md`.
 
 ## Decision Gates
 

@@ -122,16 +122,16 @@ describe("production TokenMeter artifact (dist/tokenmeter.js)", () => {
 })
 
 describe("package manifest identity", () => {
-  test("ships the scoped npm name and only the intended files", () => {
-    // The unscoped `opencode-tokenmeter` is registry-blocked (npm E403 —
-    // too similar to the existing `opencode-token-meter`), so the package
-    // identity is the scoped @jonasotoaguilar/opencode-tokenmeter while the
-    // GitHub repository keeps its unscoped path. The tarball must report
-    // the scoped name and ship only dist/.
+  test("ships the unscoped npm name and only the intended files", () => {
+    // Both `opencode-tokenmeter` (E403 — too similar to `opencode-token-meter`)
+    // and the scoped `@jonasotoaguilar/opencode-tokenmeter` were rejected, so
+    // the package identity is the unscoped `opencode-tokenmeter-tui` while the
+    // GitHub repository keeps its path. The tarball must report the package
+    // name and ship only dist/.
     const manifest = JSON.parse(
       readFileSync(resolve(REPO_ROOT, "package.json"), "utf8"),
     )
-    expect(manifest.name).toBe("@jonasotoaguilar/opencode-tokenmeter")
+    expect(manifest.name).toBe("opencode-tokenmeter-tui")
     expect(manifest.files).toEqual(["dist"])
     expect(manifest.repository.url).toBe(
       "https://github.com/jonasotoaguilar/opencode-tokenmeter.git",

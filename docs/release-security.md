@@ -1,6 +1,6 @@
 # Release pipeline security
 
-The release pipeline publishes `@jonasotoaguilar/opencode-tokenmeter` to npm and creates the GitHub Release from a stable `vX.Y.Z` tag. Publication is protected by controls enforced in this repository (`.github/workflows/release.yml` + the `scripts/release-*` hooks) and by one-time administrative configuration on npmjs and GitHub that a maintainer must establish — see [One-time administrative setup](#one-time-administrative-setup). The package is currently **unpublished** (npm E404), and Trusted Publishing cannot create it: the **first-ever publish must be a one-time authenticated bootstrap** performed manually ([step 0](#one-time-administrative-setup)); only after the package exists can the trusted publisher be configured and the OIDC workflow take over for every subsequent release.
+The release pipeline publishes `opencode-tokenmeter-tui` to npm and creates the GitHub Release from a stable `vX.Y.Z` tag. Publication is protected by controls enforced in this repository (`.github/workflows/release.yml` + the `scripts/release-*` hooks) and by one-time administrative configuration on npmjs and GitHub that a maintainer must establish — see [One-time administrative setup](#one-time-administrative-setup). The package is currently **unpublished** (npm E404), and Trusted Publishing cannot create it: the **first-ever publish must be a one-time authenticated bootstrap** performed manually ([step 0](#one-time-administrative-setup)); only after the package exists can the trusted publisher be configured and the OIDC workflow take over for every subsequent release.
 
 ## Controls enforced in this repository
 
@@ -34,16 +34,16 @@ Account authority on npmjs and GitHub — not performed from this repository, an
    npm publish --provenance=false --tag bootstrap              # creates the package
    ```
 
-   - The package identity is scoped: the unscoped `opencode-tokenmeter` is rejected by the registry (npm E403 — too similar to the existing `opencode-token-meter`), so the npm package is `@jonasotoaguilar/opencode-tokenmeter`; the GitHub repository keeps its unscoped path `jonasotoaguilar/opencode-tokenmeter`. Confirm `npm view @jonasotoaguilar/opencode-tokenmeter version` returns E404 (never retry the blocked unscoped name) immediately before publishing.
+   - The package identity is unscoped: the unscoped `opencode-tokenmeter` is rejected by the registry (npm E403 — too similar to the existing `opencode-token-meter`), so the npm package is `opencode-tokenmeter-tui`; the GitHub repository keeps its path `jonasotoaguilar/opencode-tokenmeter`. The former scoped package `@jonasotoaguilar/opencode-tokenmeter` was unpublished/deprecated in favor of this name. Confirm `npm view opencode-tokenmeter-tui version` returns E404 (never retry the blocked `opencode-tokenmeter` name) immediately before publishing.
 
    - The build is invoked explicitly because npm lifecycle scripts may be disabled (`ignore-scripts=true`), in which case `prepack` never runs — without the explicit build the tarball would ship stale or missing `dist/`.
 
-   - `0.1.0-bootstrap.0` is a semver prerelease of the intended first stable `0.1.0`: it can never collide with the later stable release, and the dist-tag `bootstrap` keeps it off `latest` (a dist-tag is never removed implicitly).
+   - `1.0.0-bootstrap.0` is a semver prerelease of the intended first stable `1.0.0`: it can never collide with the later stable release, and the dist-tag `bootstrap` keeps it off `latest` (a dist-tag is never removed implicitly).
    - `--provenance=false` is required: `publishConfig.provenance: true` would make the local publish attempt OIDC provenance, which only exists inside the CI workflow's OIDC identity — a manual publish cannot mint it. The bootstrap package therefore ships without a provenance attestation (expected and documented).
-   - Verification: `npm view @jonasotoaguilar/opencode-tokenmeter@bootstrap version` returns the bootstrap version; `npm dist-tag ls @jonasotoaguilar/opencode-tokenmeter` shows `bootstrap` only.
-   - Rollback: prefer `npm deprecate @jonasotoaguilar/opencode-tokenmeter@0.1.0-bootstrap.0 "bootstrap placeholder — do not use"` and remove the `bootstrap` dist-tag after the first stable release (`npm dist-tag rm @jonasotoaguilar/opencode-tokenmeter bootstrap`). Only `npm unpublish --force` within the 72h window when immediate removal is truly needed — unpublishing the package's only version can trigger npm's 24-hour republish block for that version.
+   - Verification: `npm view opencode-tokenmeter-tui@bootstrap version` returns the bootstrap version; `npm dist-tag ls opencode-tokenmeter-tui` shows `bootstrap` only.
+   - Rollback: prefer `npm deprecate opencode-tokenmeter-tui@1.0.0-bootstrap.0 "bootstrap placeholder — do not use"` and remove the `bootstrap` dist-tag after the first stable release (`npm dist-tag rm opencode-tokenmeter-tui bootstrap`). Only `npm unpublish --force` within the 72h window when immediate removal is truly needed — unpublishing the package's only version can trigger npm's 24-hour republish block for that version.
 
-1. **npmjs trusted publisher**: in the package's Access Tokens settings, choose *Publish with GitHub Actions* and bind `@jonasotoaguilar/opencode-tokenmeter` to:
+1. **npmjs trusted publisher**: in the package's Access Tokens settings, choose *Publish with GitHub Actions* and bind `opencode-tokenmeter-tui` to:
    - owner/repo: `jonasotoaguilar/opencode-tokenmeter`
    - workflow filename: `release.yml`
    - environment: `release`
@@ -58,7 +58,7 @@ Not covered by Trusted Publishing: administrative npm actions that are not publi
 - [ ] The package exists on npm (the initial authenticated bootstrap publish ran before any trusted publisher was configured).
 - [ ] Workflow file is still named `release.yml` and the publication job still uses `environment: release` — the npmjs binding matches these literally.
 - [ ] No `NPM_TOKEN`/`NODE_AUTH_TOKEN` appears in `.github/workflows/release.yml` or the `release` environment's secrets.
-- [ ] npmjs trusted publisher is configured for `jonasotoaguilar/opencode-tokenmeter` with workflow `release.yml` and environment `release`.
+- [ ] npmjs trusted publisher is configured for `opencode-tokenmeter-tui` with workflow `release.yml` and environment `release`.
 - [ ] The npm 12 pin step (`npm install -g npm@12`) is present in the publication job before the publish hook.
 - [ ] `docs/releases/` contains exactly one markdown file, `docs/releases/<tag>.md`, at every tagged commit with curated narrative notes (drift happens when a tag is cut without renaming/replacing the current release document).
 - [ ] A first OIDC publish succeeded and the published package shows a provenance attestation.
