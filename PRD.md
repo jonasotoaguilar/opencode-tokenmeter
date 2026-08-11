@@ -27,7 +27,7 @@ The TUI host gives plugins no session-select event and no persisted "usage" prim
 - Show live Session and Project token usage (context, input, output real, reasoning, cache) and cost in the TUI sidebar.
 - Show the active session's delegation tree: distinct agents, run counts per agent, running state, and per-agent usage, ordered by context weight.
 - Stay live: repaint on new events without remounting the panel, and rehydrate from the authoritative client when the in-memory mirror may be stale.
-- Persist across restarts: panel collapsed/expanded state and the all-time Project history ledger (with tombstones for deleted sessions) in the host `kv` store.
+- Persist across restarts: panel collapsed/expanded state in the host `kv` store and the all-time Project deleted-session aggregate in a plugin-owned SQLite store (live totals come from the authoritative `session.list` on every refresh).
 - Never break an OpenCode turn: every failure path is contained; a failed Project refresh shows a stable error line, never a crash.
 
 ## Requirements
@@ -39,11 +39,11 @@ The TUI host gives plugins no session-select event and no persisted "usage" prim
 - R3: Maintain per-session usage keyed by message ID, upserted (replace, never append) from `message.updated` / `message.part.updated` so repeated events and retries can never double-count.
 - R4: On any relevant event, invalidate the affected session and schedule a debounced reconcile (300 ms; 100 ms on idle) that re-reads the client's authoritative messages (replace, not merge) — a stale in-memory mirror can never win over fresh client data.
 - R5: Discover the delegation tree recursively via `client.session.children()`, caching per-parent child lists, with the whole tree cache purged on `session.created` (parentID can be absent) and a 2 s maintenance timer on the active root as a missed-event safety net.
-- R6: Render the Session section with the headline context (one no-cache context snapshot per session — `input + output + reasoning`, max observed; cache excluded from context by design), thinking and cost on row 1, and the input · output real · cache breakdown on row 2; `delegations` counts all descendant sessions, `agents` counts distinct agent types.
-- R7: Group all descendant sessions by resolved agent type (agent field → subagent_type → `(@agent subagent)` title suffix → "subagent"), ordered by context descending with cost/runs/name as stable tiebreakers.
-- R8: Render the Project section from `client.session.list({ scope: "project" })` filtered by `projectID`, persisted as an all-time ledger in `api.kv` (`tokenmeter.project.history.v1`): live sessions upsert by ID, disappeared sessions become tombstones that keep contributing, and the total is the idempotent sum of the full ledger.
-- R9: On `session.deleted`, persist the delete payload's usage (or the last known snapshot) into the ledger BEFORE the refresh and pass the deleted session's projectID as a refresh hint so the Project section recovers from the ledger even when `project.current()` is momentarily unresolved.
-- R10: Never let an empty/malformed/not-yet-persisted ledger zero out a project the live list visibly carries tokens for: fall back to the live total and rebuild the ledger.
+- R6: Render the Session section with the headline token spend (each session's complete CUMULATIVE spend — `Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write` across ALL its assistant messages, exactly reconstructing the provider `tokens.total`, with every component kept as a per-field high-water so compaction or a smaller later snapshot never lowers it), thinking and cost on row 1, and the input · output real · cache R/W breakdown on row 2; `delegations` counts all descendant sessions, `agents` counts distinct agent types. The coins total is always >= the session's cumulative input + real output.
+- R7: Group all descendant sessions by resolved agent type (agent field → subagent_type → `(@agent subagent)` title suffix → "subagent"), ordered by spend descending with cost/runs/name as stable tiebreakers.
+- R8: Render Project from `client.session.list({ scope: "project", limit: 10000 })` filtered by `projectID` (explicit bounded limit — the SDK defaults to 100 rows): the total is the authoritative LIVE per-session sum of every returned row plus ONE per-project aggregate of DELETED-session usage, persisted in a plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state` — never the host `api.kv`, whose whole-file read-modify-write loses concurrent-TUI updates). Live sessions are NEVER persisted or re-added. A list result at the cap (10_000) is a truncated list and fails closed: the prior snapshot is preserved and the stable error line surfaces — a partial total never renders. Spend is stored explicitly on each snapshot (never derived from cumulative fields), equal to `input + output + reasoning + cacheRead + cacheWrite` and never below `input + output + reasoning`. Deleted sessions contribute exactly once; different projects stay isolated by projectID in the same SQLite file; the obsolete v4 kv ledger is ignored — never read, written or migrated.
+- R9: On `session.deleted`, persist the delete payload's usage (or the last known observed usage) into the SQLite deleted aggregate BEFORE the refresh — one atomic transaction per event (tombstone-admission: `INSERT OR IGNORE` + aggregate increment, so duplicate deliveries and concurrent TUIs count each session exactly once; a delete with no usage never consumes its tombstone). Pass the deleted session's projectID as a refresh hint so the Project section keeps its total even when `project.current()` is momentarily unresolved. No kv readiness gate and no pending-delete queue for Project history.
+- R10: Never let a failure or an empty list zero out a Project the live list visibly carries tokens for: a missing list payload or a truncated (cap-saturated) result is an error — the prior snapshot is preserved and the stable error line surfaces; the deleted aggregate is only ever added, never used to mask live data.
 - R11: Persist the panel expanded/collapsed state in `api.kv` (`tokenmeter.sidebar.expanded`); the panel is collapsed by default and toggled by the Subagents chevron.
 - R12: Resolve the sidebar width from the slot context/props chain (width → columns → cols → size → viewport → bounds), fallback 38, clamped to 24–52.
 - R13: Render every line column-aware (wide/combining codepoints count as real columns) and truncate to the content width so the terminal can never wrap mid-word.
@@ -52,8 +52,8 @@ The TUI host gives plugins no session-select event and no persisted "usage" prim
 ### Non-functional
 
 - N1: The shipped `dist/tokenmeter.js` artifact must contain real Solid reactive bindings (`effect`/`insert`/`insertNode`) and zero eager `jsxDEV` usage — asserted post-build so a broken build cannot silently ship (a panel that never repaints is a hard failure).
-- N2: Refreshes are debounced (300 ms reconcile, 100 ms idle, 2 s maintenance tree tick) so an event burst yields one repaint.
-- N3: The suite runs with `bun test`: 80 tests across `test/harness.test.ts` (module behavior), `test/render.test.tsx` (real-panel repaint without remount), and `test/artifact.test.ts` (compiled-artifact regression guard).
+- N2: Refreshes are debounced (300 ms reconcile, 100 ms idle, 2 s maintenance tree tick, 2 s project poll) so an event burst yields one repaint; the project poll never overlaps an in-flight refresh and is disposed with the plugin.
+- N3: The suite runs with `bun test`: 107 tests across `test/harness.test.ts` (module behavior), `test/render.test.tsx` (real-panel repaint without remount), and `test/artifact.test.ts` (compiled-artifact regression guard including a `bun:sqlite` load check).
 - N4: CI gates: frozen install, typecheck, unit tests with coverage, build, dist smoke test, audit, pack dry-run, Biome check.
 - N5: Runtime packages (`@opencode-ai/plugin`, `@opencode-ai/plugin/tui`, `@opentui/core`, `@opentui/solid`, `solid-js`) stay external — the TUI host provides them at load time; the published package ships only `dist/`.
 - N6: Nerd Fonts must be installed for the PUA glyphs (Octicons/Material/Codicons) to render; the plain tree marker `↳` is Unicode.
@@ -70,7 +70,7 @@ The TUI host gives plugins no session-select event and no persisted "usage" prim
 - Cost alerts, budgets, or rate limiting.
 - Telemetry, analytics, or any outbound network traffic.
 - A non-TUI (web/CLI) surface; the plugin registers only the `sidebar_content` slot.
-- Server-side components or persistence outside the host `kv` store.
+- Server-side components; persistence outside the plugin-owned SQLite store and the host `kv` store (which still holds the panel expanded state).
 
 ## Behavior and success criteria
 
@@ -80,17 +80,18 @@ The TUI host gives plugins no session-select event and no persisted "usage" prim
 | No double counting | Repeated events, retries, and compaction never inflate totals; message usage is keyed by ID and replaced |
 | Freshness wins | An invalidated session re-reads the client messages on the next reconcile; a stale non-empty mirror never wins |
 | Delegation visibility | Descendant sessions appear as agent groups with run counts and usage; 3+ groups scroll inside a 6-row scrollbox |
-| Project survives deletion | Deleting a session never drops its contribution; tombstones keep the all-time total idempotent across refreshes |
-| Restart persistence | Expanded state and the project ledger survive plugin restarts via `api.kv` |
+| Project survives deletion | Deleting sessions records their final usage into the SQLite deleted aggregate exactly once (tombstone admission); the all-time total = live list sum + aggregate and stays idempotent across restarts and concurrent TUIs |
+| Restart persistence | Expanded state survives via `api.kv`; the deleted aggregate survives via `tokenmeter.sqlite` under `api.state.path.state` |
 | No overflow | Lines truncate to the content width at every sidebar width from 24 to 52; the fallback width is 38 |
 | Reactive artifact | `bun run build` fails loudly unless the artifact carries effect/insert/insertNode bindings and no `jsxDEV` |
-| Fail-contained | A failed Project refresh shows the stable "Unable to load project data" line and never touches the Session panel or the turn |
+| Fail-contained | A failed/truncated Project refresh shows the stable "Unable to load project data" line and never touches the Session panel or the turn |
 | CI | All CI gates pass on a clean PR |
 
 ## Risks and open questions
 
 - **TUI API drift**: slot context shape, `api.route`, and the `@opentui/*` rendering APIs are host-owned; the width chain resolver and the artifact assertion contain the drift, but a host upgrade may still require a plugin patch.
-- **kv readiness at startup**: the host kv store becomes ready asynchronously, so a ledger write during startup may be dropped; the live-list fallback (R10) prevents a flashed zero.
+- **List truncation**: `session.list` defaults to `input.limit ?? 100`; the plugin passes an explicit 10_000 limit and fails closed (prior snapshot + stable error) when the result reaches the cap, so a project above the cap cannot be fully shown until the host adds paging/cursors.
+- **Polling cadence**: the ~2 s project poll bounds cross-process freshness but adds client round-trips; the poll never overlaps an in-flight refresh and is disposed with the plugin.
 - **Event ordering**: message/part events may arrive out of order; the generation counter drops stale async reconcile results, and upsert-by-ID makes totals order-independent.
 - **Font dependency**: without Nerd Fonts the PUA glyphs render as missing characters; the panel degrades but does not crash.
 - **Open question — panel version**: the title row currently shows a hardcoded `1.0.0`; whether it should track the package version is left to a later release.

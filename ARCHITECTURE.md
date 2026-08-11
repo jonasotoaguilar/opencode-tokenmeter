@@ -4,7 +4,7 @@
 
 ## System Overview
 
-`opencode-tokenmeter` is an OpenCode TUI plugin that renders a live usage sidebar: per-session token counts, cost, and the delegation tree of the active session. The entry (`src/tokenmeter.tsx`) subscribes to the host's `session`/`message`/`part` events, feeds a reactive usage store, and registers a `sidebar_content` slot (order 95) that renders a collapsible Solid panel. The panel never remounts to repaint: every refresh event invalidates the affected session and schedules a debounced reconcile that rehydrates usage from the authoritative client `session.messages()` endpoint (replace, not merge). A second section aggregates all-time Project usage from `session.list({ scope: "project" })` through a persistent kv ledger (`tokenmeter.project.history.v1`) that tombstones deleted sessions instead of dropping them. The shipped artifact is a bundled ESM file whose reactive bindings are asserted at build time.
+`opencode-tokenmeter` is an OpenCode TUI plugin that renders a live usage sidebar: per-session token spend, cost, and the delegation tree of the active session. The entry (`src/tokenmeter.tsx`) subscribes to the host's `session`/`message`/`part` events, feeds a reactive usage store, and registers a `sidebar_content` slot (order 95) that renders a collapsible Solid panel. The panel never remounts to repaint: every refresh event invalidates the affected session and schedules a debounced reconcile that rehydrates usage from the authoritative client `session.messages()` endpoint (replace, not merge). A second section aggregates all-time Project usage from `session.list({ scope: "project", limit: 10000 })` — the authoritative live per-session sum, refreshed on every render — plus ONE per-project DELETED-session aggregate persisted in a plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`, never `api.kv`, which concurrent TUIs would clobber). The headline coins total is each session's complete CUMULATIVE TOKEN SPEND — `Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write` across ALL assistant messages, the exact reconstruction of OpenCode's billed `tokens.total` — never lowered by compaction or restarts. The shipped artifact is a bundled ESM file whose reactive bindings are asserted at build time.
 
 ## Architecture Pattern
 
@@ -28,6 +28,7 @@ graph TD
         Route["api.route.current"]
         Client["api.client (SDK)"]
         Kv[("api.kv store")]
+        State[("state dir / tokenmeter.sqlite")]
         Slot["sidebar_content slot (order 95)"]
     end
 
@@ -37,7 +38,7 @@ graph TD
         Reconcile["reconcile.ts (debounced)"]
         Tree["tree.ts (delegation discovery)"]
         Project["project.ts (project section)"]
-        Ledger["ledger.ts (kv ledger)"]
+        Db["db.ts (sqlite persistence)"]
         Panel["panel/index.tsx (UsagePanel)"]
         MathFmt["math / numbers / format / text / glyphs"]
     end
@@ -47,15 +48,14 @@ graph TD
     Entry --> Store
     Entry --> Reconcile
     Entry --> Project
-    Entry --> Ledger
+    Project --> Db
     Reconcile --> Tree
     Reconcile --> Store
-    Project --> Ledger
     Project --> Client
     Reconcile --> Client
     Tree --> Client
     Store --> Panel
-    Ledger --> Kv
+    Db --> State
     Entry --> Kv
     Entry --> Slot
     Slot --> Panel
@@ -82,45 +82,51 @@ sequenceDiagram
     R->>R: publish snapshot (root + descendants, groups)
     R-->>H: setSnapshot → panel repaints in place
 
-    Note over E,Kv: session.deleted
-    E->>Kv: persistDeletedSession (ledger tombstone) BEFORE refresh
+    Note over E,Db: session.deleted
+    E->>Db: recordDeletedSession (tombstone-admission transaction, exactly once)
     E->>R: scheduleReconcile + scheduleProjectRefresh(projectIDHint)
-    Note over R,C: failed project.current()/session.list recovers the snapshot from the full ledger sum
+    Note over R,Db: refresh sums live list + SQLite deleted aggregate
 ```
 
 ### Data Model
 
 ```mermaid
 erDiagram
-    ProjectLedger ||--o{ Project : "projects"
-    Project ||--o{ SessionEntry : "sessions"
-    SessionEntry {
+    Project ||--o{ DeletedSession : "tombstones"
+    Project ||--|| DeletedAggregate : "aggregate"
+    DeletedSession {
+        string session_id PK
+        string project_id PK
+    }
+    DeletedAggregate {
+        string project_id PK
         number cost
         number input
         number output
         number reasoning
+        number cacheRead
+        number cacheWrite
         number cache
-        string lastSeen
-        string deletedAt
+        number context
     }
 ```
 
-The kv ledger (key `tokenmeter.project.history.v1`) is a versioned map: `{ v: 1, projects: { [projectID]: { [sessionID]: ProjectLedgerEntry } } }`. Entries are upserted by ID (replace, never accumulate) and never removed — tombstones carry `deletedAt` and keep contributing to the idempotent project total.
+The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`) keeps exactly TWO tables. `projects` holds ONE aggregate row per projectID: the sum of every deleted session's final usage (cost/input/output/reasoning/cacheRead/cacheWrite/cache/context as resolved payload+observed per-component maxima, with `context == input + output + reasoning + cacheRead + cacheWrite`). `tombstones` holds the minimal (sessionID, projectID) exactly-once admission set: a `session.deleted` event opens a `BEGIN IMMEDIATE` transaction, `INSERT OR IGNORE`s its tombstone, and ONLY the transaction that inserted the row increments the aggregate — so duplicate deliveries and concurrent TUIs count each session exactly once, while a delete with no usage never consumes its tombstone. No live session/root snapshot is ever persisted; the authoritative live total is re-read from `session.list` on every refresh. The host kv store (`tokenmeter.sidebar.expanded`) still owns the panel collapse state. The obsolete v4 kv ledger is never read, converted, migrated or written — legacy keys are ignored. Every open/close of the store uses WAL journal mode plus a busy timeout, and every operation is a short transaction, so every TUI process reads the latest committed state.
 
 ## Component Details
 
 ### `src/tokenmeter.tsx` — Entry (event composer)
 
 - **Technology**: TypeScript + Solid JSX (`@opentui/solid`), `TuiPlugin` from `@opencode-ai/plugin/tui`.
-- **Responsibility**: Wires every event into the store and the debounced reconcile/project refresh; owns the kv-persisted expanded state; registers the `sidebar_content` slot (order 95) that resolves the sessionID and width and renders `UsagePanel`.
+- **Responsibility**: Wires every event into the store and the debounced reconcile/project refresh; owns the kv-persisted expanded state; records `session.deleted` into the SQLite store before forgetting the session; starts the single bounded project polling timer; registers the `sidebar_content` slot (order 95) that resolves the sessionID and width and renders `UsagePanel`.
 - **Scaling**: N/A (single host process).
-- **Dependencies**: store, reconcile, project, ledger, tree, panel, text.
+- **Dependencies**: store, reconcile, project, db, tree, panel, text.
 - **Failure modes**: every handler is a no-throw subscription; a failing listener cannot break the host turn.
 
 ### `src/tokenmeter/store.ts` — Reactive usage store
 
-- **Responsibility**: Holds per-session message-usage maps (keyed by message ID), statuses, loaded/rehydrate flags, and the `snapshot` signal the panel renders from.
-- **Dependencies**: `math.usageOf`, `tree.forgetSessionMeta`/`purgeTreeCache`.
+- **Responsibility**: Holds per-session message-usage maps (keyed by message ID), statuses, loaded/rehydrate flags, and the `snapshot` signal the panel renders from. Keeps each session's per-component spend high-water (cost/input/output/reasoning/cacheRead/cacheWrite as per-field maxima) so compaction can never lower the displayed spend while the plugin runs; `observedSessionUsage` also feeds the delete-time Project aggregate.
+- **Dependencies**: `math.usageOf`/`sumMessages`/`maxComponents`, `tree.forgetSessionMeta`/`purgeTreeCache`.
 - **Failure modes**: none (pure in-memory); invalidation keeps existing maps untouched so an interrupted publish never flashes zeroes.
 
 ### `src/tokenmeter/reconcile.ts` — Debounced reconciliation
@@ -143,15 +149,15 @@ The kv ledger (key `tokenmeter.project.history.v1`) is a versioned map: `{ v: 1,
 
 ### `src/tokenmeter/project.ts` — Project section
 
-- **Responsibility**: Resolves `project.current()`, lists `session.list({ scope: "project" })` filtered by `projectID`, upserts live sessions into the ledger, and publishes the full-ledger sum (tombstones included). Fails safe: stable `PROJECT_ERROR_MESSAGE` line, previous snapshot kept, Session unaffected; post-delete ledger recovery via `projectIDHint`.
-- **Dependencies**: ledger, math, `api.kv` / `api.client` / `api.state.path`.
-- **Failure modes**: missing list payload is an error (never a silent zero); kv-not-ready ledgers fall back to the live total and rebuild the ledger (never zero a live project).
+- **Responsibility**: Resolves `project.current()`, lists `session.list({ scope: "project", limit: PROJECT_SESSION_LIMIT })` filtered by `projectID` (a result at the 10_000 cap is a truncated list and fails closed: prior snapshot preserved, stable error surfaced), sums the live rows, adds the SQLite deleted aggregate, and publishes the snapshot. Owns the debounced refresh timer, the ~2 s polling timer (single, non-overlapping, disposed with the plugin), and the post-delete `projectIDHint` fallback.
+- **Dependencies**: db, math, `api.client` / `api.state.path`.
+- **Failure modes**: missing list payload is an error (never a silent zero); live sessions are never persisted — a refresh never writes history; a truncated list never replaces a good snapshot.
 
-### `src/tokenmeter/ledger.ts` — Persistent project ledger
+### `src/tokenmeter/db.ts` — Plugin-owned SQLite persistence
 
-- **Responsibility**: Read/write the kv ledger (`tokenmeter.project.history.v1`) with shape validation (malformed values degrade to empty, never NaN); upsert live sessions by ID, tombstone vanished ones, persist deleted sessions before refresh.
-- **Dependencies**: `api.kv` only.
-- **Failure modes**: malformed stored value yields an empty ledger; the refresh then falls back to the live list.
+- **Responsibility**: Owns `tokenmeter.sqlite` under `api.state.path.state`: `projects` (ONE deleted-session aggregate row per projectID) and `tombstones` ((sessionID, projectID) exactly-once admission). `recordDeletedSession` resolves the delete payload and the plugin-observed usage per-component, then runs ONE `BEGIN IMMEDIATE` transaction: `INSERT OR IGNORE` the tombstone, and only the transaction that inserted it increments the aggregate (a no-usage delete never consumes its tombstone). `readDeletedAggregate` returns the project's aggregate for the refresh. Every operation opens a short-lived connection (WAL + busy timeout), runs one transaction, and closes, so concurrent TUI processes read the latest committed state and never clobber each other.
+- **Dependencies**: `bun:sqlite` (Bun builtin — the build target is Bun), `node:path`, math (entry resolution).
+- **Failure modes**: a missing state directory is a no-op (never a throw); malformed rows are never produced (schema-constrained); the obsolete v4 kv ledger is never read, written or migrated.
 
 ### `src/tokenmeter/panel/` — UsagePanel module
 
@@ -161,7 +167,7 @@ The kv ledger (key `tokenmeter.project.history.v1`) is a versioned map: `{ v: 1,
 
 ### `src/tokenmeter/math.ts`, `numbers.ts`, `format.ts`, `text.ts`, `glyphs.ts`, `types.ts` — Pure helpers
 
-- **Responsibility**: `math` = per-message/per-session/per-project aggregation (context = max observed snapshot per session; raw output and raw reasoning stay separate; displayed output real = output + reasoning computed once); `numbers` = numeric display formatting (`fmtTokens`/`fmtCompact`/`fmtCost` — costs always exactly two decimals); `format` = column-aware line formatters; `text` = terminal column math and width resolution/clamping (fallback 38, clamp 24–52); `glyphs` = stable monochrome Nerd Font PUA glyphs + Unicode `↳`; `types` = narrow structural types kept local so the bundle never depends on SDK type resolution.
+- **Responsibility**: `math` = per-message/per-session/per-project aggregation (spend = per-session CUMULATIVE TOKEN SPEND: `Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write` across ALL assistant messages — the exact reconstruction of OpenCode's billed `tokens.total`, verified against a real payload 3167+249+64+66816+0 = 70296 — so cache is never a "latest message" term; every component keeps a per-field high-water so compaction can never lower it and the spend is always >= the cumulative input + real output; raw output and raw reasoning stay separate; displayed output real = output + reasoning computed once); `numbers` = numeric display formatting (`fmtTokens`/`fmtCompact`/`fmtCost` — costs always exactly two decimals); `format` = column-aware line formatters (headline and group totals use the fa-coins glyph; cache renders as `R<read>|W<write>`, omits zero sides, and renders `0` when both sides are zero); `text` = terminal column math and width resolution/clamping (fallback 38, clamp 24–52); `glyphs` = stable monochrome Nerd Font PUA glyphs (fa-coins U+EDE8, oct-database U+F472, md-fire U+F0238, md-robot U+F06A9, codicons tasks U+E20F, reasoning U+EE9C) + Unicode `↳`; `types` = narrow structural types kept local so the bundle never depends on SDK type resolution.
 - **Dependencies**: none between them beyond `types` (format imports numbers).
 - **Failure modes**: none (pure); `num()` coercion keeps malformed payloads from leaking NaN.
 
@@ -177,20 +183,22 @@ The kv ledger (key `tokenmeter.project.history.v1`) is a versioned map: `{ v: 1,
 
 | Store | What it holds | Format | Rationale |
 | --- | --- | --- | --- |
-| Host `api.kv` — `tokenmeter.sidebar.expanded` | Panel collapsed/expanded state | boolean | KV is the host's only plugin persistence; survives restarts |
-| Host `api.kv` — `tokenmeter.project.history.v1` | All-time per-project, per-session usage snapshots with tombstones | versioned JSON map (`v: 1`) | KV persistence with replace-by-ID upserts gives an idempotent project total across refreshes, deletions, and restarts |
+| Host `api.kv` — `tokenmeter.sidebar.expanded` | Panel collapsed/expanded state | boolean | KV is the host's plugin persistence for this single boolean; survives restarts |
+| Plugin SQLite — `tokenmeter.sqlite` (`projects`, `tombstones`) | ONE deleted-session aggregate row per projectID + (sessionID, projectID) exactly-once tombstones | SQLite (WAL) under `api.state.path.state` | `api.kv` is a whole-file read-modify-write shared by every plugin process: concurrent TUIs would overwrite each other's Project history. SQLite gives atomic per-session admission and cross-process consistency; the live total is never persisted (the list is authoritative) |
 
 ### Consistency & Concurrency
 
-- **Source of truth**: the client SDK. The in-memory store is a projection; sessions marked for rehydration are re-read from `client.session.messages()` (replace, not merge).
-- **Idempotency**: message usage upserted by ID; ledger entries upserted by sessionID; totals are sums over unique keys, so repeated events, refreshes, or reconciles never double-count.
+- **Source of truth**: the client SDK. The in-memory store is a projection; sessions marked for rehydration are re-read from `client.session.messages()` (replace, not merge). The Project live total is re-read from `session.list` on every refresh — never persisted.
+- **Cross-process exactly-once**: `session.deleted` events are admitted via a `BEGIN IMMEDIATE` tombstone transaction in the shared SQLite store: only the process that inserts the (sessionID, projectID) row increments the project's deleted aggregate, so duplicate deliveries and concurrent TUIs never double-count; no-usage deletes never consume a tombstone.
+- **Cross-process freshness**: every store operation is a short open/transaction/close on a WAL database with a busy timeout, so each process reads the latest committed state; a ~2 s polling timer refreshes the Project section so a sibling TUI's deletions appear promptly.
+- **Idempotency**: message usage is upserted by ID; the live Project sum counts each sessionID once; the deleted aggregate is additive only under tombstone admission.
 - **Event ordering**: a generation counter drops stale async reconcile results; a debounce collapses bursts into one refresh of the whole panel.
-- **Async correctness**: `session.deleted` persists into the ledger *before* the refresh and passes `projectIDHint` so a failing post-delete lookup recovers from the ledger.
+- **Async correctness**: `session.deleted` persists into the SQLite aggregate *before* the refresh and passes `projectIDHint`, so a failing post-delete `project.current()` still keeps the total (the hint stands in for the projectID).
 
 ## Async Delivery
 
-- **Delivery semantics**: host events are at-least-once; consumers deduplicate by keying message usage by message ID (replace) and by the generation-counter guard on reconcile.
-- **Backpressure / batching**: a single debounced timer (300 ms; 100 ms on idle) per refresh; the 2 s maintenance tick is tree-only (never forces a client message fetch for loaded sessions).
+- **Delivery semantics**: host events are at-least-once; consumers deduplicate by keying message usage by message ID (replace), by the generation-counter guard on reconcile, and by tombstone admission for deleted sessions.
+- **Backpressure / batching**: a single debounced timer (300 ms; 100 ms on idle) per refresh; the 2 s maintenance tick is tree-only (never forces a client message fetch for loaded sessions); the 2 s project poll is a single non-overlapping interval (an in-flight refresh skips the tick).
 - **Event envelope**: the plugin consumes only the minimal facts in each event payload and re-fetches current state from the client — it never accumulates event history.
 
 ## Non-Functional Requirements
@@ -206,11 +214,12 @@ The kv ledger (key `tokenmeter.project.history.v1`) is a versioned map: `{ v: 1,
 - Fail-contained hooks: no event handler throws; a Project failure surfaces the stable error line and never touches the Session panel.
 - Empty loads stay retryable: a first-open session transitions from placeholder to populated instead of freezing on an empty map.
 - Missed-event safety: `session.created` purges the tree cache (parentID can be absent), and the 2 s maintenance timer re-discovers descendants — a cached empty child list can never hide a child forever.
-- Kv readiness: a ledger write during startup may be dropped (the host kv store becomes ready asynchronously); the live-list fallback rebuilds the ledger and never zeroes a live project.
+- Cross-process Project freshness: the 2 s polling timer refreshes the live list + shared deleted aggregate, so a sibling TUI's deletions appear without any local event.
+- SQLite concurrency: WAL + busy timeout + short open/transaction/close boundaries mean concurrent TUI processes queue writers instead of clobbering, and every read sees the latest committed state; a missing state directory degrades to no persisted deletions (never a throw).
 
 ### Maintainability
 
-- Every module has one concern (store / reconcile / tree / groups / project / ledger / math / format / text / glyphs / types / panel); pure helpers are side-effect free and unit-tested through a fake SDK client.
+- Every module has one concern (store / reconcile / tree / groups / project / db / math / format / text / glyphs / types / panel); pure helpers are side-effect free and unit-tested through a fake SDK client.
 - The build embeds its own regression guard; the artifact test re-verifies the shipped bundle independently of source tests.
 - CI runs the full gate set (frozen install, typecheck, coverage, build, test:dist, audit, pack dry-run, Biome) on every PR and on `main`.
 
@@ -221,10 +230,12 @@ The kv ledger (key `tokenmeter.project.history.v1`) is a versioned map: `{ v: 1,
 | Invalidation + client rehydration reconcile | The client SDK is the source of truth; a stale mirror can never win, and removals/compaction are reflected | In-memory mirror as truth; remount on event; interval polling |
 | Bundled dist via `createSolidTransformPlugin` with post-build reactive-binding assertion | Loading source TSX eagerly would produce `jsxDEV` with zero reactive bindings — the panel would never repaint; the assertion makes a broken build unshippable | Shipping source; plain bun transform; tsup |
 | Runtime packages external (`@opencode-ai/plugin`, `@opentui/*`, `solid-js`) | The TUI host provides them at load time; inlining duplicates the host's own copies | Inlining all dependencies |
-| KV persistence: expanded state + project ledger with tombstones | Survives restarts; deleted sessions keep contributing; totals stay idempotent | In-memory only; JSON files; per-session files |
+| SQLite persistence: ONE deleted aggregate per project + (sessionID, projectID) tombstones, live total never persisted | `api.kv` is a whole-file read-modify-write shared by every plugin process — concurrent TUIs lose each other's updates. SQLite gives atomic exactly-once admission (BEGIN IMMEDIATE + INSERT OR IGNORE) and cross-process consistency; the live list is authoritative on every refresh, so no live snapshot is ever stored | Per-session tombstones; in-memory only; JSON files; the host kv store |
 | Route-reactive session activation | The TUI exposes no session-select event; `api.route.current` read inside a Solid effect is the supported change signal | One-time prop read |
 | Debounced reconcile + generation counter | Event bursts collapse to one repaint; stale async results are dropped | Synchronous reconcile per event |
 | Column-aware rendering, width clamp 24–52 (fallback 38) | The terminal never wraps mid-word; rows render only when they fit | Fixed-width templates |
+| Headline = cumulative TOKEN SPEND (Σ input + output + reasoning + cache.read + cache.write per session) | TokenMeter must show cumulative spend, not a context-window: the five-channel sum exactly reconstructs OpenCode's billed `tokens.total` (verified 3167+249+64+66816+0 = 70296 on a real payload) | The OpenCode Context formula (latest-message cache only), which under-reports billed cache tokens |
+| Per-component spend high-water (cost/input/output/reasoning/cacheRead/cacheWrite per-field maxima) | Compaction or a smaller later snapshot can never lower the displayed spend or its breakdown | Single-number context high-water |
 | Agent-type grouping with deterministic ordering | Repeated runs of one agent collapse into one group; ordering is stable | Per-session rows only |
 
 ## Failure Modes & Mitigations
@@ -234,8 +245,9 @@ The kv ledger (key `tokenmeter.project.history.v1`) is a versioned map: `{ v: 1,
 | TUI mirror holds stale messages | Panel shows outdated usage | Invalidation marks the session for rehydration; the next reconcile re-reads the client (replace, not merge) |
 | `session.created` without parentID | New delegated child hidden from the tree | Whole tree cache purged on creation; 2 s maintenance timer re-discovers descendants |
 | Event storm / out-of-order events | Churn or stale renders | Debounced timers (300 ms / 100 ms) + generation counter drops stale results; upsert-by-ID keeps totals order-independent |
-| `session.deleted` while `project.current()` unresolved | Project section flashes an error | Tombstone persisted before the refresh; `projectIDHint` recovers the snapshot from the full ledger sum |
-| kv store not ready / malformed ledger | Project zeroed or NaN | Shape validation; live-list fallback rebuilds the ledger and never zeroes a live project; `num()` coercion blocks NaN |
+| `session.deleted` while `project.current()` unresolved | Project section flashes an error | The delete is recorded into the SQLite aggregate *before* the refresh; `projectIDHint` stands in for the projectID so the refresh still sums live + deleted |
+| Truncated session.list (at the 10_000 cap) | Silent undercount | The refresh fails closed: prior snapshot preserved, stable error surfaced — a partial total never renders |
+| Cross-process kv clobbering / stale reads | Lost or duplicated Project history | Project history lives in plugin-owned SQLite (WAL + busy timeout + short transactions); tombstones make admission exactly-once |
 | Artifact degrades to eager JSX | Panel never repaints (silent) | Build-time assertion + `test/artifact.test.ts` fail the build/CI |
 | Plugin load/dispose mistakes | Leaked timers or broken turn | All signals/timers owned by one `createRoot`; `api.lifecycle.onDispose` disposes everything |
 
@@ -243,7 +255,7 @@ The kv ledger (key `tokenmeter.project.history.v1`) is a versioned map: `{ v: 1,
 
 - [ADR-0001: Bundled dist with the Solid transform plugin](docs/adr/0001-bundled-dist-with-solid-transform-plugin.md)
 - [ADR-0002: Reconcile by invalidation and rehydration from the client](docs/adr/0002-reconcile-by-invalidation-and-client-rehydration.md)
-- [ADR-0003: KV persistence for collapse state and the project history ledger](docs/adr/0003-kv-persistence-for-collapse-state-and-project-ledger.md)
+- [ADR-0003: KV persistence for collapse state and the project history ledger](docs/adr/0003-kv-persistence-for-collapse-state-and-project-ledger.md) (superseded by ADR-0006)
 - [ADR-0004: External runtime packages provided by the host](docs/adr/0004-external-runtime-packages.md)
 - [ADR-0005: Sidebar width resolution with clamping](docs/adr/0005-sidebar-width-resolution-with-clamping.md)
-
+- [ADR-0006: SQLite persistence for the deleted-session project aggregate](docs/adr/0006-sqlite-persistence-for-deleted-project-usage.md)

@@ -16,6 +16,7 @@ Naming convention: project-prefixed skills are repo-specific workflow skills. Un
 | Skill | Trigger | Path |
 |---|---|---|
 | `opencode-plugin` | Trigger: create OpenCode plugins, TUI plugins, sidebar UI, Solid reactivity, plugin SDK, custom tools, hooks, auth, or tool interception. Build and package plugins with @opencode-ai/plugin. | `skills/opencode-plugin/SKILL.md` |
+| `npm-secure-config` | Trigger: configure, initialize, upgrade, or secure npm/pnpm/Bun; .npmrc, pnpm-workspace.yaml, bunfig.toml, trustedDependencies. Enforce secure defaults. | `skills/npm-secure-config/SKILL.md` |
 
 ## Project Documentation
 
