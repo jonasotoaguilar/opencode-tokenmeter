@@ -30,11 +30,10 @@ fi
 echo "::group::release-preflight: gates"
 bun install --frozen-lockfile
 bun run typecheck
-bun run test
 bun run coverage
-bun run audit
 bun run build
 bun run test:dist
+bun run audit
 bun run pack:dry-run
 bun run biome:check
 echo "::endgroup::"
