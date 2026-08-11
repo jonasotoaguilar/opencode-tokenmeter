@@ -4,36 +4,63 @@
  * Imports the ACTUAL modules (math, groups, store, reconcile, tree, format,
  * text, glyphs, project) and drives them with a fake SDK client following the
  * opencode-plugin unit-test pattern. Asserts the approved corrections:
- *  - headline context = one snapshot per session (max observed), so repeated
- *    messages with the same input context can never inflate the headline
- *  - cumulative input/output/reasoning/cache/cost stay separate from the
- *    snapshot, with RAW output and RAW reasoning preserved independently;
- *    the displayed output real (output + reasoning) is computed exactly once
- *  - the Project clock context is input + raw output + raw reasoning per
- *    session with cache EXCLUDED — the cache metric of the second row is its
- *    only home, so a huge cache never inflates the clock to near the total
+ *  - headline spend = per-session CUMULATIVE TOKEN SPEND: each session
+ *    contributes `Σ input + Σ output + Σ reasoning + Σ cache.read +
+ *    Σ cache.write` across ALL its assistant messages — the exact
+ *    reconstruction of OpenCode's billed `tokens.total` (verified against a
+ *    real payload: 3167 + 249 + 64 + 66816 + 0 = 70296) — summed across the
+ *    root and its recursive descendants, each session ID exactly once.
+ *    Cache tokens are billed separately, so they are CUMULATIVE, never a
+ *    "latest message" term. Compaction or a smaller later message set can
+ *    never lower the stored/displayed spend (each component keeps a
+ *    per-field high-water: cost/input/output/reasoning/cacheRead/cacheWrite)
+ *  - cumulative input/output/reasoning/cacheRead/cacheWrite/cost stay
+ *    separate, with RAW output and RAW reasoning preserved independently;
+ *    the displayed output real (output + reasoning) is computed exactly
+ *    once. Because every per-session spend includes its cumulative input +
+ *    output + reasoning, the coins total is always >= the session's
+ *    cumulative input + real output
+ *  - the Project coins total reads each ledger entry's EXPLICITLY STORED
+ *    complete per-session spend — never derived from cumulative raw fields,
+ *    never a per-field maximum across moments, and exactly
+ *    `input + output + reasoning + cacheRead + cacheWrite` (so never below
+ *    input + output + reasoning); payload-only sessions (never observed via
+ *    messages) contribute the payload spend `input + output + reasoning +
+ *    cache.read + cache.write` from the payload's own fields
  *  - the Project section sums ALL project sessions the client
  *    session.list endpoint returns — listed with `scope: "project"` (no
- *    directory scoping, no roots filtering, children included), then
- *    filtered by session.projectID — and a failed lookup/list keeps
- *    the previous snapshot, surfaces the stable "Unable to load project
- *    data" message (projectError) and never touches Session
- *  - post-delete: session.deleted passes the deleted session's projectID as
- *    a projectIDHint, so a failed project.current()/session.list right
- *    after the delete recovers the snapshot from the ledger (same total,
- *    tombstone included) with NO projectError; without a hint or ledger
- *    entries the stable error still surfaces
- *  - the Project total comes from the persistent kv ledger
- *    (tokenmeter.project.history.v1): live sessions upsert by ID (replace,
- *    never accumulate), disappeared sessions tombstone and keep their
- *    contribution, session.deleted preserves the delete payload or the last
- *    known snapshot, and the ledger is idempotent across repeated refreshes;
- *    an empty/malformed/unpersisted ledger NEVER zeroes a Project the live
- *    list carries tokens for — the live total is the fallback and the ledger
- *    is normalized and persisted from the live sessions
+ *    directory scoping, no roots filtering, children included) and an
+ *    explicit bounded limit (the SDK defaults to 100 rows), then
+ *    filtered by session.projectID — plus the persisted DELETED-session
+ *    aggregate from the plugin-owned SQLite store (tokenmeter.sqlite under
+ *    api.state.path.state); a truncated list (length at the cap) fails
+ *    closed: prior snapshot preserved, stable error surfaced. A failed
+ *    lookup/list keeps the previous snapshot, surfaces the stable "Unable
+ *    to load project data" message (projectError) and never touches Session
+ *  - post-delete: session.deleted records the delete payload's usage (or
+ *    the last known observed usage) into the SQLite aggregate BEFORE the
+ *    refresh — atomically, exactly once per session across processes, via a
+ *    tombstone-admission transaction — and passes the deleted session's
+ *    projectID as a projectIDHint, so a failing project.current() right
+ *    after the delete keeps the projectID and the refresh still sums the
+ *    live list plus the deleted aggregate (same total, no projectError);
+ *    without a hint the stable error still surfaces
+ *  - the Project total = authoritative live session.list sum + the
+ *    deleted aggregate: live sessions are NEVER persisted or re-added; a
+ *    delete with no usage never consumes its tombstone (a later useful
+ *    event is still admitted); different projects stay isolated in the same
+ *    SQLite file; a duplicate same-session deletion and cascade (child +
+ *    parent) events each contribute exactly once; concurrent instances
+ *    immediately see each other's committed writes. The obsolete v4 kv
+ *    ledger is never read, written or migrated
+ *  - a single bounded polling timer (~2 s, PROJECT_POLL_DELAY) refreshes
+ *    Project on top of the event-driven fast path so a sibling OpenCode
+ *    process working in the same project appears in the sidebar; ticks
+ *    never overlap an in-flight refresh, duplicate starts are no-ops, and
+ *    disposal stops the timer
  *  - costs render with EXACTLY two decimals everywhere (headline, Project
  *    and groups) via fmtCost — no 3/4-decimal precision
- *  - agent groups order by context total descending; cost/runs/name only
+ *  - agent groups order by spend total descending; cost/runs/name only
  *    break ties
  *  - idle invalidation rehydrates a session's usage from the current
  *    messages, reflecting removed/changed messages instead of merging only
@@ -46,18 +73,28 @@
  *    ONLY that row, while expanded adds the `🖿 N agents · <U+E20F> N task`
  *    metrics row (lowercase `agents`) and then the group list
  *  - each group renders exactly three rows: indented name + task count,
- *    indented context + thinking + fire cost, indented three-value
- *    input · output real · cache breakdown — the name is the elastic segment
- *    of row 1 and truncates there; the tree marker yields only when the name
- *    cannot keep one column; the indented metric rows never overflow
+ *    indented spend + thinking + fire cost, indented three-value
+ *    input · output real · cache read/write breakdown — the name is the elastic
+ *    segment of row 1 and truncates there; the tree marker yields only when
+ *    the name cannot keep one column; the indented metric rows never
+ *    overflow
  *  - the subtitles read Project and Session (singular), both accent-colored
  */
-import { describe, expect, test } from "bun:test"
-import { readFileSync } from "node:fs"
+import { afterEach, describe, expect, test } from "bun:test"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import {
+  PROJECT_DB_FILE,
+  projectDbPath,
+  readDeletedAggregate,
+  recordDeletedSession,
+} from "../src/tokenmeter/db"
 import {
   breakdownSegments,
   formatAgents,
   formatBreakdown,
+  formatCachePair,
   formatGroupLine,
   formatGroupMeta,
   formatHeadline,
@@ -68,19 +105,16 @@ import {
 } from "../src/tokenmeter/format"
 import { GLYPH } from "../src/tokenmeter/glyphs"
 import {
-  PROJECT_HISTORY_KEY,
-  persistDeletedSession,
-} from "../src/tokenmeter/ledger"
-import {
   realOutput,
   sumMessages,
   sumProjectSessions,
   usageOf,
 } from "../src/tokenmeter/math"
-import { fmtCompact, fmtCost } from "../src/tokenmeter/numbers"
+import { fmtCompact, fmtCost, fmtTokens } from "../src/tokenmeter/numbers"
 import {
   disposeProjectRefresh,
   PROJECT_REFRESH_DELAY,
+  PROJECT_SESSION_LIMIT,
   projectError,
   projectLoading,
   projectSnapshot,
@@ -88,6 +122,7 @@ import {
   scheduleProjectRefresh,
   setProjectError,
   setProjectSnapshot,
+  startProjectPolling,
 } from "../src/tokenmeter/project"
 import {
   activateRoot,
@@ -98,6 +133,7 @@ import {
   forgetSession,
   invalidateUsage,
   observedSessionUsage,
+  removeMessageUsage,
   snapshot,
   upsertMessageUsage,
 } from "../src/tokenmeter/store"
@@ -116,9 +152,9 @@ import {
   rememberSession,
 } from "../src/tokenmeter/tree"
 import type {
-  ProjectLedger,
   ProjectSessionLike,
   SessionInfo,
+  SessionUsage,
   UsageMessage,
 } from "../src/tokenmeter/types"
 
@@ -173,9 +209,10 @@ async function waitFor(check: () => boolean, timeout = 2000): Promise<void> {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 describe("context snapshot policy (math.ts)", () => {
-  test("usageOf context is input + output + reasoning — tokens.total unused, cache excluded", () => {
-    // The provider total is NOT used for the displayed context (it may
-    // include cache); context is always the no-cache formula.
+  test("usageOf context is the message spend — input + output + reasoning + cache read/write; tokens.total unused", () => {
+    // The provider total is NOT used for the displayed spend; a message's
+    // standalone contribution is the sum of ALL five billed channels, which
+    // reconstructs tokens.total exactly.
     const withTotal = usageOf(
       msg("m1", "ses_root", {
         input: 100,
@@ -185,7 +222,7 @@ describe("context snapshot policy (math.ts)", () => {
         total: 200,
       }),
     )
-    expect(withTotal?.context).toBe(125)
+    expect(withTotal?.context).toBe(140)
     expect(withTotal?.cacheRead).toBe(10)
     expect(withTotal?.cacheWrite).toBe(5)
     const absent = usageOf(
@@ -196,7 +233,84 @@ describe("context snapshot policy (math.ts)", () => {
         cache: { read: 10, write: 5 },
       }),
     )
-    expect(absent?.context).toBe(125)
+    expect(absent?.context).toBe(140)
+  })
+
+  test("REGRESSION: real-payload parity — the spend formula reconstructs the verified 70,296 total exactly", () => {
+    // Verified against a real OpenCode session (ses_011740ed4ffe7vHkmKoHsR1faj,
+    // 2 assistant messages): input 3167 + output 249 + reasoning 64 +
+    // cache.read 66816 + cache.write 0 = 70296 == the provider tokens.total.
+    const m1 = usageOf(
+      msg("m1", "ses_root", {
+        input: 2000,
+        output: 150,
+        reasoning: 40,
+        cache: { read: 40000, write: 0 },
+        total: 42190,
+      }),
+    )!
+    const m2 = usageOf(
+      msg("m2", "ses_root", {
+        input: 1167,
+        output: 99,
+        reasoning: 24,
+        cache: { read: 26816, write: 0 },
+        total: 28106,
+      }),
+    )!
+    const s = sumMessages(
+      new Map([
+        ["m1", m1],
+        ["m2", m2],
+      ]),
+    )
+    // The session spend is the sum of ALL five channels across ALL messages
+    // — 70296 == the verified tokens.total of the real session.
+    expect(s.total).toBe(70296)
+    expect(s.input).toBe(3167)
+    expect(s.output).toBe(249)
+    expect(s.reasoning).toBe(64)
+    expect(s.cacheRead).toBe(66816)
+    expect(s.cacheWrite).toBe(0)
+  })
+
+  test("REGRESSION: screenshot parity — the spend formula reproduces the atomic 48,891 total exactly", () => {
+    const m1 = usageOf(
+      msg("m1", "ses_root", {
+        input: 27773,
+        output: 17,
+        reasoning: 109,
+        cache: { read: 20992, write: 0 },
+      }),
+    )!
+    // The single observed message contributes the full five-channel spend.
+    expect(m1.context).toBe(27773 + 17 + 109 + 20992)
+    const s = sumMessages(new Map([["m1", m1]]))
+    // The live session showed exactly 48,891; the spend formula must
+    // reproduce it field-for-field.
+    expect(s.total).toBe(48891)
+    expect(s.input).toBe(27773)
+    expect(s.output).toBe(17)
+    expect(s.reasoning).toBe(109)
+    expect(s.cacheRead).toBe(20992)
+  })
+
+  test("an assistant message with zero output contributes its tokens — cache read/write are cumulative spend", () => {
+    // A mid-thinking message (reasoning but no output yet) contributes its
+    // input + reasoning cumulatively, and its cache read/write count into
+    // the session spend like every other billed channel.
+    const thinking = usageOf(
+      msg("m1", "ses_root", {
+        input: 1000,
+        output: 0,
+        reasoning: 500,
+        cache: { read: 99999, write: 0 },
+      }),
+    )
+    expect(thinking?.context).toBe(1000 + 500 + 99999)
+    expect(thinking?.reasoning).toBe(500)
+    const s = sumMessages(new Map([["m1", thinking!]]))
+    expect(s.total).toBe(1000 + 500 + 99999)
   })
 
   test("non-assistant messages produce no usage", () => {
@@ -234,6 +348,17 @@ describe("output real accounting (raw output + raw reasoning, exactly once)", ()
     expect(usage.reasoning).toBe(500)
     expect(realOutput(usage.output, usage.reasoning)).toBe(1700)
     expect(usage.sessions).toBe(2)
+    // The list payload carries only CUMULATIVE fields; the payload-only
+    // spend context is input + output + reasoning + cache.read + cache.write
+    // per session (1850 + 3000), so context can never fall below the
+    // cumulative input + real output.
+    expect(usage.context).toBe(1850 + 3000)
+    expect(usage.cacheRead).toBe(100)
+    expect(usage.cacheWrite).toBe(50)
+    expect(usage.cache).toBe(150)
+    expect(usage.context).toBeGreaterThanOrEqual(
+      usage.input + realOutput(usage.output, usage.reasoning),
+    )
   })
 
   test("REGRESSION: per-session reasoning is never summed twice into output real", () => {
@@ -255,57 +380,89 @@ describe("output real accounting (raw output + raw reasoning, exactly once)", ()
     expect(usage.output).toBe(40)
     expect(usage.reasoning).toBe(10)
     expect(realOutput(usage.output, usage.reasoning)).toBe(50)
-    expect(usage.context).toBe(2 * (10 + 20 + 5))
+    expect(usage.context).toBe(70)
   })
 
-  test("REGRESSION: a huge cache changes ONLY the cache metric, never either hourglass headline", () => {
-    const sessions: ProjectSessionLike[] = [
-      {
-        id: "a",
-        projectID: "p",
-        tokens: {
-          input: 1000,
-          output: 500,
-          reasoning: 200,
-          cache: { read: 9000000, write: 500000 },
-        },
-      },
-      {
-        id: "b",
-        projectID: "p",
-        tokens: {
-          input: 2000,
-          output: 700,
-          reasoning: 300,
-          cache: { read: 8000000, write: 0 },
-        },
-      },
-    ]
-    const usage = sumProjectSessions("p", sessions)
-    // Context is ONE no-cache snapshot per session (input + raw output +
-    // raw reasoning); the enormous cache appears ONLY in the cache metric,
-    // never in either hourglass headline.
-    expect(usage.context).toBe(1700 + 3000)
-    expect(usage.cache).toBe(9500000 + 8000000)
-    expect(realOutput(usage.output, usage.reasoning)).toBe(1700)
-    expect(usage.sessions).toBe(2)
+  test("REGRESSION: cache read/write are CUMULATIVE spend — an old message's cache enters the session total", () => {
+    // Message m1 carries a huge cache; message m2 (later) carries none. Both
+    // messages' cache tokens are billed, so the session spend accumulates
+    // them all: m1's 9.5M cache enters the total, and the separately
+    // displayed cache metric is the same cumulative sum.
+    const m1 = usageOf(
+      msg("m1", "ses_x", {
+        input: 100,
+        output: 20,
+        reasoning: 5,
+        cache: { read: 9000000, write: 500000 },
+      }),
+    )!
+    const m2 = usageOf(
+      msg("m2", "ses_x", { input: 2000, output: 700, reasoning: 300 }),
+    )!
+    expect(m1.context).toBe(9500125)
+    expect(m2.context).toBe(3000)
+    const map = new Map([
+      ["m1", m1],
+      ["m2", m2],
+    ])
+    const s = sumMessages(map)
+    // Spend formula: 2100 + 720 + 305 + 9000000 + 500000 = 9503125 — the
+    // old message's cache is accumulated into the total (and the total is
+    // always >= cumulative input + output + reasoning).
+    expect(s.total).toBe(2100 + 720 + 305 + 9000000 + 500000)
+    expect(s.total).toBeGreaterThanOrEqual(s.input + s.output + s.reasoning)
+    expect(s.cache).toBe(9500000)
+    expect(s.cacheRead).toBe(9000000)
+    expect(s.cacheWrite).toBe(500000)
+    expect(s.input).toBe(2100)
+    expect(s.output).toBe(720)
+    expect(s.reasoning).toBe(305)
+  })
+
+  test("REGRESSION: cache read/write accumulate into the session spend across messages", () => {
+    const m1 = usageOf(
+      msg("m1", "ses_x", {
+        input: 100,
+        output: 20,
+        cache: { read: 100, write: 0 },
+      }),
+    )!
+    const m2 = usageOf(
+      msg("m2", "ses_x", {
+        input: 2000,
+        output: 700,
+        cache: { read: 3000, write: 500 },
+      }),
+    )!
+    const s = sumMessages(
+      new Map([
+        ["m1", m1],
+        ["m2", m2],
+      ]),
+    )
+    expect(s.total).toBe(2100 + 720 + 3100 + 500)
+    expect(s.cache).toBe(3600)
+    expect(s.cacheRead).toBe(3100)
+    expect(s.cacheWrite).toBe(500)
   })
 })
 
-describe("session aggregation (max context, cumulative breakdowns)", () => {
-  test("total is the max observed context snapshot, not the sum", () => {
-    const map = new Map<string, ReturnType<typeof usageOf>>()
-    map.set("m1", usageOf(msg("m1", "ses_x", { input: 1000, output: 0 })))
-    map.set("m2", usageOf(msg("m2", "ses_x", { input: 3000, output: 0 })))
-    map.set("m3", usageOf(msg("m3", "ses_x", { input: 2000, output: 0 })))
-    const s = sumMessages(
-      map as Map<string, NonNullable<ReturnType<typeof usageOf>>>,
-    )
-    expect(s.total).toBe(3000)
+describe("session aggregation (complete-session spend, cumulative breakdowns)", () => {
+  test("REGRESSION: total is the spend formula — Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write — never the maximum atomic snapshot", () => {
+    const map = new Map<string, NonNullable<ReturnType<typeof usageOf>>>()
+    map.set("m1", usageOf(msg("m1", "ses_x", { input: 1000, output: 100 }))!)
+    map.set("m2", usageOf(msg("m2", "ses_x", { input: 3000, output: 300 }))!)
+    map.set("m3", usageOf(msg("m3", "ses_x", { input: 2000, output: 200 }))!)
+    const s = sumMessages(map)
+    // The largest single-message snapshot is 3300, but the spend formula is
+    // the cumulative sum: 6000 + 600 = 6600 — never below cumulative
+    // input (6000), which the max-atomic regression violated.
+    expect(s.total).toBe(6600)
+    expect(s.total).toBeGreaterThanOrEqual(s.input + s.output + s.reasoning)
     expect(s.input).toBe(6000)
   })
 
-  test("cumulative in/out/cache/cost stay separate from the context snapshot", () => {
+  test("cumulative in/out/cache/cost stay separate from the complete-session spend", () => {
     const map = new Map<string, NonNullable<ReturnType<typeof usageOf>>>()
     map.set(
       "m1",
@@ -342,46 +499,120 @@ describe("session aggregation (max context, cumulative breakdowns)", () => {
       )!,
     )
     const s = sumMessages(map)
-    // Context is the max no-cache snapshot (500+100+50), never tokens.total.
-    expect(s.total).toBe(650)
+    // Each message contributes 700 (i+o+r+cr+cw); the spend sums them all:
+    // 1000 + 200 + 100 + 60 + 40 = 1400 — every billed cache token counts.
+    // tokens.total is unused.
+    expect(s.total).toBe(1400)
     expect(s.input).toBe(1000)
     expect(s.output).toBe(200)
     expect(s.reasoning).toBe(100)
     expect(s.cache).toBe(100)
+    expect(s.cacheRead).toBe(60)
+    expect(s.cacheWrite).toBe(40)
     expect(s.cost).toBeCloseTo(0.2)
   })
 
-  test("message-ID replacement (retry/streaming upsert) keeps one snapshot per message", () => {
+  test("message-ID replacement (retry/streaming upsert) keeps one contribution per message", () => {
     const map = new Map<string, NonNullable<ReturnType<typeof usageOf>>>()
-    map.set("m1", usageOf(msg("m1", "ses_x", { input: 1000, output: 0 }))!)
-    map.set("m1", usageOf(msg("m1", "ses_x", { input: 2500, output: 0 }))!)
+    map.set("m1", usageOf(msg("m1", "ses_x", { input: 1000, output: 100 }))!)
+    map.set("m1", usageOf(msg("m1", "ses_x", { input: 2500, output: 250 }))!)
     const s = sumMessages(map)
-    expect(s.total).toBe(2500)
+    expect(s.total).toBe(2750)
     expect(s.input).toBe(2500)
+  })
+
+  test("REGRESSION: a later SMALLER message set cannot lower the session spend high-water (store level, per-component maxima)", () => {
+    const rootID = "ses_hw_live"
+    forgetSession(rootID)
+    // Full observation: spend 10500 + 1050 = 11550.
+    upsertMessageUsage(msg("m1", rootID, { input: 10000, output: 1000 }))
+    upsertMessageUsage(msg("m2", rootID, { input: 500, output: 50 }))
+    const full = observedSessionUsage(rootID)!
+    expect(full.total).toBe(11550)
+    expect(full.input).toBe(10500)
+    // Compaction: the old message is gone, the map computes 550 — the
+    // per-component high-water (input 10500, output 1050) must survive, so
+    // the spend stays 11550 and the displayed components never lower.
+    removeMessageUsage(rootID, "m1")
+    const compacted = observedSessionUsage(rootID)!
+    expect(compacted.input).toBe(10500)
+    expect(compacted.output).toBe(1050)
+    expect(compacted.total).toBe(11550)
+    expect(compacted.total).toBeGreaterThanOrEqual(
+      compacted.input + compacted.output + compacted.reasoning,
+    )
+    forgetSession(rootID)
+  })
+
+  test("REGRESSION: a zero-output tail's cache still counts into the spend — cache is cumulative", () => {
+    const m1 = usageOf(
+      msg("m1", "ses_z", {
+        input: 100,
+        output: 100,
+        cache: { read: 200, write: 0 },
+      }),
+    )!
+    const tail = usageOf(
+      msg("m2", "ses_z", {
+        input: 0,
+        output: 0,
+        cache: { read: 9999, write: 0 },
+      }),
+    )!
+    const s = sumMessages(
+      new Map([
+        ["m1", m1],
+        ["m2", tail],
+      ]),
+    )
+    // m2's zero-output message still billed 9999 cache tokens; they count
+    // into the session spend like every other billed channel.
+    expect(s.total).toBe(100 + 100 + 200 + 9999)
+  })
+
+  test("REGRESSION: replacing an existing message keeps one contribution per message — cache stays cumulative", () => {
+    const m1 = usageOf(msg("m1", "ses_o", { input: 100, output: 10 }))!
+    const m2 = usageOf(
+      msg("m2", "ses_o", {
+        input: 200,
+        output: 20,
+        cache: { read: 300, write: 0 },
+      }),
+    )!
+    const map = new Map([
+      ["m1", m1],
+      ["m2", m2],
+    ])
+    // Replace m1's value (retry/streaming upsert): the key keeps its
+    // insertion position, the map still holds exactly one contribution per
+    // message, and every billed cache token stays in the spend.
+    map.set("m1", usageOf(msg("m1", "ses_o", { input: 500, output: 50 }))!)
+    const s = sumMessages(map)
+    expect(s.total).toBe(700 + 70 + 300)
+    expect(s.input).toBe(700)
   })
 })
 
 describe("project aggregation (project.ts)", () => {
-  /** Shared in-memory kv fake: survives across refreshProject calls. */
-  const makeKv = () => {
-    const store = new Map<string, unknown>()
-    return {
-      store,
-      kv: {
-        get: <V = unknown>(key: string, fallback?: V): V =>
-          store.has(key) ? (store.get(key) as V) : (fallback as V),
-        set: (key: string, value: unknown) => void store.set(key, value),
-      },
-    }
+  /** Temp state directories created by this block; removed after each test. */
+  const tmps: string[] = []
+  const tmpStateDir = () => {
+    const dir = mkdtempSync(join(tmpdir(), "tokenmeter-test-"))
+    tmps.push(dir)
+    return dir
   }
+  afterEach(() => {
+    disposeProjectRefresh()
+    for (const dir of tmps.splice(0))
+      rmSync(dir, { recursive: true, force: true })
+  })
 
   const projApi = (
     project: { id: string; worktree?: string } | null,
     sessions: ProjectSessionLike[],
-    kvEnv: ReturnType<typeof makeKv> = makeKv(),
+    stateDir: string = tmpStateDir(),
   ) => ({
-    ...kvEnv,
-    state: { path: { directory: "/proj/dir" } },
+    state: { path: { directory: "/proj/dir", state: stateDir } },
     client: {
       project: {
         current: async ({ directory }: { directory: string }) => {
@@ -390,13 +621,18 @@ describe("project aggregation (project.ts)", () => {
         },
       },
       session: {
-        list: async (params: { directory: string; scope: "project" }) => {
+        list: async (params: {
+          directory: string
+          scope: "project"
+          limit: number
+        }) => {
           // Directory binds the request to the active server instance, while
           // project scope still crosses worktrees. Children stay included.
+          // The explicit limit is REQUIRED: the SDK defaults to 100 rows and
+          // a project with more live sessions would silently undercount.
           expect(params.directory).toBe("/proj/dir")
           expect(params.scope).toBe("project")
-          expect("roots" in (params as Record<string, unknown>)).toBe(false)
-          expect("archived" in (params as Record<string, unknown>)).toBe(false)
+          expect(params.limit).toBe(PROJECT_SESSION_LIMIT)
           return { data: sessions }
         },
       },
@@ -460,24 +696,122 @@ describe("project aggregation (project.ts)", () => {
     )
     const usage = projectSnapshot()
     expect(usage?.id).toBe("proj1")
+    // Every live row counts by sessionID — delegations are plain rows too,
+    // and no live snapshot is ever persisted.
     expect(usage?.sessions).toBe(3)
     expect(usage?.input).toBe(3500)
     expect(usage?.output).toBe(1300)
     expect(usage?.reasoning).toBe(550)
     expect(usage?.cache).toBe(200)
     expect(usage?.cost).toBeCloseTo(0.035)
-    // Context: input + raw output + raw reasoning per session (cache excluded).
-    expect(usage?.context).toBe(1700 + 3000 + 650)
+    // The list payload carries only CUMULATIVE fields; the payload-only
+    // spend context is input + output + reasoning + cache.read + cache.write
+    // per session (1850 + 3000 + 700), so Project spend is never below
+    // Project cumulative input + real output.
+    expect(usage?.context).toBe(5550)
+    expect(usage?.cacheRead).toBe(125)
+    expect(usage?.cacheWrite).toBe(75)
+    expect(usage?.cache).toBe(200)
+    expect(usage!.context).toBeGreaterThanOrEqual(
+      usage!.input + realOutput(usage!.output, usage!.reasoning),
+    )
     expect(realOutput(usage!.output, usage!.reasoning)).toBe(1850)
-    disposeProjectRefresh()
   })
 
-  test("the kv ledger is idempotent: persists a session after it disappears from session.list, never duplicates refreshes and replaces updates", async () => {
+  test("REGRESSION: Project counts each unique session exactly once — a duplicated sessionID in the live list is summed once", async () => {
     setProjectSnapshot(null)
-    const kvEnv = makeKv()
-    const s1 = (
-      over: Partial<ProjectSessionLike> = {},
-    ): ProjectSessionLike => ({
+    const stateDir = tmpStateDir()
+    const s1 = (): ProjectSessionLike => ({
+      id: "s1",
+      projectID: "proj1",
+      cost: 0.01,
+      tokens: { input: 1000, output: 500, reasoning: 200 },
+    })
+    const s2: ProjectSessionLike = {
+      id: "s2",
+      projectID: "proj1",
+      cost: 0.02,
+      tokens: { input: 2000, output: 700, reasoning: 300 },
+    }
+    // s1 appears TWICE in the live list (a duplicated payload): the live sum
+    // is keyed by sessionID, so the session contributes exactly once.
+    await refreshProject(
+      projApi({ id: "proj1" }, [s1(), s1(), s2], stateDir) as never,
+    )
+    expect(projectSnapshot()?.sessions).toBe(2)
+    expect(projectSnapshot()?.input).toBe(3000)
+    // Payload-only sessions use the input + output + reasoning fallback:
+    // 1700 + 3000, always >= the cumulative metrics.
+    expect(projectSnapshot()?.context).toBe(4700)
+    expect(projectSnapshot()?.cache).toBe(0)
+    // A repeated refresh with the duplicated list stays idempotent.
+    await refreshProject(
+      projApi({ id: "proj1" }, [s1(), s1(), s2], stateDir) as never,
+    )
+    expect(projectSnapshot()?.sessions).toBe(2)
+    expect(projectSnapshot()?.context).toBe(4700)
+  })
+
+  test("REGRESSION: the list call receives an explicit bounded limit; exact-cap saturation fails closed with the prior snapshot and the stable error", async () => {
+    setProjectSnapshot(null)
+    const stateDir = tmpStateDir()
+    const params: Array<Record<string, unknown>> = []
+    const api = {
+      state: { path: { directory: "/proj/dir", state: stateDir } },
+      client: {
+        project: { current: async () => ({ data: { id: "proj1" } }) },
+        session: {
+          list: async (p: {
+            directory: string
+            scope: "project"
+            limit: number
+          }) => {
+            params.push({ ...p })
+            return { data: [] }
+          },
+        },
+      },
+    }
+    // First refresh establishes a snapshot (empty live list, no deletions).
+    await refreshProject(api as never)
+    expect(params).toHaveLength(1)
+    expect(params[0]).toMatchObject({
+      directory: "/proj/dir",
+      scope: "project",
+      limit: PROJECT_SESSION_LIMIT,
+    })
+    expect(projectSnapshot()?.sessions).toBe(0)
+    // Exact-cap saturation: a result AT the limit is a TRUNCATED list — the
+    // total would silently undercount, so it must fail closed: prior
+    // snapshot preserved, stable error surfaced, no partial total.
+    const saturated = {
+      state: { path: { directory: "/proj/dir", state: stateDir } },
+      client: {
+        project: { current: async () => ({ data: { id: "proj1" } }) },
+        session: {
+          list: async () => ({
+            data: Array.from({ length: PROJECT_SESSION_LIMIT }, (_, i) => ({
+              id: `s${i}`,
+              projectID: "proj1",
+              tokens: { input: 1, output: 1, reasoning: 1 },
+            })),
+          }),
+        },
+      },
+    }
+    await refreshProject(saturated as never)
+    expect(projectError()).toBe("Unable to load project data")
+    expect(projectLoading()).toBe(false)
+    // The truncated total never replaced the prior snapshot.
+    expect(projectSnapshot()?.sessions).toBe(0)
+    expect(projectSnapshot()?.context).toBe(0)
+  })
+
+  test("REGRESSION: SQLite store — separate connections cannot overwrite projects, and a duplicate same-session deletion increments exactly once", async () => {
+    const stateDir = tmpStateDir()
+    const dbPath = projectDbPath(stateDir)
+    expect(dbPath).toBe(join(stateDir, PROJECT_DB_FILE))
+    const s1 = {
       id: "s1",
       projectID: "proj1",
       cost: 0.01,
@@ -487,511 +821,196 @@ describe("project aggregation (project.ts)", () => {
         reasoning: 200,
         cache: { read: 100, write: 50 },
       },
-      ...over,
-    })
-    // First refresh: the live session is upserted into the ledger. Context is
-    // input + raw output + raw reasoning (cache excluded); cache is separate.
-    await refreshProject(projApi({ id: "proj1" }, [s1()], kvEnv) as never)
-    expect(projectSnapshot()?.sessions).toBe(1)
-    expect(projectSnapshot()?.context).toBe(1700)
-    expect(projectSnapshot()?.cache).toBe(150)
-
-    // Repeating the refresh with the same live list must not duplicate.
-    await refreshProject(projApi({ id: "proj1" }, [s1()], kvEnv) as never)
-    expect(projectSnapshot()?.sessions).toBe(1)
-    expect(projectSnapshot()?.context).toBe(1700)
-    expect(projectSnapshot()?.cache).toBe(150)
-
-    // Updating the session replaces its snapshot (same ID, new values).
-    const updated = s1({
+    }
+    const s2 = {
+      id: "s2",
+      projectID: "proj2",
       cost: 0.02,
-      tokens: {
-        input: 2000,
-        output: 700,
-        reasoning: 300,
-        cache: { read: 25, write: 25 },
-      },
-    })
-    await refreshProject(projApi({ id: "proj1" }, [updated], kvEnv) as never)
-    expect(projectSnapshot()?.sessions).toBe(1)
-    expect(projectSnapshot()?.context).toBe(3000)
-    expect(projectSnapshot()?.cache).toBe(50)
-
-    // The session disappears from the live list: it becomes a tombstone and
-    // keeps contributing its last known snapshot — no token loss on delete.
-    await refreshProject(projApi({ id: "proj1" }, [], kvEnv) as never)
-    expect(projectSnapshot()?.sessions).toBe(1)
-    expect(projectSnapshot()?.context).toBe(3000)
-    expect(projectSnapshot()?.cache).toBe(50)
-    const ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
-    expect(ledger.projects["proj1"]["s1"]).toMatchObject({
-      input: 2000,
-      output: 700,
-      reasoning: 300,
-      cache: 50,
-    })
-    expect(ledger.projects["proj1"]["s1"].deletedAt).toBeDefined()
-    disposeProjectRefresh()
-  })
-
-  test("session.deleted preserves the delete payload when it carries usage, else the last known snapshot", async () => {
-    const kvEnv = makeKv()
-    // A previously-refreshed session leaves a snapshot in the ledger.
-    await refreshProject(
-      projApi(
-        { id: "proj1" },
-        [
-          {
-            id: "s1",
-            projectID: "proj1",
-            cost: 0.01,
-            tokens: { input: 1000, output: 500, reasoning: 200 },
-          },
-        ],
-        kvEnv,
-      ) as never,
-    )
-    // Delete payload WITHOUT usage: the last known snapshot survives.
-    persistDeletedSession(kvEnv.kv, {
-      id: "s1",
-      projectID: "proj1",
-      title: "gone",
-    })
-    let ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
-    expect(ledger.projects["proj1"]["s1"]).toMatchObject({
+      tokens: { input: 2000, output: 700, reasoning: 300 },
+    }
+    // Each call opens its OWN connection: independent instances, one file.
+    recordDeletedSession(dbPath, s1)
+    recordDeletedSession(dbPath, s2)
+    // Different projects stay isolated: neither write overwrote the other.
+    expect(readDeletedAggregate(dbPath, "proj1")).toMatchObject({
       cost: 0.01,
       input: 1000,
       output: 500,
       reasoning: 200,
+      cacheRead: 100,
+      cacheWrite: 50,
+      cache: 150,
+      context: 1850,
     })
-    expect(ledger.projects["proj1"]["s1"].deletedAt).toBeDefined()
+    expect(readDeletedAggregate(dbPath, "proj2")).toMatchObject({
+      cost: 0.02,
+      input: 2000,
+      output: 700,
+      reasoning: 300,
+      cache: 0,
+      context: 3000,
+    })
+    // Duplicate deliveries of the same deletion: admitted exactly once.
+    recordDeletedSession(dbPath, s1)
+    recordDeletedSession(dbPath, s1)
+    expect(readDeletedAggregate(dbPath, "proj1")?.input).toBe(1000)
+    expect(readDeletedAggregate(dbPath, "proj1")?.context).toBe(1850)
+  })
 
-    // Delete payload WITH token/cost data: it becomes the final snapshot.
-    persistDeletedSession(kvEnv.kv, {
+  test("REGRESSION: one instance immediately sees another instance's committed delete — same-project refresh reads updated client totals plus the shared deleted aggregate", async () => {
+    setProjectSnapshot(null)
+    const stateDir = tmpStateDir()
+    const dbPath = projectDbPath(stateDir)
+    const s2: ProjectSessionLike = {
       id: "s2",
       projectID: "proj1",
-      cost: 0.005,
+      cost: 0.02,
+      tokens: { input: 2000, output: 700, reasoning: 300 },
+    }
+    const api = projApi({ id: "proj1" }, [s2], stateDir)
+    await refreshProject(api as never)
+    expect(projectSnapshot()?.sessions).toBe(1)
+    expect(projectSnapshot()?.context).toBe(3000)
+    // A DIFFERENT process (its own connection) records s1's deletion.
+    recordDeletedSession(dbPath, {
+      id: "s1",
+      projectID: "proj1",
+      cost: 0.01,
+      tokens: {
+        input: 1000,
+        output: 500,
+        reasoning: 200,
+        cache: { read: 100, write: 50 },
+      },
+    })
+    // The refresh reads the shared committed aggregate immediately.
+    await refreshProject(api as never)
+    expect(projectSnapshot()?.sessions).toBe(2)
+    expect(projectSnapshot()?.context).toBe(4850)
+    expect(projectSnapshot()?.input).toBe(3000)
+    expect(projectSnapshot()?.cache).toBe(150)
+    expect(projectError()).toBeNull()
+  })
+
+  test("REGRESSION: recursive deletion events — child and parent each contribute exactly once; duplicate deliveries do not inflate", async () => {
+    const stateDir = tmpStateDir()
+    const dbPath = projectDbPath(stateDir)
+    // OpenCode deletes children first, one session.deleted event per session.
+    const child = {
+      id: "child",
+      projectID: "proj1",
+      parentID: "parent",
+      cost: 0.01,
       tokens: {
         input: 500,
         output: 100,
         reasoning: 50,
         cache: { read: 25, write: 25 },
       },
-    })
-    ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
-    expect(ledger.projects["proj1"]["s2"]).toMatchObject({
-      cost: 0.005,
-      input: 500,
-      output: 100,
-      reasoning: 50,
+    }
+    const parent = {
+      id: "parent",
+      projectID: "proj1",
+      cost: 0.02,
+      tokens: { input: 2000, output: 700, reasoning: 300 },
+    }
+    recordDeletedSession(dbPath, child)
+    recordDeletedSession(dbPath, parent)
+    const once = readDeletedAggregate(dbPath, "proj1")
+    expect(once).toMatchObject({
+      input: 2500,
+      output: 800,
+      reasoning: 350,
+      cacheRead: 25,
+      cacheWrite: 25,
       cache: 50,
+      context: 3700,
     })
-    expect(ledger.projects["proj1"]["s2"].deletedAt).toBeDefined()
-
-    // A deleted session that was NEVER observed creates no phantom entry.
-    persistDeletedSession(kvEnv.kv, { id: "ghost", projectID: "proj1" })
-    ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
-    expect(ledger.projects["proj1"]["ghost"]).toBeUndefined()
-    disposeProjectRefresh()
+    // Duplicate deliveries of both events: nothing inflates.
+    recordDeletedSession(dbPath, child)
+    recordDeletedSession(dbPath, parent)
+    recordDeletedSession(dbPath, child)
+    expect(readDeletedAggregate(dbPath, "proj1")).toEqual(once)
   })
 
-  test("REGRESSION: a session observed via messages keeps its usage in the ledger when list and delete payloads carry no usage", async () => {
-    setProjectSnapshot(null)
-    const kvEnv = makeKv()
-    // The plugin observed the session's messages (authoritative client data);
-    // the REAL list/delete payload shapes carry no token/cost fields.
-    upsertMessageUsage(
-      msg(
-        "m1",
-        "s1",
-        { input: 1000, output: 500, reasoning: 200, total: 1700 },
-        0.01,
-      ),
-    )
-    await refreshProject(
-      projApi(
-        { id: "proj1" },
-        [{ id: "s1", projectID: "proj1" }],
-        kvEnv,
-      ) as never,
-    )
-    expect(projectSnapshot()?.sessions).toBe(1)
-    expect(projectSnapshot()?.context).toBe(1700)
-    expect(projectSnapshot()?.cost).toBeCloseTo(0.01)
-    // session.deleted with a usage-less payload: the observed snapshot must
-    // be persisted BEFORE the store forgets the session, and the total must
-    // survive the post-delete refresh (tombstone keeps contributing).
-    persistDeletedSession(
-      kvEnv.kv,
-      { id: "s1", projectID: "proj1", title: "gone" },
-      observedSessionUsage("s1"),
-    )
-    await refreshProject(projApi({ id: "proj1" }, [], kvEnv) as never)
-    expect(projectSnapshot()?.sessions).toBe(1)
-    expect(projectSnapshot()?.context).toBe(1700)
-    expect(projectSnapshot()?.cost).toBeCloseTo(0.01)
-    const ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
-    expect(ledger.projects["proj1"]["s1"].deletedAt).toBeDefined()
-    disposeProjectRefresh()
-    forgetSession("s1")
-  })
-
-  test("REGRESSION: observed-usage ledger entries are idempotent and replace, never accumulate", async () => {
-    setProjectSnapshot(null)
-    const kvEnv = makeKv()
-    upsertMessageUsage(
-      msg(
-        "m1",
-        "s1",
-        { input: 1000, output: 500, reasoning: 200, total: 1700 },
-        0.01,
-      ),
-    )
-    const live = [{ id: "s1", projectID: "proj1" }]
-    await refreshProject(projApi({ id: "proj1" }, live, kvEnv) as never)
-    await refreshProject(projApi({ id: "proj1" }, live, kvEnv) as never)
-    await refreshProject(projApi({ id: "proj1" }, live, kvEnv) as never)
-    const ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
-    expect(Object.keys(ledger.projects["proj1"])).toHaveLength(1)
-    expect(projectSnapshot()?.context).toBe(1700)
-    // The session grows (a second message lands): the observed snapshot is
-    // the session's cumulative sum and REPLACES the previous entry — still
-    // exactly one entry, never accumulated twice.
-    upsertMessageUsage(
-      msg(
-        "m2",
-        "s1",
-        { input: 2000, output: 700, reasoning: 300, total: 3000 },
-        0.02,
-      ),
-    )
-    await refreshProject(projApi({ id: "proj1" }, live, kvEnv) as never)
-    expect(Object.keys(ledger.projects["proj1"])).toHaveLength(1)
-    expect(projectSnapshot()?.sessions).toBe(1)
-    // Raw fields are cumulative; context is the max observed snapshot.
-    expect(projectSnapshot()?.context).toBe(3000)
-    disposeProjectRefresh()
-    forgetSession("s1")
-  })
-
-  test("REGRESSION: Project and Session hourglass headlines are the same no-cache quantity — Project >= a member Session by membership, not by cache", async () => {
-    setProjectSnapshot(null)
-    const kvEnv = makeKv()
-    // Exact screenshot fixture: input 29k, output 117, reasoning 103, cache
-    // 18k. The Session headline must be the no-cache context (29.2k), NOT
-    // 46k and NOT 47.2k — cache never enters either headline.
-    upsertMessageUsage(
-      msg(
-        "m1",
-        "s1",
-        {
-          input: 29000,
-          output: 117,
-          reasoning: 103,
-          cache: { read: 18000, write: 0 },
-          total: 46000,
-        },
-        1.23,
-      ),
-    )
-    const sessionContext = observedSessionUsage("s1")!.total
-    expect(sessionContext).toBe(29220)
-    await refreshProject(
-      projApi(
-        { id: "proj1" },
-        [{ id: "s1", projectID: "proj1" }],
-        kvEnv,
-      ) as never,
-    )
-    expect(projectSnapshot()?.sessions).toBe(1)
-    // Project is the sum of per-session no-cache contexts; the current
-    // session is a member, so Project >= Session by membership.
-    expect(projectSnapshot()?.context).toBe(sessionContext)
-    expect(projectSnapshot()?.context).toBeGreaterThanOrEqual(29220)
-    // The cache stays ONLY in the cache metric.
-    expect(projectSnapshot()?.cache).toBe(18000)
-    // The ledger entry carries the observed no-cache context snapshot.
-    const ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
-    expect(ledger.projects["proj1"]["s1"].context).toBe(29220)
-    // Deleting the session keeps the same no-cache context in the tombstone.
-    persistDeletedSession(
-      kvEnv.kv,
-      { id: "s1", projectID: "proj1" },
-      observedSessionUsage("s1"),
-    )
-    await refreshProject(projApi({ id: "proj1" }, [], kvEnv) as never)
-    expect(projectSnapshot()?.context).toBe(29220)
-    expect(projectSnapshot()?.cache).toBe(18000)
-    disposeProjectRefresh()
-    forgetSession("s1")
-  })
-
-  test("REGRESSION: observed ledger context is the MAX no-cache message context snapshot, never the cumulative sum", async () => {
-    setProjectSnapshot(null)
-    const kvEnv = makeKv()
-    upsertMessageUsage(
-      msg(
-        "m1",
-        "s1",
-        { input: 100, output: 10, reasoning: 5, total: 1000 },
-        0.01,
-      ),
-    )
-    upsertMessageUsage(
-      msg(
-        "m2",
-        "s1",
-        { input: 200, output: 20, reasoning: 10, total: 3000 },
-        0.02,
-      ),
-    )
-    await refreshProject(
-      projApi(
-        { id: "proj1" },
-        [{ id: "s1", projectID: "proj1" }],
-        kvEnv,
-      ) as never,
-    )
-    const ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
-    // Raw fields are cumulative; context is the max observed no-cache
-    // snapshot (230 = 200+20+10), never tokens.total (3000) and never the
-    // cumulative context sum (345 = 115+230).
-    expect(ledger.projects["proj1"]["s1"]).toMatchObject({
-      input: 300,
-      output: 30,
-      reasoning: 15,
+  test("REGRESSION: a delete with no usage never consumes the tombstone — a later event carrying usage is still admitted", async () => {
+    const stateDir = tmpStateDir()
+    const dbPath = projectDbPath(stateDir)
+    // Delete payload AND observed usage both empty: nothing persisted and,
+    // crucially, NO tombstone — the session stays admissible.
+    recordDeletedSession(dbPath, { id: "ghost", projectID: "proj1" }, null)
+    expect(readDeletedAggregate(dbPath, "proj1")).toBeNull()
+    // A later event for the same session WITH usage is admitted exactly once.
+    recordDeletedSession(dbPath, {
+      id: "ghost",
+      projectID: "proj1",
+      cost: 0.01,
+      tokens: { input: 1000, output: 500, reasoning: 200 },
     })
-    expect(ledger.projects["proj1"]["s1"].context).toBe(230)
-    expect(projectSnapshot()?.context).toBe(230)
-    disposeProjectRefresh()
-    forgetSession("s1")
-  })
-
-  test("REGRESSION: payload-only ledger entries get no-cache context = input + output + reasoning", async () => {
-    setProjectSnapshot(null)
-    const kvEnv = makeKv()
-    await refreshProject(
-      projApi(
-        { id: "proj1" },
-        [
-          {
-            id: "s1",
-            projectID: "proj1",
-            cost: 0.01,
-            tokens: {
-              input: 1000,
-              output: 500,
-              reasoning: 200,
-              cache: { read: 100, write: 50 },
-            },
-          },
-        ],
-        kvEnv,
-      ) as never,
-    )
-    const ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
-    expect(ledger.projects["proj1"]["s1"].context).toBe(1700)
-    expect(projectSnapshot()?.context).toBe(1700)
-    expect(projectSnapshot()?.cache).toBe(150)
-    disposeProjectRefresh()
-  })
-
-  test("REGRESSION: pre-fix ledger entries without a context field keep contributing with the no-cache fallback", async () => {
-    setProjectSnapshot(null)
-    const kvEnv = makeKv()
-    kvEnv.kv.set(PROJECT_HISTORY_KEY, {
-      v: 1,
-      projects: {
-        proj1: {
-          s_old: {
-            cost: 0.01,
-            input: 1000,
-            output: 500,
-            reasoning: 200,
-            cache: 150,
-            deletedAt: new Date().toISOString(),
-          },
-        },
-      },
+    recordDeletedSession(dbPath, {
+      id: "ghost",
+      projectID: "proj1",
+      cost: 0.01,
+      tokens: { input: 1000, output: 500, reasoning: 200 },
     })
-    await refreshProject(projApi({ id: "proj1" }, [], kvEnv) as never)
-    expect(projectSnapshot()?.sessions).toBe(1)
-    // Pre-fix entry without context: no-cache fallback, cache excluded.
-    expect(projectSnapshot()?.context).toBe(1700)
-    expect(projectSnapshot()?.cache).toBe(150)
-    disposeProjectRefresh()
+    expect(readDeletedAggregate(dbPath, "proj1")?.context).toBe(1700)
+    expect(readDeletedAggregate(dbPath, "proj1")?.input).toBe(1000)
   })
 
-  test("REGRESSION: post-delete — a failing project.current() with the projectIDHint recovers Project from the ledger, same contribution, no error, tombstone kept", async () => {
-    setProjectSnapshot(null)
-    setProjectError(null)
-    const kvEnv = makeKv()
-    const s1 = (
-      over: Partial<ProjectSessionLike> = {},
-    ): ProjectSessionLike => ({
+  test("REGRESSION: unusable database paths are fail-contained — record/read never throw and read as no deleted usage", async () => {
+    const stateDir = tmpStateDir()
+    const s1 = {
       id: "s1",
       projectID: "proj1",
       cost: 0.01,
-      tokens: {
-        input: 1000,
-        output: 500,
-        reasoning: 200,
-        cache: { read: 100, write: 50 },
-      },
-      ...over,
-    })
-    // First load: the live session is persisted into the ledger.
-    await refreshProject(projApi({ id: "proj1" }, [s1()], kvEnv) as never)
-    expect(projectSnapshot()?.context).toBe(1700)
-    expect(projectSnapshot()?.cache).toBe(150)
-    // session.deleted (payload without usage) tombstones the entry.
-    persistDeletedSession(kvEnv.kv, {
+      tokens: { input: 1000, output: 500, reasoning: 200 },
+    }
+    // Missing state directory: projectDbPath resolves to null — a no-op,
+    // never a throw, out of the session.deleted event handler.
+    expect(() => recordDeletedSession(null, s1)).not.toThrow()
+    expect(readDeletedAggregate(null, "proj1")).toBeNull()
+    // Parent directory missing: the connection cannot even open.
+    const missingParent = join(stateDir, "missing", PROJECT_DB_FILE)
+    expect(() => recordDeletedSession(missingParent, s1)).not.toThrow()
+    expect(readDeletedAggregate(missingParent, "proj1")).toBeNull()
+    // Corrupt file at a valid path: open succeeds but the schema/PRAGMA
+    // phase fails — same fail-contained no-op.
+    const corrupt = join(stateDir, "corrupt.sqlite")
+    writeFileSync(corrupt, "not a database")
+    expect(() => recordDeletedSession(corrupt, s1)).not.toThrow()
+    expect(readDeletedAggregate(corrupt, "proj1")).toBeNull()
+  })
+
+  test("REGRESSION: a usable state directory still persists the deleted aggregate through the same functions", async () => {
+    const stateDir = tmpStateDir()
+    const dbPath = projectDbPath(stateDir)
+    recordDeletedSession(dbPath, {
       id: "s1",
       projectID: "proj1",
-      title: "gone",
+      cost: 0.01,
+      tokens: { input: 1000, output: 500, reasoning: 200 },
     })
-    // The context lookup now fails — right after a delete project.current()
-    // can be momentarily unresolved. The refresh carries the projectIDHint.
-    const failing = {
-      ...kvEnv,
-      state: { path: { directory: "/proj/dir" } },
-      client: {
-        project: {
-          current: async () => {
-            throw new Error("boom")
-          },
-        },
-      },
-    }
-    await refreshProject(failing as never, "proj1")
-    // Recovered from the ledger: the SAME contribution as before the delete
-    // (tombstone included) and NO error — the delete must not flash the
-    // stable failure message.
-    expect(projectSnapshot()?.sessions).toBe(1)
-    expect(projectSnapshot()?.context).toBe(1700)
-    expect(projectSnapshot()?.cache).toBe(150)
-    expect(projectSnapshot()?.cost).toBeCloseTo(0.01)
-    expect(projectError()).toBeNull()
-    // The tombstone is still in the ledger, keeping its snapshot.
-    const ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
-    expect(ledger.projects["proj1"]["s1"]).toMatchObject({
+    expect(readDeletedAggregate(dbPath, "proj1")).toMatchObject({
       cost: 0.01,
       input: 1000,
       output: 500,
       reasoning: 200,
-      cache: 150,
+      context: 1700,
     })
-    expect(ledger.projects["proj1"]["s1"].deletedAt).toBeDefined()
-    disposeProjectRefresh()
   })
 
-  test("REGRESSION: post-delete — a failing session.list recovers by the resolved project ID even when a later debounce lost the hint", async () => {
-    setProjectSnapshot(null)
-    setProjectError(null)
-    const kvEnv = makeKv()
-    await refreshProject(
-      projApi(
-        { id: "proj1" },
-        [
-          {
-            id: "s1",
-            projectID: "proj1",
-            cost: 0.01,
-            tokens: { input: 1000, output: 500, reasoning: 200 },
-          },
-        ],
-        kvEnv,
-      ) as never,
-    )
-    expect(projectSnapshot()?.context).toBe(1700)
-    // The list endpoint fails while the hint names the deleted project.
-    const failing = {
-      ...kvEnv,
-      state: { path: { directory: "/proj/dir" } },
-      client: {
-        project: {
-          current: async ({ directory }: { directory: string }) => {
-            expect(directory).toBe("/proj/dir")
-            return { data: { id: "proj1" } }
-          },
-        },
-        session: {
-          list: async ({
-            directory,
-            scope,
-          }: {
-            directory: string
-            scope: "project"
-          }) => {
-            expect(directory).toBe("/proj/dir")
-            expect(scope).toBe("project")
-            throw new Error("boom")
-          },
-        },
-      },
-    }
-    await refreshProject(failing as never)
-    expect(projectSnapshot()?.sessions).toBe(1)
-    expect(projectSnapshot()?.context).toBe(1700)
-    expect(projectSnapshot()?.cost).toBeCloseTo(0.01)
-    expect(projectError()).toBeNull()
-    disposeProjectRefresh()
-  })
-
-  test("REGRESSION: post-delete recovery needs BOTH the hint and ledger entries — otherwise the stable error stays", async () => {
-    // (a) A hint, but the ledger has no entries for that project: nothing to
-    // recover from — the stable error still surfaces.
-    setProjectSnapshot(null)
-    setProjectError(null)
-    let kvEnv = makeKv()
-    const failCurrent = () => ({
-      ...kvEnv,
-      state: { path: { directory: "/proj/dir" } },
-      client: {
-        project: {
-          current: async () => {
-            throw new Error("boom")
-          },
-        },
-      },
-    })
-    await refreshProject(failCurrent() as never, "proj1")
-    expect(projectSnapshot()).toBeNull()
-    expect(projectError()).toBe("Unable to load project data")
-
-    // (b) Ledger entries exist, but NO hint: the refresh cannot know which
-    // project to recover, so it must not guess — the stable error stays.
-    setProjectError(null)
-    kvEnv = makeKv()
-    await refreshProject(
-      projApi(
-        { id: "proj1" },
-        [
-          {
-            id: "s1",
-            projectID: "proj1",
-            tokens: { input: 1000, output: 500, reasoning: 200 },
-          },
-        ],
-        kvEnv,
-      ) as never,
-    )
-    expect(projectSnapshot()?.context).toBe(1700)
-    setProjectSnapshot(null)
-    await refreshProject(failCurrent() as never)
-    expect(projectSnapshot()).toBeNull()
-    expect(projectError()).toBe("Unable to load project data")
-    disposeProjectRefresh()
-  })
-
-  test("REGRESSION: kv initially empty — Project falls back to the live total and normalizes/persists the ledger", async () => {
-    setProjectSnapshot(null)
-    const kvEnv = makeKv()
-    const sessions: ProjectSessionLike[] = [
+  test("REGRESSION: payload and observed usage merge per-component — a delete carries both and the field maxima win", async () => {
+    const stateDir = tmpStateDir()
+    const dbPath = projectDbPath(stateDir)
+    // The payload snapshot (server fields) is smaller on input but larger on
+    // cache than the plugin's observed message aggregate: the persisted
+    // entry must keep each field's maximum, exactly like the store.
+    recordDeletedSession(
+      dbPath,
       {
         id: "s1",
         projectID: "proj1",
-        cost: 0.01,
+        cost: 0.05,
         tokens: {
           input: 1000,
           output: 500,
@@ -1000,133 +1019,64 @@ describe("project aggregation (project.ts)", () => {
         },
       },
       {
-        id: "s2",
-        projectID: "proj1",
+        cost: 0.01,
+        input: 2000,
+        output: 700,
+        reasoning: 300,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cache: 0,
+        total: 3000,
+      },
+    )
+    expect(readDeletedAggregate(dbPath, "proj1")).toMatchObject({
+      cost: 0.05,
+      input: 2000,
+      output: 700,
+      reasoning: 300,
+      cacheRead: 100,
+      cacheWrite: 50,
+      cache: 150,
+      context: 3150,
+    })
+  })
+
+  test("REGRESSION: post-delete — a failing project.current() with the projectIDHint keeps the project total (live list + deleted aggregate), no error flash", async () => {
+    setProjectSnapshot(null)
+    const stateDir = tmpStateDir()
+    const dbPath = projectDbPath(stateDir)
+    const sessions: ProjectSessionLike[] = [
+      {
+        id: "ps2",
+        projectID: "proj_x",
         cost: 0.02,
         tokens: { input: 2000, output: 700, reasoning: 300 },
       },
     ]
-    await refreshProject(projApi({ id: "proj1" }, sessions, kvEnv) as never)
-    // The live total wins — Project is never zeroed by a fresh ledger.
-    expect(projectSnapshot()?.sessions).toBe(2)
-    expect(projectSnapshot()?.context).toBe(1700 + 3000)
-    expect(projectSnapshot()?.cache).toBe(150)
-    expect(projectSnapshot()?.cost).toBeCloseTo(0.03)
-    // The ledger was rebuilt and persisted from the live sessions.
-    const ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
-    expect(ledger.projects["proj1"]["s1"]).toMatchObject({
-      cost: 0.01,
-      input: 1000,
-      output: 500,
-      reasoning: 200,
-      cache: 150,
-    })
-    // Repeating the refresh stays idempotent: no double count, same total.
-    await refreshProject(projApi({ id: "proj1" }, sessions, kvEnv) as never)
-    expect(projectSnapshot()?.sessions).toBe(2)
-    expect(projectSnapshot()?.context).toBe(4700)
-    expect(projectSnapshot()?.cache).toBe(150)
-    disposeProjectRefresh()
-  })
-
-  test("REGRESSION: malformed or unexpected kv shape never zeroes Project when the live list carries tokens", async () => {
-    const sessions: ProjectSessionLike[] = [
-      {
-        id: "s1",
-        projectID: "proj1",
-        cost: 0.01,
-        tokens: {
-          input: 1000,
-          output: 500,
-          reasoning: 200,
-          cache: { read: 100, write: 50 },
-        },
-      },
-    ]
-    for (const garbage of [
-      "garbage",
-      { projects: null },
-      { projects: [1, 2, 3] },
-      { v: 2, projects: {} },
-      null,
-      42,
-    ]) {
-      setProjectSnapshot(null)
-      const kvEnv = makeKv()
-      kvEnv.kv.set(PROJECT_HISTORY_KEY, garbage)
-      await refreshProject(projApi({ id: "proj1" }, sessions, kvEnv) as never)
-      // The malformed ledger is normalized away; the live total is shown.
-      expect(projectSnapshot()?.sessions).toBe(1)
-      expect(projectSnapshot()?.context).toBe(1700)
-      expect(projectSnapshot()?.cache).toBe(150)
-      // And the persisted ledger is a well-formed shape for the next refresh.
-      const ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
-      expect(ledger.v).toBe(1)
-      expect(ledger.projects["proj1"]["s1"]).toMatchObject({
-        input: 1000,
-        output: 500,
-        reasoning: 200,
-      })
-    }
-    disposeProjectRefresh()
-  })
-
-  test("REGRESSION: a session that disappears after the fallback becomes a tombstone that keeps contributing; reappearing replaces in place", async () => {
-    setProjectSnapshot(null)
-    const kvEnv = makeKv()
-    const s1 = (
-      over: Partial<ProjectSessionLike> = {},
-    ): ProjectSessionLike => ({
-      id: "s1",
-      projectID: "proj1",
-      cost: 0.01,
+    // project.current() returns no data: the transient context gap right
+    // after a delete.
+    const api = projApi(null, sessions, stateDir)
+    // The delete already recorded the aggregate (written BEFORE the refresh).
+    recordDeletedSession(dbPath, {
+      id: "ps1",
+      projectID: "proj_x",
       tokens: {
         input: 1000,
         output: 500,
         reasoning: 200,
         cache: { read: 100, write: 50 },
       },
-      ...over,
     })
-    const s2 = (
-      over: Partial<ProjectSessionLike> = {},
-    ): ProjectSessionLike => ({
-      id: "s2",
-      projectID: "proj1",
-      cost: 0.02,
-      tokens: { input: 2000, output: 700, reasoning: 300 },
-      ...over,
-    })
-    // First refresh on an empty kv: fallback path, ledger persisted.
-    await refreshProject(projApi({ id: "proj1" }, [s1(), s2()], kvEnv) as never)
-    expect(projectSnapshot()?.context).toBe(4700)
-    // s2 disappears from the live list: tombstone keeps its contribution.
-    await refreshProject(projApi({ id: "proj1" }, [s1()], kvEnv) as never)
+    await refreshProject(api as never, "proj_x")
+    expect(projectError()).toBeNull()
     expect(projectSnapshot()?.sessions).toBe(2)
-    expect(projectSnapshot()?.context).toBe(4700)
-    expect(projectSnapshot()?.cost).toBeCloseTo(0.03)
-    let ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
-    expect(ledger.projects["proj1"]["s2"].deletedAt).toBeDefined()
-    // s2 reappears with UPDATED usage: snapshot replaced in place, no duplicate.
-    await refreshProject(
-      projApi(
-        { id: "proj1" },
-        [
-          s1(),
-          s2({
-            cost: 0.05,
-            tokens: { input: 4000, output: 900, reasoning: 500 },
-          }),
-        ],
-        kvEnv,
-      ) as never,
-    )
-    expect(projectSnapshot()?.sessions).toBe(2)
-    expect(projectSnapshot()?.context).toBe(1700 + 5400)
-    expect(projectSnapshot()?.cost).toBeCloseTo(0.06)
-    ledger = kvEnv.store.get(PROJECT_HISTORY_KEY) as ProjectLedger
-    expect(ledger.projects["proj1"]["s2"].deletedAt).toBeUndefined()
-    disposeProjectRefresh()
+    expect(projectSnapshot()?.context).toBe(4850)
+    // Without a hint the same failure surfaces the stable error.
+    setProjectSnapshot(null)
+    setProjectError(null)
+    await refreshProject(api as never)
+    expect(projectError()).toBe("Unable to load project data")
+    expect(projectSnapshot()).toBeNull()
   })
 
   test("Project lookup failure keeps the previous snapshot and surfaces the stable error; no throw", async () => {
@@ -1139,7 +1089,6 @@ describe("project aggregation (project.ts)", () => {
     // runtime error ("undefined is not an object", stacks, etc).
     expect(projectError()).toBe("Unable to load project data")
     expect(projectError()!).not.toContain("undefined is not an object")
-    disposeProjectRefresh()
   })
 
   test("project.current without data is an error, not a silent placeholder", async () => {
@@ -1148,15 +1097,13 @@ describe("project aggregation (project.ts)", () => {
     await refreshProject(projApi(null, []) as never)
     expect(projectSnapshot()).toBeNull()
     expect(projectError()).toBe("Unable to load project data")
-    disposeProjectRefresh()
   })
 
   test("session.list without data is an error, not a silent empty list", async () => {
     setProjectSnapshot(null)
     setProjectError(null)
     const api = {
-      kv: makeKv().kv,
-      state: { path: { directory: "/proj/dir" } },
+      state: { path: { directory: "/proj/dir", state: tmpStateDir() } },
       client: {
         project: { current: async () => ({ data: { id: "p" } }) },
         session: {
@@ -1167,12 +1114,12 @@ describe("project aggregation (project.ts)", () => {
     await refreshProject(api as never)
     expect(projectSnapshot()).toBeNull()
     expect(projectError()).toBe("Unable to load project data")
-    disposeProjectRefresh()
   })
 
   test("projectLoading is true while the refresh runs and flips back to false on success AND on failure (finally)", async () => {
     setProjectSnapshot(null)
     setProjectError(null)
+    const stateDir = tmpStateDir()
     const sessions: ProjectSessionLike[] = [
       {
         id: "s1",
@@ -1183,7 +1130,9 @@ describe("project aggregation (project.ts)", () => {
     ]
     // Success path: loading is observable synchronously and settles to false,
     // and any stale error is cleared.
-    const run = refreshProject(projApi({ id: "proj1" }, sessions) as never)
+    const run = refreshProject(
+      projApi({ id: "proj1" }, sessions, stateDir) as never,
+    )
     expect(projectLoading()).toBe(true)
     await run
     expect(projectLoading()).toBe(false)
@@ -1195,7 +1144,7 @@ describe("project aggregation (project.ts)", () => {
     // await, so the flag is observably true while the refresh is in flight.
     setProjectSnapshot(null)
     const failing = {
-      state: { path: { directory: "/proj/dir" } },
+      state: { path: { directory: "/proj/dir", state: stateDir } },
       client: {
         project: {
           current: async () => {
@@ -1216,19 +1165,19 @@ describe("project aggregation (project.ts)", () => {
     // Starting a refresh clears the error immediately, so an in-flight or
     // successful refresh never shows a stale error.
     setProjectError("stale error")
-    const clearing = refreshProject(projApi({ id: "proj1" }, sessions) as never)
+    const clearing = refreshProject(
+      projApi({ id: "proj1" }, sessions, stateDir) as never,
+    )
     expect(projectError()).toBeNull()
     await clearing
     expect(projectError()).toBeNull()
-    disposeProjectRefresh()
   })
 
   test("Project list failure keeps the placeholder and surfaces the stable error; no throw", async () => {
     setProjectSnapshot(null)
     setProjectError(null)
     const api = {
-      kv: makeKv().kv,
-      state: { path: { directory: "/proj/dir" } },
+      state: { path: { directory: "/proj/dir", state: tmpStateDir() } },
       client: {
         project: { current: async () => ({ data: { id: "p" } }) },
         session: {
@@ -1250,8 +1199,7 @@ describe("project aggregation (project.ts)", () => {
     // The production failure: `experimental` does not exist on the runtime
     // client, so only the old shape yields `undefined is not an object`.
     const api = {
-      kv: makeKv().kv,
-      state: { path: { directory: "/proj/dir" } },
+      state: { path: { directory: "/proj/dir", state: tmpStateDir() } },
       client: {
         project: { current: async () => ({ data: { id: "p" } }) },
         experimental: {
@@ -1266,21 +1214,22 @@ describe("project aggregation (project.ts)", () => {
     expect(projectError()).toBe("Unable to load project data")
     expect(projectError()!).not.toContain("undefined is not an object")
     expect(projectError()!).not.toContain("\n    at ")
-    disposeProjectRefresh()
   })
 
-  test("REGRESSION: project.ts targets the stable client API only — no experimental, no archived, no raw error capture", () => {
+  test("REGRESSION: project.ts targets the stable client API only — explicit limit, no experimental, no archived, no kv, no raw error capture", () => {
     const src = readFileSync(
       new URL("../src/tokenmeter/project.ts", import.meta.url),
       "utf8",
     )
     expect(src).toMatch(
-      /session\.list\(\{\s*directory,\s*scope: "project",\s*\}\)/,
+      /session\.list\(\{\s*directory,\s*scope: "project",\s*limit: PROJECT_SESSION_LIMIT,\s*\}\)/,
     )
     expect(src).toContain("project.current({ directory })")
     expect(src).toContain("Unable to load project data")
     expect(src).not.toContain("experimental")
     expect(src).not.toContain("archived")
+    expect(src).not.toContain("api.kv")
+    expect(src).not.toContain("kv.ready")
     expect(src).not.toContain("String(error)")
     expect(src).not.toContain("error.message")
   })
@@ -1288,13 +1237,18 @@ describe("project aggregation (project.ts)", () => {
   test("scheduleProjectRefresh debounces and disposes its timer", async () => {
     setProjectSnapshot(null)
     disposeProjectRefresh()
-    const api = projApi({ id: "proj1" }, [
-      {
-        id: "s1",
-        projectID: "proj1",
-        tokens: { input: 100, output: 50, reasoning: 10 },
-      },
-    ])
+    const stateDir = tmpStateDir()
+    const api = projApi(
+      { id: "proj1" },
+      [
+        {
+          id: "s1",
+          projectID: "proj1",
+          tokens: { input: 100, output: 50, reasoning: 10 },
+        },
+      ],
+      stateDir,
+    )
     // Two rapid schedules collapse into one debounced refresh.
     scheduleProjectRefresh(api as never)
     scheduleProjectRefresh(api as never, PROJECT_REFRESH_DELAY * 2)
@@ -1306,12 +1260,53 @@ describe("project aggregation (project.ts)", () => {
     scheduleProjectRefresh(api as never, 20)
     await waitFor(() => projectSnapshot()?.sessions === 1)
     expect(projectSnapshot()?.input).toBe(100)
+  })
+
+  test("REGRESSION: polling — a single timer refreshes Project on the cadence, never overlaps, and disposes cleanly", async () => {
+    setProjectSnapshot(null)
     disposeProjectRefresh()
+    const stateDir = tmpStateDir()
+    let inFlight = 0
+    let maxInFlight = 0
+    let calls = 0
+    const list = async () => {
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      calls += 1
+      // Slower than the tick: an overlapping poll would stack calls.
+      await sleep(25)
+      inFlight -= 1
+      return {
+        data: [
+          {
+            id: "s1",
+            projectID: "proj1",
+            tokens: { input: 100, output: 50, reasoning: 10 },
+          },
+        ],
+      }
+    }
+    const api = {
+      state: { path: { directory: "/proj/dir", state: stateDir } },
+      client: {
+        project: { current: async () => ({ data: { id: "proj1" } }) },
+        session: { list },
+      },
+    }
+    startProjectPolling(api as never, 20)
+    startProjectPolling(api as never, 20) // duplicate start is a no-op
+    await waitFor(() => calls >= 3)
+    expect(projectSnapshot()?.sessions).toBe(1)
+    // Ticks never overlap: at most one refresh in flight at any moment.
+    expect(maxInFlight).toBe(1)
+    disposeProjectRefresh()
+    const before = calls
+    await sleep(100)
+    expect(calls).toBe(before)
   })
 })
-
 describe("reconcile snapshot (root + recursive descendants)", () => {
-  test("REGRESSION: repeated input-context messages must not sum into the headline", async () => {
+  test("REGRESSION: the Session coins total is the sum of per-session spends (each session once) — components stay cumulative", async () => {
     const rootID = "ses_root_reg"
     const childID = "ses_child_reg"
     const sessions = {
@@ -1344,7 +1339,14 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
     )
     await waitFor(() => snapshot()?.rootID === rootID)
     const snap = snapshot()!
-    expect(snap.totalTokens).toBe(52000 + 10500)
+    // Each session contributes its complete spend — the root sums ALL of
+    // its messages (4 × 52000), the child sums all of its (3 × 10500), so
+    // the coins total is 208000 + 31500 — never below the cumulative input +
+    // real output (which, with no cache anywhere, it equals exactly).
+    expect(snap.totalTokens).toBe(4 * 52000 + 3 * 10500)
+    expect(snap.totalTokens).toBe(
+      snap.input + realOutput(snap.output, snap.reasoning),
+    )
     expect(snap.input).toBe(4 * 50000 + 3 * 10000)
     expect(snap.output).toBe(4 * 2000 + 3 * 500)
     expect(snap.reasoning).toBe(0)
@@ -1353,10 +1355,14 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
     expect(snap.delegations).toBe(1)
     expect(snap.agents).toBe(1)
     expect(snap.groups).toHaveLength(1)
-    expect(snap.groups[0].total).toBe(10500)
+    // The group sums each delegated session's complete spend exactly once
+    // (the child's three messages collapse into its one 31500 total).
+    expect(snap.groups[0].total).toBe(3 * 10500)
     expect(snap.groups[0].input).toBe(30000)
     expect(snap.groups[0].output).toBe(1500)
     expect(snap.groups[0].reasoning).toBe(0)
+    expect(snap.groups[0].cacheRead).toBe(0)
+    expect(snap.groups[0].cacheWrite).toBe(0)
     expect(snap.groups[0].cost).toBeCloseTo(0.015)
     disposeReconcile()
   })
@@ -1404,7 +1410,7 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
     disposeReconcile()
   })
 
-  test("REGRESSION: per-session context is the no-cache snapshot — tokens.total and cache never enter it", async () => {
+  test("REGRESSION: per-session spend is the ATOMIC snapshot — cache INCLUDED, tokens.total still unused", async () => {
     const rootID = "ses_root_total"
     const childID = "ses_child_total"
     const sessions = {
@@ -1436,14 +1442,19 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
     )
     await waitFor(() => snapshot()?.rootID === rootID)
     const snap = snapshot()!
-    // 52000 = 50000+2000 (cache 3000 excluded, tokens.total 55000 unused).
-    expect(snap.totalTokens).toBe(52000 + 10500)
+    // 55000 = 50000+2000+3000: the session's billed cache read IS part of
+    // its complete spend (matching the provider total); tokens.total (55000
+    // here) is coincidental and still never read.
+    // Child: 10500.
+    expect(snap.totalTokens).toBe(55000 + 10500)
     expect(snap.cache).toBe(3000)
+    expect(snap.cacheRead).toBe(3000)
+    expect(snap.cacheWrite).toBe(0)
     expect(snap.groups[0].total).toBe(10500)
     disposeReconcile()
   })
 
-  test("REGRESSION: invalidateUsage rehydrates and reflects removed/changed messages", async () => {
+  test("REGRESSION: invalidateUsage rehydrates and reflects removed/changed messages — components keep their per-field maxima", async () => {
     const rootID = "ses_inval"
     const sessions: Record<string, UsageMessage[]> = {
       [rootID]: [
@@ -1465,9 +1476,13 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
     ]
     invalidateUsage(rootID)
     await reconcile(fakeApi(sessions, {}, {}), rootID)
-    await waitFor(() => snapshot()!.input === 2000)
-    expect(snapshot()!.totalTokens).toBe(2200)
-    expect(snapshot()!.cost).toBeCloseTo(0.02)
+    await waitFor(() => snapshot()!.input === 3000)
+    // The rehydrated map computes 2200, but the per-field high-waters
+    // (input 3000, cost 0.03) preserve the full spend (3300, observed at
+    // full size) — removal can never lower the displayed spend.
+    expect(snapshot()!.totalTokens).toBe(3300)
+    expect(snapshot()!.input).toBe(3000)
+    expect(snapshot()!.cost).toBeCloseTo(0.03)
     disposeReconcile()
   })
 
@@ -1540,7 +1555,7 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
     disposeReconcile()
   })
 
-  test("groups order by context total descending; cost/runs/name only break ties", async () => {
+  test("groups order by spend total descending; cost/runs/name only break ties", async () => {
     const rootID = "ses_order_root"
     const c1 = "ses_order_1"
     const c2 = "ses_order_2"
@@ -1568,9 +1583,120 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
     )
     await waitFor(() => snapshot()?.rootID === rootID)
     const names = snapshot()!.groups.map((g) => g.name)
-    // Context total desc: beta (5.5k) first; alpha and zeta tie on total
+    // Spend total desc: beta (5.5k) first; alpha and zeta tie on total
     // (1.1k), cost and runs, so the name tiebreak puts alpha before zeta.
     expect(names).toEqual(["beta", "alpha", "zeta"])
+    disposeReconcile()
+  })
+
+  test("REGRESSION: recursive delegation — grandchildren are discovered, grouped and summed; spend equals input + real output at every level", async () => {
+    const rootID = "ses_root_nested"
+    const childID = "ses_child_nested"
+    const grand1 = "ses_grand_nested"
+    const grand2 = "ses_grand2_nested"
+    const sessions = {
+      [rootID]: [
+        msg("r1", rootID, { input: 40000, output: 2000, reasoning: 500 }, 0.05),
+        msg("r2", rootID, { input: 40000, output: 2000, reasoning: 500 }, 0.05),
+      ],
+      [childID]: [
+        msg(
+          "c1",
+          childID,
+          { input: 20000, output: 1000, reasoning: 250 },
+          0.02,
+        ),
+      ],
+      [grand1]: [
+        msg("g1", grand1, { input: 5000, output: 300, reasoning: 100 }, 0.01),
+      ],
+      [grand2]: [
+        msg("g2", grand2, { input: 3000, output: 200, reasoning: 50 }, 0.01),
+      ],
+    }
+    const metas: Record<string, SessionInfo> = {
+      [rootID]: { id: rootID, title: "Root" },
+      [childID]: { id: childID, agent: "sdd-apply" },
+      [grand1]: { id: grand1, agent: "sdd-apply" },
+      [grand2]: { id: grand2, agent: "explore" },
+    }
+    for (const id of [rootID, childID, grand1, grand2]) forgetSession(id)
+    purgeTreeCache()
+    activateRoot(
+      fakeApi(
+        sessions,
+        {
+          [rootID]: [metas[childID]],
+          [childID]: [metas[grand1], metas[grand2]],
+        },
+        metas,
+      ),
+      rootID,
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    const snap = snapshot()!
+    // The tree walk is recursive: the grandchild sessions are descendants
+    // of the root even though they are children of a child.
+    expect(snap.delegations).toBe(3)
+    expect(snap.agents).toBe(2)
+    expect(snap.groups).toHaveLength(2)
+    const sdd = snap.groups.find((g) => g.name === "sdd-apply")
+    const explore = snap.groups.find((g) => g.name === "explore")
+    expect(sdd?.runs).toBe(2)
+    expect(sdd?.total).toBe(21250 + 5400)
+    expect(sdd?.input).toBe(25000)
+    expect(sdd?.output).toBe(1300)
+    expect(sdd?.reasoning).toBe(350)
+    // Single-message descendants: the group total equals their cumulative
+    // input + real output here (one message per session).
+    expect(sdd?.total).toBe(
+      sdd!.input + realOutput(sdd!.output, sdd!.reasoning),
+    )
+    expect(explore?.runs).toBe(1)
+    expect(explore?.total).toBe(3250)
+    // Session spend: the root has TWO messages, so it contributes its
+    // complete spend (85000 = 2 × 42500); the descendants each contribute
+    // their complete spend. Total = 85000 + 21250 + 5400 + 3250 = 114900
+    // — each session ID exactly once, and with no cache anywhere the spend
+    // equals the cumulative input + real output exactly.
+    expect(snap.totalTokens).toBe(85000 + 21250 + 5400 + 3250)
+    expect(snap.totalTokens).toBe(
+      snap.input + realOutput(snap.output, snap.reasoning),
+    )
+    expect(snap.input).toBe(108000)
+    expect(snap.output).toBe(5500)
+    expect(snap.reasoning).toBe(1400)
+    disposeReconcile()
+  })
+
+  test("REGRESSION: compaction cannot lower the Session spend — a smaller later message set keeps the per-component high-water", async () => {
+    const rootID = "ses_compact"
+    const sessions: Record<string, UsageMessage[]> = {
+      [rootID]: [
+        msg("m1", rootID, { input: 10000, output: 1000, total: 11000 }, 0.01),
+        msg("m2", rootID, { input: 60000, output: 3000, total: 63000 }, 0.02),
+      ],
+    }
+    forgetSession(rootID)
+    purgeTreeCache()
+    activateRoot(fakeApi(sessions, {}, {}), rootID)
+    await waitFor(() => snapshot()?.rootID === rootID)
+    // Spend formula: 70000 + 4000 = 74000.
+    expect(snapshot()!.totalTokens).toBe(74000)
+    expect(snapshot()!.input).toBe(70000)
+
+    // session.compacted rewrites the client to a SMALLER message set: the
+    // historical per-component maxima (input 70000, output 4000, cost 0.03)
+    // must survive the rehydrate.
+    sessions[rootID] = [msg("m2", rootID, { input: 2000, output: 200 })]
+    invalidateUsage(rootID)
+    await reconcile(fakeApi(sessions, {}, {}), rootID)
+    // Components keep their per-field maxima; the coins total keeps the
+    // historical spend (74000), never 2200.
+    expect(snapshot()!.totalTokens).toBe(74000)
+    expect(snapshot()!.input).toBe(70000)
+    expect(snapshot()!.output).toBe(4000)
+    expect(snapshot()!.cost).toBeCloseTo(0.03)
     disposeReconcile()
   })
 })
@@ -1624,7 +1750,7 @@ describe("width resolution and column-safe text (text.ts)", () => {
   test("textColumns counts wide glyphs as 2 and Nerd Font PUA glyphs as 1", () => {
     expect(textColumns("abc")).toBe(3)
     expect(textColumns("界")).toBe(2)
-    expect(textColumns(GLYPH.hourglass)).toBe(1)
+    expect(textColumns(GLYPH.coins)).toBe(1)
     expect(textColumns(GLYPH.fire)).toBe(1)
     expect(textColumns(GLYPH.robot)).toBe(1)
     expect(textColumns(GLYPH.tasks)).toBe(1)
@@ -1670,7 +1796,8 @@ describe("panel lines fit the default sidebar width (format.ts)", () => {
     input: 900000,
     output: 400000,
     reasoning: 120000,
-    cache: 300000,
+    cacheRead: 300000,
+    cacheWrite: 0,
   }
   const group = {
     name: "sdd-apply",
@@ -1681,33 +1808,97 @@ describe("panel lines fit the default sidebar width (format.ts)", () => {
     input: 2700000,
     output: 411200,
     reasoning: 100000,
-    cache: 10,
+    cacheRead: 10,
+    cacheWrite: 0,
   }
   const outputReal = realOutput(snap.output, snap.reasoning)
 
   test("the three-value breakdown fits the design budget and stays one line", () => {
-    const line = formatBreakdown(snap.input, outputReal, snap.cache)
+    const line = formatBreakdown(
+      snap.input,
+      outputReal,
+      snap.cacheRead,
+      snap.cacheWrite,
+    )
     expect(textColumns(line)).toBeLessThanOrEqual(MIN_BREAKDOWN_WIDTH)
     expect(line.split("\n")).toHaveLength(1)
   })
 
-  test("breakdown keeps a visible gap after every glyph: output real one space, cache two", () => {
-    expect(formatBreakdown(snap.input, outputReal, snap.cache)).toContain(
-      `${GLYPH.down} ${fmtCompact(outputReal)}`,
+  test("breakdown keeps a visible gap after every glyph: output real one space, cache two, conditional R|W pair", () => {
+    expect(
+      formatBreakdown(snap.input, outputReal, snap.cacheRead, snap.cacheWrite),
+    ).toContain(`${GLYPH.down} ${fmtCompact(outputReal)}`)
+    expect(
+      formatBreakdown(snap.input, outputReal, snap.cacheRead, snap.cacheWrite),
+    ).toContain(
+      `${GLYPH.cache}  ${formatCachePair(snap.cacheRead, snap.cacheWrite)}`,
     )
-    expect(formatBreakdown(snap.input, outputReal, snap.cache)).toContain(
-      `${GLYPH.cache}  ${fmtCompact(snap.cache)}`,
+    expect(
+      formatBreakdown(snap.input, outputReal, snap.cacheRead, snap.cacheWrite),
+    ).toContain("R300k")
+  })
+
+  test("REGRESSION: cache pair is conditional R|W — zero sides omitted, both zero renders 0, never a slash", () => {
+    expect(formatCachePair(45000000, 10000)).toBe("R45M|W10k")
+    expect(formatCachePair(45000000, 0)).toBe("R45M")
+    expect(formatCachePair(0, 10000)).toBe("W10k")
+    expect(formatCachePair(0, 0)).toBe("0")
+    // fmtCompact runs on every side; negatives clamp to zero like the rest
+    // of the numeric pipeline.
+    expect(formatCachePair(-5, 3000)).toBe("W3k")
+    expect(formatCachePair(0, -5)).toBe("0")
+    // The slash syntax is gone everywhere in the pair output.
+    for (const pair of [
+      formatCachePair(45000000, 10000),
+      formatCachePair(45000000, 0),
+      formatCachePair(0, 10000),
+      formatCachePair(0, 0),
+    ]) {
+      expect(pair).not.toContain("/")
+    }
+  })
+
+  test("REGRESSION: every spend headline keeps TWO visible spaces after the coins glyph — a single space is rejected", () => {
+    for (const headline of [
+      formatHeadline({ totalTokens: snap.totalTokens }),
+      formatHeadlineRow(snap.totalTokens, snap.reasoning, snap.cost),
+    ]) {
+      expect(headline).toContain(
+        `${GLYPH.coins}  ${fmtTokens(snap.totalTokens)}`,
+      )
+      expect(headline).not.toContain(
+        `${GLYPH.coins} ${fmtTokens(snap.totalTokens)}`,
+      )
+    }
+    expect(formatGroupMeta(group).context).toContain(
+      `${GLYPH.coins}  ${fmtTokens(group.total)}`,
+    )
+    expect(formatGroupMeta(group).context).not.toContain(
+      `${GLYPH.coins} ${fmtTokens(group.total)}`,
+    )
+    // The one-space failure mode must be impossible: coins followed by a
+    // single space and then the number never renders.
+    expect(formatHeadline({ totalTokens: snap.totalTokens })).not.toMatch(
+      new RegExp(`${GLYPH.coins} \\d`),
+    )
+    expect(formatGroupMeta(group).context).not.toMatch(
+      new RegExp(`${GLYPH.coins} \\d`),
     )
   })
 
-  test("REGRESSION: breakdown order is input, output real, cache with the real values", () => {
-    expect(formatBreakdown(1, 2, 3)).toBe(
-      `${GLYPH.up} 1 · ${GLYPH.down} 2 · ${GLYPH.cache}  3`,
+  test("REGRESSION: breakdown order is input, output real, cache R|W with the real values", () => {
+    expect(formatBreakdown(1, 2, 3, 4)).toBe(
+      `${GLYPH.up} 1 · ${GLYPH.down} 2 · ${GLYPH.cache}  R3|W4`,
     )
   })
 
   test("REGRESSION: the breakdown row is fully muted and segments concat to the whole line", () => {
-    const segments = breakdownSegments(snap.input, outputReal, snap.cache)
+    const segments = breakdownSegments(
+      snap.input,
+      outputReal,
+      snap.cacheRead,
+      snap.cacheWrite,
+    )
     expect(segments.map((s) => s.accent)).toEqual([
       false,
       false,
@@ -1716,7 +1907,7 @@ describe("panel lines fit the default sidebar width (format.ts)", () => {
       false,
     ])
     expect(segments.map((s) => s.text).join("")).toBe(
-      formatBreakdown(snap.input, outputReal, snap.cache),
+      formatBreakdown(snap.input, outputReal, snap.cacheRead, snap.cacheWrite),
     )
   })
 
@@ -1760,23 +1951,24 @@ describe("panel lines fit the default sidebar width (format.ts)", () => {
     expect(formatAgents(3)).not.toMatch(/Subagents/)
   })
 
-  test("REGRESSION: each group renders exactly three rows — indented primary-blue robot + name + tasks, indented context+thinking+cost, indented three metrics — in order", () => {
+  test("REGRESSION: each group renders exactly three rows — indented primary-blue robot + name + tasks, indented spend+thinking+cost, indented three metrics — in order", () => {
     const line = formatGroupLine(group, 36)
     const meta = formatGroupMeta(group)
     const breakdown = formatBreakdown(
       group.input,
       realOutput(group.output, group.reasoning),
-      group.cache,
+      group.cacheRead,
+      group.cacheWrite,
     )
     expect(line.marker + line.robot + line.name + line.tasks).toBe(
       `  ↳ ${GLYPH.robot}  sdd-apply · ${GLYPH.tasks}  2 task`,
     )
     expect(line.robot).toBe(`${GLYPH.robot}  `)
     expect(meta.context + meta.thinking + meta.cost).toBe(
-      `${GLYPH.hourglass} 748.9k · ${GLYPH.reasoning}  100.0k · ${GLYPH.fire} $0.03`,
+      `${GLYPH.coins}  748.9k · ${GLYPH.reasoning}  100.0k · ${GLYPH.fire} $0.03`,
     )
     expect(breakdown).toBe(
-      `${GLYPH.up} 2.7M · ${GLYPH.down} 511k · ${GLYPH.cache}  10`,
+      `${GLYPH.up} 2.7M · ${GLYPH.down} 511k · ${GLYPH.cache}  R10`,
     )
   })
 
@@ -1785,7 +1977,8 @@ describe("panel lines fit the default sidebar width (format.ts)", () => {
     const breakdown = formatBreakdown(
       group.input,
       realOutput(group.output, group.reasoning),
-      group.cache,
+      group.cacheRead,
+      group.cacheWrite,
     )
     expect(
       textColumns(GROUP_ROW_INDENT) +
@@ -1801,7 +1994,8 @@ describe("panel lines fit the default sidebar width (format.ts)", () => {
     const breakdown = formatBreakdown(
       group.input,
       realOutput(group.output, group.reasoning),
-      group.cache,
+      group.cacheRead,
+      group.cacheWrite,
     )
     for (let width = 22; width <= 50; width += 2) {
       const line = formatGroupLine(group, width)
@@ -1857,7 +2051,7 @@ describe("panel lines fit the default sidebar width (format.ts)", () => {
     expect(at26.tasks).toBe(` · ${GLYPH.tasks}  2 task`)
     const meta = formatGroupMeta(group)
     expect(meta.context + meta.thinking + meta.cost).toBe(
-      `${GLYPH.hourglass} 748.9k · ${GLYPH.reasoning}  100.0k · ${GLYPH.fire} $0.03`,
+      `${GLYPH.coins}  748.9k · ${GLYPH.reasoning}  100.0k · ${GLYPH.fire} $0.03`,
     )
 
     const tight = formatGroupLine(group, 8)
@@ -1908,13 +2102,17 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
     new URL("../src/tokenmeter/format.ts", import.meta.url),
     "utf8",
   )
+  const colorsSrc = readFileSync(
+    new URL("../src/tokenmeter/panel/colors.ts", import.meta.url),
+    "utf8",
+  )
   const entrySrc = readFileSync(
     new URL("../src/tokenmeter.tsx", import.meta.url),
     "utf8",
   )
 
   test("glyph constants are the documented stable Nerd Font codepoints", () => {
-    expect(GLYPH.hourglass).toBe("\uF4E3")
+    expect(GLYPH.coins).toBe("\uEDE8")
     expect(GLYPH.cache).toBe("\uF472")
     expect(GLYPH.fire).toBe("\u{F0238}")
     expect(GLYPH.robot).toBe("\u{F06A9}")
@@ -1923,6 +2121,16 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
     expect(GLYPH.tree).toBe("↳")
     expect(GLYPH.expand).toBe("▶")
     expect(GLYPH.collapse).toBe("▼")
+  })
+
+  test("the old oct-hourglass glyph is gone; fa-coins is the spend glyph everywhere", () => {
+    for (const source of [glyphsSrc, panelSrc, groupRowsSrc, formatSrc]) {
+      expect(source).not.toContain("hourglass")
+      expect(source).not.toContain("\\uF4E3")
+      expect(source).not.toContain("\\u{F4E3}")
+    }
+    expect(glyphsSrc).toContain("\\uEDE8")
+    expect(formatSrc).toContain("GLYPH.coins")
   })
 
   test("no unreliable glyphs, no person glyph, no useTerminalDimensions anywhere in the plugin", () => {
@@ -2025,7 +2233,7 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
     )
     // Per-agent rows (group-rows.tsx): indented marker, robot icon left of
     // the agent name in the SAME blue (BOTH theme().primary — the clock
-    // stays cyan info), green success task count, info context, accent
+    // stays cyan info), green success task count, fixed-gold spend, accent
     // thinking, error cost.
     expect(groupRowsSrc).toContain("fg={props.theme().text}>{line().marker}")
     expect(groupRowsSrc).toContain("fg={props.theme().primary}>{line().robot}")
@@ -2047,11 +2255,24 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
     // and the group row-1 prefix (marker + robot) is what yields in the extreme.
     expect(formatSrc).toContain("const robot = `")
     expect(formatSrc).toContain("textColumns(robot)")
-    expect(groupRowsSrc).toContain("fg={props.theme().info}>{meta().context}")
+    // The group spend total is the FIXED gold (never theme accent); thinking
+    // keeps the accent; cost keeps error.
+    expect(groupRowsSrc).toContain("fg={SPEND_GOLD}>{meta().context}")
+    expect(groupRowsSrc).not.toContain(
+      "fg={props.theme().accent}>{meta().context}",
+    )
     expect(groupRowsSrc).toContain(
       "fg={props.theme().accent}>{meta().thinking}",
     )
     expect(groupRowsSrc).toContain("fg={props.theme().error}>{meta().cost}")
+    // The headline spend totals (Project and Session) also ride the fixed
+    // gold, while thinking stays theme accent — no theme-derived spend.
+    expect(panelSrc).toContain("fg={SPEND_GOLD}>{formatHeadline")
+    expect(panelSrc).not.toContain("fg={theme().accent}>{formatHeadline")
+    // SPEND_GOLD is the single centralized literal — the fixed coin gold.
+    expect(colorsSrc).toContain('SPEND_GOLD = "#D4AF37"')
+    expect(panelSrc).toContain('SPEND_GOLD } from "./colors"')
+    expect(groupRowsSrc).toContain('SPEND_GOLD } from "./colors"')
     // Project placeholder fallback survives; the Session placeholder is intact.
     expect(panelSrc).toContain("fg={theme().textMuted}>…</text>")
     // Scrollbox gates on 3+ groups and caps at two groups (6 rows).

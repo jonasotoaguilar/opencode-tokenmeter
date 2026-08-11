@@ -8,8 +8,8 @@
  * matching the reference plugin's line style.
  */
 export const GLYPH = {
-  /** oct-hourglass — context used (headline and group totals). */
-  hourglass: "\uF4E3",
+  /** fa-coins — cumulative token spend (headline and group totals). */
+  coins: "\uEDE8",
   /** oct-database — cumulative cache tokens. */
   cache: "\uF472",
   /** md-fire (U+F0238, plane-15 PUA) — native cost, root and group summary lines. */

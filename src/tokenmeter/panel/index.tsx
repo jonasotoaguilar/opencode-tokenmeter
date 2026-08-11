@@ -23,9 +23,11 @@
  *     scrollbox capped at 2 groups (6 rows) so 3 groups scroll; with fewer
  *     groups no scrollbox is used.
  *
- * Session and Project share the same two metric rows: row 1 is the context
- * total (info), the thinking value right after it (accent), and the fire
- * cost (error); row 2 is the muted input · output real · cache breakdown,
+ * Session and Project share the same two metric rows: row 1 is the spend
+ * total (fixed SPEND_GOLD — the coin/token color, never theme-derived), the
+ * thinking value right after it (accent), and the fire cost (error); row 2
+ * is the muted
+ * input · output real · cache read/write breakdown,
  * where output real = raw output + raw reasoning (computed exactly once via
  * realOutput). The metric rows only render when they fit the content
  * width, so a fixed row never overflows; long names truncate on row 1
@@ -54,6 +56,7 @@ import {
 import { activateRoot } from "../reconcile"
 import { snapshot } from "../store"
 import { contentWidth, textColumns, truncateToColumns } from "../text"
+import { SPEND_GOLD } from "./colors"
 import { GroupRows } from "./group-rows"
 import { ProjectError } from "./project-section"
 
@@ -123,7 +126,7 @@ export function UsagePanel(props) {
               }
             >
               <box flexDirection="row">
-                <text fg={theme().info}>
+                <text fg={SPEND_GOLD}>
                   {formatHeadline({ totalTokens: project().context })}
                 </text>
                 <text fg={theme().accent}>
@@ -140,7 +143,8 @@ export function UsagePanel(props) {
                   breakdownSegments(
                     project().input,
                     realOutput(project().output, project().reasoning),
-                    project().cache,
+                    project().cacheRead,
+                    project().cacheWrite,
                   )
                     .map((segment) => segment.text)
                     .join(""),
@@ -152,7 +156,8 @@ export function UsagePanel(props) {
                   each={breakdownSegments(
                     project().input,
                     realOutput(project().output, project().reasoning),
-                    project().cache,
+                    project().cacheRead,
+                    project().cacheWrite,
                   )}
                 >
                   {(segment) => (
@@ -185,7 +190,7 @@ export function UsagePanel(props) {
               }
             >
               <box flexDirection="row">
-                <text fg={theme().info}>{formatHeadline(snap())}</text>
+                <text fg={SPEND_GOLD}>{formatHeadline(snap())}</text>
                 <text fg={theme().accent}>
                   {formatThinking(snap().reasoning)}
                 </text>
@@ -200,7 +205,8 @@ export function UsagePanel(props) {
                   breakdownSegments(
                     snap().input,
                     realOutput(snap().output, snap().reasoning),
-                    snap().cache,
+                    snap().cacheRead,
+                    snap().cacheWrite,
                   )
                     .map((segment) => segment.text)
                     .join(""),
@@ -212,7 +218,8 @@ export function UsagePanel(props) {
                   each={breakdownSegments(
                     snap().input,
                     realOutput(snap().output, snap().reasoning),
-                    snap().cache,
+                    snap().cacheRead,
+                    snap().cacheWrite,
                   )}
                 >
                   {(segment) => (

@@ -1,26 +1,33 @@
 /**
  * Pure usage math for the TokenMeter sidebar: extraction of per-message
- * usage, per-session summation and per-project summation. Display formatting
- * lives in numbers.ts. No I/O and no state.
+ * usage, per-session aggregation and per-project summation. Display
+ * formatting lives in numbers.ts. No I/O and no state.
  *
- * Context semantics: each assistant message contributes ONE no-cache
- * context snapshot — `input + output + reasoning`, nothing else. The
- * provider-reported `tokens.total` is NOT used for the displayed context
- * (it may include cache); cache exists only in the separate cumulative
- * cache metric. A session's context is the MAXIMUM snapshot observed across
- * its current messages, so the headline sums one snapshot per session and
- * repeated messages with the same input context (or retries/compaction) can
- * never inflate or falsely drop it. input/output/reasoning/cache/cost stay
- * strictly cumulative and separate.
+ * Spend semantics (final, corrected): a session's total is the CUMULATIVE
+ * TOKEN SPEND computed from its observed assistant messages in client order
+ * (Map insertion order; replacing a message never reorders it):
  *
- * Project context semantics: the same no-cache definition applies to the
- * hourglass in Project and Session — each session contributes ONE stored
- * context snapshot (`input + output + reasoning` for observed sessions and
- * for payload-only entries, since the list payload has no total). Context is
- * a SNAPSHOT field (one per session); cache stays the separate cumulative
- * second-row metric and is never added to context a second time. Because a
- * project contains its current Session, the Project headline is always >=
- * the Session headline by membership — never by cache.
+ *   total = Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write
+ *
+ * summed across ALL assistant messages of the session. OpenCode bills
+ * input, output, reasoning (as output) and the two cache channels
+ * separately, and this sum exactly reconstructs the provider `tokens.total`
+ * per message; the `tokens.total` field itself is intentionally never read.
+ * Because every cache token is billed, cache read/write are CUMULATIVE —
+ * there is no "latest qualifying message" concept anymore.
+ *
+ * High-water: a session's stored/displayed spend is the per-field maximum
+ * (cost/input/output/reasoning/cacheRead/cacheWrite) ever observed — never
+ * a single snapshot — so compaction or a smaller later message set cannot
+ * lower it (see store.ts observedSessionUsage).
+ *
+ * Project spend: the ledger stores each tree/session's complete-session
+ * spend EXPLICITLY (see types.ProjectLedgerEntry) — it is never derived
+ * from cumulative raw fields, and never built as a per-field maximum of
+ * different moments. A payload-only session (never observed via messages)
+ * contributes `input + output + reasoning + cache.read + cache.write` — the
+ * full spend formula from the payload's own fields, so Project spend is
+ * always at least Project input + output + reasoning.
  *
  * Output real semantics: OpenCode normalizes `tokens.output` as the VISIBLE
  * output (reasoning subtracted out) while `tokens.reasoning` carries the raw
@@ -30,15 +37,26 @@
  */
 import type {
   MessageUsage,
-  ProjectLedger,
+  ProjectAggregateEntry,
   ProjectSessionLike,
   ProjectUsage,
+  SessionComponents,
   SessionUsage,
   UsageMessage,
 } from "./types"
 
 const num = (v: unknown): number =>
   typeof v === "number" && Number.isFinite(v) ? v : 0
+
+const hasUsage = (entry: ProjectAggregateEntry): boolean =>
+  entry.cost +
+    entry.input +
+    entry.output +
+    entry.reasoning +
+    entry.cacheRead +
+    entry.cacheWrite +
+    entry.context >
+  0
 
 /**
  * Real (visible + thinking) output. OpenCode normalizes `tokens.output` as
@@ -48,6 +66,25 @@ const num = (v: unknown): number =>
  */
 export function realOutput(output: number, reasoning: number): number {
   return output + reasoning
+}
+
+/**
+ * Per-field maximum merge of two session component sets. Used by the store
+ * (in-run high-water) and the ledger (per-member high-waters) so a smaller
+ * later observation can never lower a stored component.
+ */
+export function maxComponents(
+  a: SessionComponents,
+  b: SessionComponents,
+): SessionComponents {
+  return {
+    cost: Math.max(a.cost, b.cost),
+    input: Math.max(a.input, b.input),
+    output: Math.max(a.output, b.output),
+    reasoning: Math.max(a.reasoning, b.reasoning),
+    cacheRead: Math.max(a.cacheRead, b.cacheRead),
+    cacheWrite: Math.max(a.cacheWrite, b.cacheWrite),
+  }
 }
 
 export function usageOf(
@@ -60,9 +97,9 @@ export function usageOf(
   const reasoning = num(tokens.reasoning)
   const cacheRead = num(tokens.cache?.read)
   const cacheWrite = num(tokens.cache?.write)
-  // Context is the no-cache formula ONLY: `tokens.total` is intentionally
-  // unused (it may include cache), and cache never enters the context.
-  const context = input + output + reasoning
+  // Per-message spend contribution: all five billed channels. `tokens.total`
+  // is intentionally unused — this sum reconstructs it exactly.
+  const context = input + output + reasoning + cacheRead + cacheWrite
   const usage: MessageUsage = {
     cost: num(message.cost),
     input,
@@ -79,10 +116,19 @@ export function usageOf(
     usage.reasoning +
     usage.cacheRead +
     usage.cacheWrite
-  if (any === 0 && context === 0) return null
+  if (any === 0) return null
   return usage
 }
 
+/**
+ * Per-session aggregation: cost/input/output/reasoning/cacheRead/cacheWrite
+ * stay CUMULATIVE across the session's messages; `total` is the session's
+ * complete TOKEN SPEND — the sum of ALL five billed channels across ALL
+ * assistant messages, exactly reconstructing the provider `tokens.total`.
+ * Always >= input + output + reasoning, so the coins total can never fall
+ * below the session's cumulative input + real output. The store keeps the
+ * per-field high-water of these components across observations.
+ */
 export function sumMessages(map: Map<string, MessageUsage>): SessionUsage {
   let cost = 0
   let input = 0
@@ -90,7 +136,6 @@ export function sumMessages(map: Map<string, MessageUsage>): SessionUsage {
   let reasoning = 0
   let cacheRead = 0
   let cacheWrite = 0
-  let context = 0
   for (const u of map.values()) {
     cost += u.cost
     input += u.input
@@ -98,7 +143,6 @@ export function sumMessages(map: Map<string, MessageUsage>): SessionUsage {
     reasoning += u.reasoning
     cacheRead += u.cacheRead
     cacheWrite += u.cacheWrite
-    if (u.context > context) context = u.context
   }
   return {
     cost,
@@ -107,18 +151,20 @@ export function sumMessages(map: Map<string, MessageUsage>): SessionUsage {
     reasoning,
     cacheRead,
     cacheWrite,
-    total: context,
+    total: input + output + reasoning + cacheRead + cacheWrite,
     cache: cacheRead + cacheWrite,
   }
 }
 
 /**
- * Sums ALL sessions of a project as returned by the client session.list
- * endpoint with `scope: "project"` (already filtered by projectID).
- * Raw output and raw reasoning stay separate and are each counted exactly
- * once per session. The headline context is ONE no-cache snapshot per
- * session: `input + raw output + raw reasoning` (cache excluded, matching
- * the Session hourglass; the list payload carries no context total).
+ * Sums ALL live sessions of a project as returned by the client session.list
+ * endpoint with `scope: "project"` (already filtered by projectID). Sessions
+ * are counted once by sessionID — a duplicated payload can never inflate the
+ * total. Raw output and raw reasoning stay separate and are each counted
+ * exactly once per session. Context is the payload-only spend: `input +
+ * output + reasoning + cache.read + cache.write` per session (the full
+ * formula from the payload's own fields), so the live total always satisfies
+ * context >= input + output + reasoning.
  */
 export function sumProjectSessions(
   projectID: string,
@@ -128,24 +174,31 @@ export function sumProjectSessions(
   let input = 0
   let output = 0
   let reasoning = 0
-  let cache = 0
+  let cacheRead = 0
+  let cacheWrite = 0
   let context = 0
   let counted = 0
+  const seen = new Set<string>()
   for (const session of sessions) {
     if (!session || session.projectID !== projectID) continue
+    // A session must never be counted twice: the list is keyed by sessionID
+    // (the ledger is too), so a duplicated payload contributes exactly once.
+    if (seen.has(session.id)) continue
+    seen.add(session.id)
     const tokens = session.tokens
     if (!tokens) continue
     const inputN = num(tokens.input)
     const outputN = num(tokens.output)
     const reasoningN = num(tokens.reasoning)
-    const cacheRead = num(tokens.cache?.read)
-    const cacheWrite = num(tokens.cache?.write)
+    const readN = num(tokens.cache?.read)
+    const writeN = num(tokens.cache?.write)
     cost += num(session.cost)
     input += inputN
     output += outputN
     reasoning += reasoningN
-    cache += cacheRead + cacheWrite
-    context += inputN + outputN + reasoningN
+    cacheRead += readN
+    cacheWrite += writeN
+    context += inputN + outputN + reasoningN + readN + writeN
     counted += 1
   }
   return {
@@ -156,59 +209,117 @@ export function sumProjectSessions(
     input,
     output,
     reasoning,
-    cache,
+    cacheRead,
+    cacheWrite,
+    cache: cacheRead + cacheWrite,
   }
 }
 
 /**
- * Sums the FULL all-time ledger of a project (live snapshots + tombstones).
- * Each entry contributes its stored ONE no-cache context snapshot
- * (`context`); entries written before the context field existed fall back
- * to input + raw output + raw reasoning (cache excluded) so persisted
- * history is never lost. Raw output and raw reasoning stay separate; the
- * displayed output real stays raw output + raw reasoning. Idempotent by
- * construction: the same entries always produce the same total, and a
- * tombstone keeps its snapshot.
+ * Combines the authoritative LIVE project total (sumProjectSessions over the
+ * current session.list rows) with the persisted deleted aggregate. The
+ * deleted aggregate counts as ONE additional session when it carries usage.
+ * Context is read from the explicitly stored complete-session spend
+ * (`entry.context`, which by construction equals input + output + reasoning
+ * + cacheRead + cacheWrite and is never below input + output + reasoning) —
+ * never derived from the raw cumulative fields. Idempotent by construction:
+ * the same live rows and the same aggregate always produce the same total.
  */
-export function sumLedgerProject(
-  projectID: string,
-  ledger: ProjectLedger,
+export function combineProjectUsage(
+  live: ProjectUsage,
+  deleted: ProjectAggregateEntry | null | undefined,
 ): ProjectUsage {
-  const project = ledger.projects[projectID] ?? {}
-  let cost = 0
-  let input = 0
-  let output = 0
-  let reasoning = 0
-  let cache = 0
-  let context = 0
-  let counted = 0
-  for (const entry of Object.values(project)) {
-    // num() coercion: a malformed entry (string/non-numeric fields from an
-    // old or foreign writer) must never leak NaN into the snapshot.
-    const entryInput = num(entry?.input)
-    const entryOutput = num(entry?.output)
-    const entryReasoning = num(entry?.reasoning)
-    const entryCache = num(entry?.cache)
-    cost += num(entry?.cost)
-    input += entryInput
-    output += entryOutput
-    reasoning += entryReasoning
-    cache += entryCache
-    const storedContext = num(entry?.context)
-    context +=
-      entry?.context !== undefined
-        ? storedContext
-        : entryInput + entryOutput + entryReasoning
-    counted += 1
-  }
+  if (!deleted || !hasUsage(deleted)) return live
   return {
-    id: projectID,
-    sessions: counted,
-    cost,
-    context,
+    id: live.id,
+    sessions: live.sessions + 1,
+    cost: live.cost + deleted.cost,
+    context: live.context + deleted.context,
+    input: live.input + deleted.input,
+    output: live.output + deleted.output,
+    reasoning: live.reasoning + deleted.reasoning,
+    cacheRead: live.cacheRead + deleted.cacheRead,
+    cacheWrite: live.cacheWrite + deleted.cacheWrite,
+    cache: live.cache + deleted.cache,
+  }
+}
+
+/**
+ * Payload-only snapshot extracted from a list/delete payload. The payload
+ * carries only CUMULATIVE fields; context is the payload spend `input +
+ * output + reasoning + cache.read + cache.write` — cache tokens are billed
+ * and therefore count into the spend like every other channel. This
+ * guarantees a payload-only session never reports context below its
+ * cumulative input + output + reasoning; a later observed message map may
+ * raise the per-component high-water. Null when the payload carries no
+ * usage.
+ */
+export function entryOfSession(
+  session: ProjectSessionLike | undefined | null,
+): ProjectAggregateEntry | null {
+  const tokens = session?.tokens
+  const input = num(tokens?.input)
+  const output = num(tokens?.output)
+  const reasoning = num(tokens?.reasoning)
+  const cacheRead = num(tokens?.cache?.read)
+  const cacheWrite = num(tokens?.cache?.write)
+  const entry: ProjectAggregateEntry = {
+    cost: num(session?.cost),
     input,
     output,
     reasoning,
-    cache,
+    cacheRead,
+    cacheWrite,
+    cache: cacheRead + cacheWrite,
+    context: input + output + reasoning + cacheRead + cacheWrite,
+  }
+  return hasUsage(entry) ? entry : null
+}
+
+export function entryOfSessionUsage(
+  usage: SessionUsage | null | undefined,
+): ProjectAggregateEntry | null {
+  if (!usage) return null
+  return {
+    cost: usage.cost,
+    input: usage.input,
+    output: usage.output,
+    reasoning: usage.reasoning,
+    cacheRead: usage.cacheRead,
+    cacheWrite: usage.cacheWrite,
+    cache: usage.cache,
+    context: usage.total,
+  }
+}
+
+/**
+ * Merges a session's two real snapshots (delete payload + plugin-observed
+ * usage). Each CUMULATIVE raw metric is kept as a safe per-field maximum
+ * across the observations — cumulative totals can only grow, so a partial or
+ * compacted observation must never lower them. Context is the complete spend
+ * of the merged entry — the sum of the merged components, which by
+ * construction is >= each observation's own spend and never below input +
+ * output + reasoning.
+ */
+export function resolveEntry(
+  payload: ProjectAggregateEntry | null,
+  observed: ProjectAggregateEntry | null,
+): ProjectAggregateEntry | null {
+  if (!payload) return observed
+  if (!observed) return payload
+  const input = Math.max(payload.input, observed.input)
+  const output = Math.max(payload.output, observed.output)
+  const reasoning = Math.max(payload.reasoning, observed.reasoning)
+  const cacheRead = Math.max(payload.cacheRead, observed.cacheRead)
+  const cacheWrite = Math.max(payload.cacheWrite, observed.cacheWrite)
+  return {
+    cost: Math.max(payload.cost, observed.cost),
+    input,
+    output,
+    reasoning,
+    cacheRead,
+    cacheWrite,
+    cache: cacheRead + cacheWrite,
+    context: input + output + reasoning + cacheRead + cacheWrite,
   }
 }

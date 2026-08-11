@@ -5,9 +5,9 @@
  *
  * Each group renders exactly three rows: `  ↳ <robot> <name> · <task> N
  * task` (marker text, robot + name in the SAME theme().primary blue, task
- * count success), then the four-column indented context + thinking + cost
+ * count success), then the four-column indented spend + thinking + cost
  * row (GROUP_ROW_INDENT), then the four-column indented three-value
- * input · output real · cache row. The name is the elastic segment of row 1
+ * input · output real · cache read/write row. The name is the elastic segment of row 1
  * and truncates there; the indented metric rows render only when they fit
  * the content width, so a fixed row never overflows. GroupRows is
  * presentational: it renders from the group data and the theme/inner width
@@ -22,6 +22,7 @@ import {
 } from "../format"
 import { realOutput } from "../math"
 import { textColumns } from "../text"
+import { SPEND_GOLD } from "./colors"
 
 export function GroupRows(props) {
   const line = () => formatGroupLine(props.group, props.inner())
@@ -31,7 +32,8 @@ export function GroupRows(props) {
     breakdownSegments(
       props.group.input,
       realOutput(props.group.output, props.group.reasoning),
-      props.group.cache,
+      props.group.cacheRead,
+      props.group.cacheWrite,
     )
   const breakdownText = () =>
     breakdown()
@@ -53,7 +55,7 @@ export function GroupRows(props) {
       >
         <box flexDirection="row">
           <text fg={props.theme().textMuted}>{rowIndent()}</text>
-          <text fg={props.theme().info}>{meta().context}</text>
+          <text fg={SPEND_GOLD}>{meta().context}</text>
           <text fg={props.theme().accent}>{meta().thinking}</text>
           <text fg={props.theme().error}>{meta().cost}</text>
         </box>
