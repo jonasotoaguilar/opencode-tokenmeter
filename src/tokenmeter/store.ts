@@ -5,15 +5,23 @@
  * the snapshot signal the panel renders from. Message usage is keyed by
  * message ID and upserted (replace, never append), so totals recomputed from
  * these maps can never double-count repeated events or retries. Per-session
- * rehydration state tracks sessions whose in-memory TUI mirror may be stale;
- * reconciliation bypasses the mirror for those sessions and re-reads the
- * authoritative client messages instead.
+ * rehydration state tracks sessions whose loaded map must be rebuilt on the
+ * next load; reconciliation always re-reads the authoritative client
+ * messages (the in-memory TUI mirror is capped and never used as a source).
+ *
+ * Spend high-water: each session keeps the maximum per-COMPONENT spend ever
+ * observed — cost/input/output/reasoning/cacheRead/cacheWrite each as a
+ * per-field maximum — independent of the current message map. Compaction or
+ * a smaller later snapshot rewrites the map, but the high-water never lowers
+ * while the plugin runs. Nothing live is ever persisted: after a restart
+ * every session rebuilds its spend from the authoritative client messages.
  */
 import { createSignal } from "solid-js"
-import { sumMessages, usageOf } from "./math"
+import { maxComponents, sumMessages, usageOf } from "./math"
 import { forgetSessionMeta, purgeTreeCache } from "./tree"
 import type {
   MessageUsage,
+  SessionComponents,
   SessionStatusType,
   SessionUsage,
   UsageMessage,
@@ -26,6 +34,7 @@ const msgUsage = new Map<string, Map<string, MessageUsage>>()
 const statuses = new Map<string, SessionStatusType>()
 const loadedSessions = new Set<string>()
 const rehydrating = new Set<string>()
+const sessionHighWaters = new Map<string, SessionComponents>()
 
 export function usageMap(sessionID: string): Map<string, MessageUsage> {
   let map = msgUsage.get(sessionID)
@@ -41,16 +50,38 @@ export function hasUsage(sessionID: string): boolean {
 }
 
 /**
- * The plugin's OWN observed aggregate for a session (summed from its
- * message-usage map, which is rebuilt from the authoritative client
- * messages on every load). Null when the session has no observed usage.
- * The Project ledger falls back to this when list/delete payloads carry
- * no token/cost data (the real-world shape).
+ * The plugin's OWN observed aggregate for a session: each cumulative
+ * component is the per-field maximum of the message-usage map sum (which is
+ * rebuilt from the authoritative client messages on every load) and the
+ * session's spend high-water — the in-memory map never lowers it. `total`
+ * is the sum of the merged components, i.e. the session's complete TOKEN
+ * SPEND (Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write).
+ * Null when the session has no observed usage. The deleted-session
+ * aggregate falls back to this when list/delete payloads carry no token/cost
+ * data (the real-world shape).
  */
 export function observedSessionUsage(sessionID: string): SessionUsage | null {
   const map = msgUsage.get(sessionID)
   if (!map || map.size === 0) return null
-  return sumMessages(map)
+  const usage = sumMessages(map)
+  const prev = sessionHighWaters.get(sessionID)
+  const merged = prev ? maxComponents(prev, usage) : usage
+  sessionHighWaters.set(sessionID, merged)
+  return {
+    cost: merged.cost,
+    input: merged.input,
+    output: merged.output,
+    reasoning: merged.reasoning,
+    cacheRead: merged.cacheRead,
+    cacheWrite: merged.cacheWrite,
+    total:
+      merged.input +
+      merged.output +
+      merged.reasoning +
+      merged.cacheRead +
+      merged.cacheWrite,
+    cache: merged.cacheRead + merged.cacheWrite,
+  }
 }
 
 export function upsertMessageUsage(message: UsageMessage): boolean {
@@ -119,6 +150,7 @@ export function forgetSession(sessionID: string): void {
     statuses.delete(sessionID)
     loadedSessions.delete(sessionID)
     rehydrating.delete(sessionID)
+    sessionHighWaters.delete(sessionID)
     forgetSessionMeta(sessionID)
   }
 }

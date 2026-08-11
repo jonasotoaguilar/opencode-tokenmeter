@@ -23,7 +23,10 @@
  */
 /** @jsxImportSource @opentui/solid */
 import { describe, expect, test } from "bun:test"
-import { RGBA } from "@opentui/core"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { RGBA, rgbToHex } from "@opentui/core"
 import { testRender } from "@opentui/solid"
 import { createSignal } from "solid-js"
 import plugin from "../src/tokenmeter"
@@ -42,7 +45,7 @@ import {
   MAINTENANCE_DELAY,
   RECONCILE_DELAY,
 } from "../src/tokenmeter/reconcile"
-import { snapshot } from "../src/tokenmeter/store"
+import { snapshot, upsertMessageUsage, usageMap } from "../src/tokenmeter/store"
 import { purgeTreeCache } from "../src/tokenmeter/tree"
 import type {
   ProjectSessionLike,
@@ -52,7 +55,11 @@ import type {
 
 const THEME = {
   current: {
-    accent: RGBA.fromHex("#ffffff"),
+    // Deliberately PINK accent: the spend gold must NOT follow the theme
+    // accent, so the render tests prove the fixed-gold contract is
+    // theme-independent (a theme that maps accent to pink must still render
+    // coin gold spend totals).
+    accent: RGBA.fromHex("#ff69b4"),
     // Primary blue mirroring the tokyo-night-dev theme the plugin runs
     // under (blue #7aa2f7): the agent names, the robot icons and the agents
     // metric share theme().primary, distinct from the cyan info clock and
@@ -156,8 +163,11 @@ async function mountEntry(
   setProjectLoading(false)
   setProjectError(null)
   disposeProjectRefresh()
+  // Isolated plugin state directory: the entry owns a SQLite store there.
+  const stateDir = mkdtempSync(join(tmpdir(), "tokenmeter-render-"))
   const api = {
     kv: {
+      ready: true,
       get: (key: string, fallback?: unknown) =>
         kv.has(key) ? kv.get(key) : fallback,
       set: (key: string, value: unknown) => void kv.set(key, value),
@@ -187,7 +197,7 @@ async function mountEntry(
       },
     },
     state: {
-      path: { directory: "/proj/dir" },
+      path: { directory: "/proj/dir", state: stateDir },
       session: {
         messages: (sessionID: string) => state.sessions[sessionID] ?? [],
         status: () => undefined,
@@ -231,6 +241,7 @@ async function mountEntry(
         fn()
       })
       disposeProjectRefresh()
+      rmSync(stateDir, { recursive: true, force: true })
     },
     state,
   }
@@ -377,10 +388,10 @@ describe("render-level live refresh", () => {
         state: { status: "completed" },
       },
     })
-    await waitFor(() => snapshot()?.totalTokens === 705000)
-    await setup.waitForFrame((frame) => frame.includes("705.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 746000)
+    await setup.waitForFrame((frame) => frame.includes("746.0k"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("705.0k")
+    expect(after).toContain("746.0k")
     expect(after).not.toContain("41.0k")
     disposeReconcile()
     dispose()
@@ -425,10 +436,10 @@ describe("render-level live refresh", () => {
       msg("r2", rootID, { input: 700000, output: 5000, total: 720000 }, 0.02),
     ]
     fire("session.idle", { sessionID: rootID })
-    await waitFor(() => snapshot()?.totalTokens === 705000)
-    await setup.waitForFrame((frame) => frame.includes("705.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 746000)
+    await setup.waitForFrame((frame) => frame.includes("746.0k"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("705.0k")
+    expect(after).toContain("746.0k")
     expect(after).not.toContain("41.0k")
     disposeReconcile()
     dispose()
@@ -482,11 +493,139 @@ describe("render-level live refresh", () => {
         state: { status: "completed" },
       },
     })
-    await waitFor(() => snapshot()?.totalTokens === 705000)
-    await setup.waitForFrame((frame) => frame.includes("705.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 746000)
+    await setup.waitForFrame((frame) => frame.includes("746.0k"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("705.0k")
+    expect(after).toContain("746.0k")
     expect(after).not.toContain("41.0k")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("REGRESSION: a TUI mirror truncated to its newest messages must never undercount the Session hourglass — first load of a delegated session reads the authoritative client", async () => {
+    // The host TUI caps each session's in-memory mirror (drops the OLDEST
+    // messages), so a non-empty mirror is NOT a complete message list. The
+    // client is the only complete source: a delegated session discovered
+    // after activation must be loaded from the client even when the mirror
+    // already holds a (truncated) non-empty list.
+    const rootID = "ses_truncated_mirror"
+    const childID = "ses_truncated_child"
+    const truncatedMirror = [
+      msg("c2", childID, { input: 2000, output: 300, reasoning: 100 }),
+      msg("c3", childID, { input: 3000, output: 400, reasoning: 200 }),
+    ]
+    const fullClient = [
+      // The oldest message is missing from the mirror; it also carries a
+      // large cache that IS part of the session spend.
+      msg("c1", childID, {
+        input: 45000,
+        output: 2000,
+        reasoning: 1500,
+        cache: { read: 20000, write: 0 },
+      }),
+      ...truncatedMirror,
+    ]
+    const state: MutableApi = {
+      // The mirror holds ONLY the newest messages (host cap); the client is
+      // the full list.
+      sessions: { [rootID]: [], [childID]: truncatedMirror },
+      clientSessions: { [childID]: fullClient },
+      // First discovery sees NO children: the child becomes visible later.
+      children: {},
+      metas: {
+        [rootID]: { id: rootID, title: "Root" },
+        [childID]: { id: childID, title: "Child" },
+      },
+    }
+    purgeTreeCache()
+    const { fire, slot, dispose } = await mountEntry(state)
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      {
+        width: 60,
+        height: 20,
+      },
+    )
+    // The root is EMPTY (no usage yet): no snapshot publishes until the
+    // delegated child lands below, so the empty-session placeholder stays.
+
+    // The delegated session becomes visible: session.created purges the tree
+    // cache, the debounced reconcile discovers it and loads it. Its flags are
+    // untouched (never activated, never invalidated), so the load must STILL
+    // read the authoritative client — the truncated mirror holds 6000, the
+    // full client list holds 74500 (the complete session spend: Σ input
+    // 50000 + Σ output 2700 + Σ reasoning 1800 + Σ cache.read 20000; cache
+    // tokens are billed, so c1's 20000 cache counts into the spend).
+    state.children = { [rootID]: [{ id: childID, parentID: rootID }] }
+    fire("session.created", {
+      info: { id: childID, sessionID: childID, parentID: rootID },
+    })
+    await waitFor(() => snapshot()?.totalTokens === 74500)
+    await setup.waitForFrame((frame) => frame.includes("74.5k"))
+    expect(snapshot()?.totalTokens).toBe(74500)
+    expect(snapshot()?.cache).toBe(20000)
+    expect(snapshot()?.cacheRead).toBe(20000)
+    expect(snapshot()?.totalTokens).not.toBe(6000)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("REGRESSION: the deleted aggregate records the FULL client-loaded usage, never the truncated mirror aggregate", async () => {
+    // The store map (built by the same load) feeds the deleted aggregate via
+    // observedSessionUsage when a delete payload carries no tokens. A
+    // truncated mirror must not shrink the recorded aggregate.
+    const rootID = "ses_truncated_project"
+    const childID = "ses_truncated_project_child"
+    const truncatedMirror = [
+      msg("c2", childID, { input: 2000, output: 300, reasoning: 100 }),
+      msg("c3", childID, { input: 3000, output: 400, reasoning: 200 }),
+    ]
+    const fullClient = [
+      msg("c1", childID, { input: 45000, output: 2000, reasoning: 1500 }),
+      ...truncatedMirror,
+    ]
+    const state: MutableApi = {
+      sessions: { [rootID]: [], [childID]: truncatedMirror },
+      clientSessions: { [childID]: fullClient },
+      children: {},
+      metas: {
+        [rootID]: { id: rootID, title: "Root" },
+        [childID]: { id: childID, title: "Child" },
+      },
+    }
+    purgeTreeCache()
+    const { fire, slot, dispose } = await mountEntry(state)
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      {
+        width: 60,
+        height: 20,
+      },
+    )
+    // The root is EMPTY (no usage yet): no snapshot publishes until the
+    // delegated child lands below.
+
+    state.children = { [rootID]: [{ id: childID, parentID: rootID }] }
+    fire("session.created", {
+      info: { id: childID, sessionID: childID, parentID: rootID },
+    })
+    // The child's FULL client list must be observed BEFORE the delete folds
+    // it: the truncated mirror alone would shrink the folded aggregate.
+    await waitFor(
+      () => snapshot()?.rootID === rootID && snapshot()?.totalTokens === 54500,
+    )
+    expect(snapshot()?.cache).toBe(0)
+
+    // Delete the delegated session with a payload that carries NO tokens:
+    // the SQLite deleted aggregate records the plugin's observed usage. The
+    // full client-loaded aggregate (54500) must land in the Project deleted
+    // aggregate — not the truncated mirror total (6000).
+    fire("session.deleted", {
+      info: { id: childID, projectID: "proj_test" },
+    })
+    await waitFor(() => projectSnapshot()?.context === 54500)
+    expect(setup.captureCharFrame()).toContain("54.5k")
+    expect(projectSnapshot()?.context).not.toBe(6000)
     disposeReconcile()
     dispose()
   }, 20000)
@@ -612,19 +751,19 @@ describe("render-level live refresh", () => {
     expect(frame).toContain("Subagents")
     // Row 1: indented tree marker + blue robot + two spaces + agent name + green task count.
     expect(frame).toContain(
-      "  ↳ " + GLYPH.robot + "  sdd-apply · " + GLYPH.tasks + "  1 task",
+      `  ↳ ${GLYPH.robot}  sdd-apply · ${GLYPH.tasks}  1 task`,
     )
-    // Row 2: four-space indent + info context + accent thinking + error cost.
+    // Row 2: four-space indent + fixed-gold spend + accent thinking + error cost.
     expect(frame).toContain(
       "    " +
-        GLYPH.hourglass +
-        " 10.5k · " +
+        GLYPH.coins +
+        "  10.5k · " +
         GLYPH.reasoning +
         "  0 · " +
         GLYPH.fire +
         " $0.01",
     )
-    // Row 3: four-space indent + the three-value breakdown (output real = output + reasoning).
+    // Row 3: four-space indent + the three-value breakdown (output real = output + reasoning, cache pair both zero).
     expect(frame).toContain(
       "    " +
         GLYPH.up +
@@ -634,10 +773,10 @@ describe("render-level live refresh", () => {
         GLYPH.cache +
         "  0",
     )
-    // Session rows: headline context · thinking · cost; three-value breakdown.
+    // Session rows: headline spend · thinking · cost; three-value breakdown.
     expect(frame).toContain(
-      GLYPH.hourglass +
-        " 16.0k · " +
+      GLYPH.coins +
+        "  16.0k · " +
         GLYPH.reasoning +
         "  0 · " +
         GLYPH.fire +
@@ -647,19 +786,19 @@ describe("render-level live refresh", () => {
       GLYPH.up + " 15k · " + GLYPH.down + " 1k · " + GLYPH.cache + "  0",
     )
     // Exactly three visual rows per group, in order: row 1 (robot + name +
-    // tasks), row 2 (context + thinking + cost), row 3 (the three metrics).
+    // tasks), row 2 (spend + thinking + cost), row 3 (the three metrics).
     const lines = frame
       .split(/[\r\n]+/)
       .filter((line) => line.trim().length > 0)
     const idx = lines.findIndex((line) => line.includes("↳"))
     expect(idx).toBeGreaterThanOrEqual(0)
     expect(lines[idx].trimEnd()).toBe(
-      "  ↳ " + GLYPH.robot + "  sdd-apply · " + GLYPH.tasks + "  1 task",
+      `  ↳ ${GLYPH.robot}  sdd-apply · ${GLYPH.tasks}  1 task`,
     )
     expect(lines[idx + 1].trimEnd()).toBe(
       "    " +
-        GLYPH.hourglass +
-        " 10.5k · " +
+        GLYPH.coins +
+        "  10.5k · " +
         GLYPH.reasoning +
         "  0 · " +
         GLYPH.fire +
@@ -675,6 +814,17 @@ describe("render-level live refresh", () => {
         "  0",
     )
     expect(lines.length).toBe(idx + 3)
+    // The spend totals in the frame are coin gold, the thinking values are
+    // the pink theme accent — the fixed gold rides no theme role.
+    const spans = setup.captureSpans().lines.flatMap((line) => line.spans)
+    const gold = rgbToHex(RGBA.fromHex("#D4AF37"))
+    const pink = rgbToHex(RGBA.fromHex("#ff69b4"))
+    const coins = spans.filter((span) => span.text.includes(GLYPH.coins))
+    expect(coins.length).toBeGreaterThanOrEqual(1)
+    for (const span of coins) expect(rgbToHex(span.fg)).toBe(gold)
+    const thinking = spans.filter((span) => span.text.includes(GLYPH.reasoning))
+    expect(thinking.length).toBeGreaterThanOrEqual(1)
+    for (const span of thinking) expect(rgbToHex(span.fg)).toBe(pink)
     disposeReconcile()
     dispose()
   }, 20000)
@@ -723,6 +873,25 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
       ],
     }
     purgeTreeCache()
+    // Seed the store with the project sessions' OBSERVED usage (the real
+    // shape: list payloads carry no tokens; messages are authoritative) —
+    // captured at delete time into the SQLite deleted aggregate.
+    upsertMessageUsage(
+      msg(
+        "pm1",
+        "ps1",
+        {
+          input: 1000,
+          output: 500,
+          reasoning: 200,
+          cache: { read: 100, write: 50 },
+        },
+        0.01,
+      ),
+    )
+    upsertMessageUsage(
+      msg("pm2", "ps2", { input: 2000, output: 700, reasoning: 300 }, 0.02),
+    )
     const { slot, dispose } = await mountEntry(state, project)
     const setup = await testRender(
       () => slot({ theme: THEME }, { session_id: rootID }) as never,
@@ -733,23 +902,24 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
     )
     await waitFor(() => projectSnapshot()?.sessions === 2)
     await waitFor(() => snapshot()?.rootID === rootID)
-    await setup.waitForFrame((frame) => frame.includes("4.7k"))
+    await setup.waitForFrame((frame) => frame.includes("5k"))
     const frame = setup.captureCharFrame()
     expect(frame).toContain("Project")
     expect(frame.indexOf("Project")).toBeLessThan(frame.indexOf("Session"))
-    // Project headline: context (input + raw output + raw reasoning per
-    // session, cache excluded) · thinking · cost.
+    // Project headline: complete per-session spend per session — Σ input +
+    // raw output + raw reasoning + Σ cache.read + Σ cache.write when
+    // observed (ps1: 1850, ps2: 3000) · thinking · cost.
     expect(frame).toContain(
-      GLYPH.hourglass +
-        " 4.7k · " +
+      GLYPH.coins +
+        "  4.8k · " +
         GLYPH.reasoning +
         "  500 · " +
         GLYPH.fire +
         " $0.03",
     )
-    // Project breakdown: input · output real · cache.
+    // Project breakdown: input · output real · cache R|W.
     expect(frame).toContain(
-      GLYPH.up + " 3k · " + GLYPH.down + " 2k · " + GLYPH.cache + "  150",
+      GLYPH.up + " 3k · " + GLYPH.down + " 2k · " + GLYPH.cache + "  R100|W50",
     )
     disposeReconcile()
     dispose()
@@ -801,7 +971,7 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
     dispose()
   }, 20000)
 
-  test("REGRESSION: session.deleted passes the projectIDHint — a failing project.current() right after the delete recovers Project from the ledger in the frame", async () => {
+  test("REGRESSION: session.deleted passes the projectIDHint — a failing project.current() right after the delete keeps the total in the frame", async () => {
     const rootID = "ses_proj_delete"
     const state: MutableApi = {
       sessions: {
@@ -835,6 +1005,24 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
       ],
     }
     purgeTreeCache()
+    // Seed the store with the project sessions' OBSERVED usage (list
+    // payloads carry no tokens in the real shape).
+    upsertMessageUsage(
+      msg(
+        "pm1",
+        "ps1",
+        {
+          input: 1000,
+          output: 500,
+          reasoning: 200,
+          cache: { read: 100, write: 50 },
+        },
+        0.01,
+      ),
+    )
+    upsertMessageUsage(
+      msg("pm2", "ps2", { input: 2000, output: 700, reasoning: 300 }, 0.02),
+    )
     const { fire, slot, dispose } = await mountEntry(state, project)
     const setup = await testRender(
       () => slot({ theme: THEME }, { session_id: rootID }) as never,
@@ -843,24 +1031,28 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
         height: 20,
       },
     )
-    // First load persists the ledger from the live sessions: both sessions
-    // of proj_x, 4.7k context total.
+    // First load sums the live sessions of proj_x: 4.85k context total
+    // (ps1's complete context includes its 150 cache: 1850 + 3000). Live
+    // sessions are never persisted — the list is the live source.
     await waitFor(() => projectSnapshot()?.sessions === 2)
-    await setup.waitForFrame((frame) => frame.includes("4.7k"))
+    await setup.waitForFrame((frame) => frame.includes("5k"))
     // The delete lands while project.current() starts failing (the transient
-    // context gap right after a delete). The delete handler must pass
-    // projectID "proj_x" to the refresh, which recovers from the ledger.
+    // context gap right after a delete). The delete handler records ps1 into
+    // the SQLite deleted aggregate BEFORE the refresh and passes projectID
+    // "proj_x" as the hint; the server drops ps1 from the live list.
     project.fail = true
+    project.sessions = [project.sessions![1]!]
     fire("session.deleted", { info: { id: "ps1", projectID: "proj_x" } })
     await sleep(RECONCILE_DELAY + 200)
-    // Same total as before the delete (ps1 tombstone + ps2 live), NO error:
-    // the hint reached the refresh and the ledger powered the recovery.
+    // Same total as before the delete (ps1 deleted aggregate + ps2 live), NO
+    // error: the hint kept the projectID and the refresh summed the live
+    // list plus the shared deleted aggregate.
     expect(projectSnapshot()?.sessions).toBe(2)
-    expect(projectSnapshot()?.context).toBe(4700)
+    expect(projectSnapshot()?.context).toBe(4850)
     expect(projectError()).toBeNull()
-    await waitForFrameDriven(setup, (frame) => frame.includes("4.7k"))
+    await waitForFrameDriven(setup, (frame) => frame.includes("5k"))
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("4.7k")
+    expect(frame).toContain("5k")
     expect(frame).not.toContain("Unable to load project data")
     disposeReconcile()
     dispose()
@@ -1093,10 +1285,12 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
         height: 20,
       },
     )
-    // The mount-time refresh settles with no usage (payload has none).
+    // The mount-time refresh settles with no usage (payload has none) — the
+    // live total is authoritative from the list payload alone.
     await waitFor(() => projectSnapshot() !== null)
     // The session's usage is observed through its messages (authoritative
-    // client data), then a project refresh must persist it into the ledger.
+    // client data); the refresh still reports the payload-only live total,
+    // because live usage is NEVER persisted — it is captured at delete time.
     fire("message.updated", {
       info: msg(
         "m1",
@@ -1106,12 +1300,12 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
       ),
     })
     fire("project.updated", {})
-    await waitFor(() => projectSnapshot()?.sessions === 1)
-    expect(projectSnapshot()?.context).toBe(1700)
-    await setup.waitForFrame((frame) => frame.includes("1.7k"))
+    await waitFor(() => projectSnapshot()?.context === 0)
+    expect(projectSnapshot()?.sessions).toBe(0)
 
     // The session is deleted with a usage-less payload: the entry handler
-    // persists the observed snapshot and the total must survive.
+    // records the observed snapshot into the SQLite deleted aggregate and
+    // the total must survive.
     fire("session.deleted", {
       info: { id: "s_obs", projectID: "proj_del", title: "gone" },
     })
@@ -1147,21 +1341,30 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
         height: 20,
       },
     )
-    await waitFor(() => snapshot()?.totalTokens === 62000)
-    await setup.waitForFrame((frame) => frame.includes("62.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 103000)
+    await setup.waitForFrame((frame) => frame.includes("103.0k"))
 
     // The r2 message disappears from the client; message.removed must
     // invalidate and remove the stored usage so the next reconcile
-    // rehydrates WITHOUT it — a stale mirror would keep 62.0k forever.
+    // rehydrates WITHOUT it. The cumulative input keeps its per-field
+    // high-water (100k); the spend headline KEEPS the historical spend
+    // (103000) — a removed message was already observed and can never lower
+    // the stored spend or its components.
     state.sessions[rootID] = [
       msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
     ]
     fire("message.removed", { sessionID: rootID, messageID: "r2" })
-    await waitFor(() => snapshot()?.totalTokens === 41000)
-    await setup.waitForFrame((frame) => frame.includes("41.0k"))
+    // The message map is actually replaced (rehydration landed), yet the
+    // per-field high-water keeps input at 100k and the spend at 103000.
+    await waitFor(() => usageMap(rootID).size === 1)
+    expect(snapshot()?.input).toBe(100000)
+    expect(snapshot()?.totalTokens).toBe(103000)
+    await setup.waitForFrame(
+      (frame) => frame.includes("103.0k") && frame.includes("↑ 100k"),
+    )
     const after = setup.captureCharFrame()
-    expect(after).toContain("41.0k")
-    expect(after).not.toContain("62.0k")
+    expect(after).toContain("103.0k")
+    expect(after).toContain("↑ 100k")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -1204,10 +1407,10 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
     // The idle status invalidates: the mounted panel rehydrates from the
     // authoritative client and repaints with the new total.
     fire("session.status", { sessionID: rootID, status: { type: "idle" } })
-    await waitFor(() => snapshot()?.totalTokens === 705000)
-    await setup.waitForFrame((frame) => frame.includes("705.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 746000)
+    await setup.waitForFrame((frame) => frame.includes("746.0k"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("705.0k")
+    expect(after).toContain("746.0k")
     expect(after).not.toContain("41.0k")
     disposeReconcile()
     dispose()
@@ -1241,10 +1444,10 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
       msg("r2", rootID, { input: 700000, output: 5000, total: 720000 }, 0.02),
     ]
     fire("session.compacted", { sessionID: rootID })
-    await waitFor(() => snapshot()?.totalTokens === 705000)
-    await setup.waitForFrame((frame) => frame.includes("705.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 746000)
+    await setup.waitForFrame((frame) => frame.includes("746.0k"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("705.0k")
+    expect(after).toContain("746.0k")
     expect(after).not.toContain("41.0k")
     disposeReconcile()
     dispose()
@@ -1280,14 +1483,14 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
       msg("r2", rootID, { input: 700000, output: 5000, total: 720000 }, 0.02),
     ]
     fire("session.error", { sessionID: rootID })
-    await waitFor(() => snapshot()?.totalTokens === 705000)
-    await setup.waitForFrame((frame) => frame.includes("705.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 746000)
+    await setup.waitForFrame((frame) => frame.includes("746.0k"))
     // Without a sessionID the handler still schedules a refresh and the
     // mounted panel keeps its data.
     fire("session.error", {})
     await sleep(50)
-    expect(snapshot()?.totalTokens).toBe(705000)
-    expect(setup.captureCharFrame()).toContain("705.0k")
+    expect(snapshot()?.totalTokens).toBe(746000)
+    expect(setup.captureCharFrame()).toContain("746.0k")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -1320,10 +1523,10 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
       msg("r2", rootID, { input: 700000, output: 5000, total: 720000 }, 0.02),
     ]
     fire("message.part.removed", { sessionID: rootID, messageID: "r2" })
-    await waitFor(() => snapshot()?.totalTokens === 705000)
-    await setup.waitForFrame((frame) => frame.includes("705.0k"))
+    await waitFor(() => snapshot()?.totalTokens === 746000)
+    await setup.waitForFrame((frame) => frame.includes("746.0k"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("705.0k")
+    expect(after).toContain("746.0k")
     expect(after).not.toContain("41.0k")
     disposeReconcile()
     dispose()
@@ -1392,6 +1595,17 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
       ],
     }
     purgeTreeCache()
+    // Seed the store with the project sessions' OBSERVED usage (list
+    // payloads carry no tokens in the real shape).
+    upsertMessageUsage(
+      msg("pe1m", "pe1", { input: 1000, output: 500, reasoning: 200 }),
+    )
+    upsertMessageUsage(
+      msg("pe2m", "pe2", { input: 2000, output: 700, reasoning: 300 }),
+    )
+    upsertMessageUsage(
+      msg("pe3m", "pe3", { input: 3000, output: 900, reasoning: 400 }),
+    )
     const { fire, slot, dispose } = await mountEntry(state, project)
     const setup = await testRender(
       () => slot({ theme: THEME }, { session_id: rootID }) as never,
@@ -1422,7 +1636,7 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
     ]
     fire("project.updated", {})
     await waitFor(() => projectSnapshot()?.sessions === 2)
-    await setup.waitForFrame((frame) => frame.includes("4.7k"))
+    await setup.waitForFrame((frame) => frame.includes("5k"))
 
     project.sessions = [
       {

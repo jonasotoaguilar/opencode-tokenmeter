@@ -3,8 +3,8 @@
  *
  * Every rendered line is column-aware: nothing here emits a fixed-width
  * template string that could overflow the sidebar. Session and Project share
- * the same two metric rows — row 1 is context + thinking + cost, row 2 is
- * the three-value input · output real · cache breakdown. Each subagent group
+ * the same two metric rows — row 1 is spend + thinking + cost, row 2 is
+ * the three-value input · output real · cache read/write breakdown. Each subagent group
  * renders exactly three rows: row 1 keeps the indented tree marker, the
  * muted robot icon, the agent name and the `· <task> N task` run count — the
  * name is the elastic segment, measured against the REAL rendered texts
@@ -16,7 +16,7 @@
  * when they fit the content width, so a fixed metric row never overflows.
  * The breakdown row uses compact token formatting and returns muted
  * segments; the reasoning pair is NOT part of the breakdown anymore —
- * thinking moved to row 1, right after the context tokens, and carries the
+ * thinking moved to row 1, right after the spend tokens, and carries the
  * accent color there. Glyphs carry the meaning, so no textual token labels
  * are rendered next to the numbers.
  */
@@ -37,11 +37,12 @@ export function formatTaskCount(count: number): string {
   return ` · ${GLYPH.tasks}  ${count} task`
 }
 
+/** `coins  N` — the spend total, TWO visible spaces after the coins glyph, fixed SPEND_GOLD (never theme-derived). */
 export function formatHeadline(snap: { totalTokens: number }): string {
-  return `${GLYPH.hourglass} ${fmtTokens(snap.totalTokens)}`
+  return `${GLYPH.coins}  ${fmtTokens(snap.totalTokens)}`
 }
 
-/** ` · <thinking>  N` — accent-colored thinking value, right after the context tokens, with two visible spaces after the glyph. */
+/** ` · <thinking>  N` — accent-colored thinking value, right after the spend tokens, with two visible spaces after the glyph. */
 export function formatThinking(reasoning: number): string {
   return ` · ${GLYPH.reasoning}  ${fmtTokens(reasoning)}`
 }
@@ -50,7 +51,7 @@ export function formatCost(cost: number): string {
   return `${GLYPH.fire} ${fmtCost(cost)}`
 }
 
-/** The full headline row (context · thinking · cost) as one string, for column measurement and tests. */
+/** The full headline row (spend · thinking · cost) as one string, for column measurement and tests. */
 export function formatHeadlineRow(
   context: number,
   reasoning: number,
@@ -66,23 +67,42 @@ export type BreakdownSegment = {
 }
 
 /**
+ * `R<read>|W<write>` cache pair with zero sides omitted: `R45M|W10K`,
+ * `R45M`, `W10K` or `0` when both are zero. Values are clamped to zero so a
+ * stray negative never renders a minus sign. Used by the breakdown segment;
+ * kept pure for table-driven tests.
+ */
+export function formatCachePair(cacheRead: number, cacheWrite: number): string {
+  const read = Math.max(0, cacheRead)
+  const write = Math.max(0, cacheWrite)
+  if (read > 0 && write > 0) return `R${fmtCompact(read)}|W${fmtCompact(write)}`
+  if (read > 0) return `R${fmtCompact(read)}`
+  if (write > 0) return `W${fmtCompact(write)}`
+  return "0"
+}
+
+/**
  * One colored segment per rendered part of the three-value breakdown row:
- * input · output real · cache, in that order. Concatenating the segment
- * texts yields exactly formatBreakdown, so measurement and rendering can
- * never drift apart. The caller passes the OUTPUT REAL (output + reasoning),
- * computed exactly once from the raw values.
+ * input · output real · cache read/write, in that order. Concatenating the
+ * segment texts yields exactly formatBreakdown, so measurement and rendering
+ * can never drift apart. The caller passes the OUTPUT REAL (output +
+ * reasoning), computed exactly once from the raw values.
  */
 export function breakdownSegments(
   input: number,
   outputReal: number,
-  cache: number,
+  cacheRead: number,
+  cacheWrite: number,
 ): BreakdownSegment[] {
   return [
     { text: `${GLYPH.up} ${fmtCompact(input)}`, accent: false },
     { text: " · ", accent: false },
     { text: `${GLYPH.down} ${fmtCompact(outputReal)}`, accent: false },
     { text: " · ", accent: false },
-    { text: `${GLYPH.cache}  ${fmtCompact(cache)}`, accent: false },
+    {
+      text: `${GLYPH.cache}  ${formatCachePair(cacheRead, cacheWrite)}`,
+      accent: false,
+    },
   ]
 }
 
@@ -90,9 +110,10 @@ export function breakdownSegments(
 export function formatBreakdown(
   input: number,
   outputReal: number,
-  cache: number,
+  cacheRead: number,
+  cacheWrite: number,
 ): string {
-  return breakdownSegments(input, outputReal, cache)
+  return breakdownSegments(input, outputReal, cacheRead, cacheWrite)
     .map((segment) => segment.text)
     .join("")
 }
@@ -149,20 +170,20 @@ export function formatGroupLine(
 }
 
 export type GroupMeta = {
-  /** `⌛ context` — info-colored, row 2. */
+  /** `coins spend` — fixed SPEND_GOLD, row 2. */
   context: string
-  /** ` · <thinking> N` — accent-colored, right after the context total. */
+  /** ` · <thinking> N` — accent-colored, right after the spend total. */
   thinking: string
   /** ` · <fire> cost` — error-colored, after thinking. */
   cost: string
 }
 
-/** Row 2 of a group: context total, thinking value and fire cost. */
+/** Row 2 of a group: spend total, thinking value and fire cost. */
 export function formatGroupMeta(
   group: Pick<GroupSummary, "total" | "reasoning" | "cost">,
 ): GroupMeta {
   return {
-    context: `${GLYPH.hourglass} ${fmtTokens(group.total)}`,
+    context: `${GLYPH.coins}  ${fmtTokens(group.total)}`,
     thinking: formatThinking(group.reasoning),
     cost: ` · ${formatCost(group.cost)}`,
   }

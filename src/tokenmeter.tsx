@@ -30,25 +30,33 @@
  *  changes and message/session/status/project events), resolved from the
  *  client project + session.list endpoints; its own failure
  *  leaves the Project placeholder and never breaks the Session panel. Project
- *  usage is persisted as an all-time history ledger in api.kv
- *  (tokenmeter.project.history.v1): live sessions upsert their snapshot by
- *  ID, sessions that disappear become tombstones that keep contributing, and
- *  session.deleted persists the delete payload's usage (or the last known
- *  snapshot) into the ledger BEFORE the refresh and passes the deleted
- *  session's projectID as a refresh hint, so the Project section recovers
- *  from the ledger even if project.current() is momentarily unresolved
- *  right after the delete. All
+ *  usage = authoritative live session.list sum + a persisted deleted-session
+ *  aggregate in the plugin-owned SQLite store (tokenmeter.sqlite under
+ *  api.state.path.state — never api.kv, which concurrent TUIs would
+ *  clobber): session.deleted records the delete payload's usage (or the
+ *  last known observed usage) into that aggregate BEFORE the refresh,
+ *  atomically and exactly once per session across processes, and passes the
+ *  deleted session's projectID as a refresh hint, so the Project section
+ *  keeps its total even if project.current() is momentarily unresolved
+ *  right after the delete. A bounded ~2 s polling timer refreshes Project on
+ *  top of the event-driven fast path so a sibling OpenCode process working
+ *  in the same project appears in this sidebar. The coins total is each
+ *  session's complete
+ *  per-session TOKEN SPEND (Σ input + Σ output + Σ reasoning + Σ
+ *  cache.read + Σ cache.write across ALL assistant messages, reconstructing
+ *  OpenCode's billed tokens.total; always >= input + output + reasoning). All
  *  signal and timer ownership lives inside a Solid createRoot, disposed with
  *  the plugin, per the reference plugin's ownership pattern.
  */
 /** @jsxImportSource @opentui/solid */
 import type { TuiPlugin } from "@opencode-ai/plugin/tui"
 import { createEffect, createRoot, createSignal } from "solid-js"
-import { persistDeletedSession } from "./tokenmeter/ledger"
+import { projectDbPath, recordDeletedSession } from "./tokenmeter/db"
 import { UsagePanel } from "./tokenmeter/panel"
 import {
   disposeProjectRefresh,
   scheduleProjectRefresh,
+  startProjectPolling,
 } from "./tokenmeter/project"
 import {
   activateRoot,
@@ -133,17 +141,25 @@ const tui: TuiPlugin = async (api) => {
       }),
       api.event.on("session.deleted", (e) => {
         const info = e.properties.info
-        // Persist the deleted session into the Project ledger BEFORE the
-        // refresh: when the delete payload carries token/cost data it becomes
-        // the final snapshot, otherwise the plugin's observed aggregate
-        // (captured before the store forgets the session) fills the entry,
-        // and failing that the last known snapshot survives.
-        persistDeletedSession(api.kv, info, observedSessionUsage(info?.id))
+        // Record the deleted session's final usage into the plugin-owned
+        // SQLite aggregate BEFORE the refresh: payload fields (authoritative
+        // server fields) merged per-component with the plugin's observed
+        // usage, captured before the store forgets the session. The write is
+        // atomic and exactly-once per session across processes (tombstone
+        // admission), so deleting never changes the project total and a
+        // duplicate/cascade event never inflates it. No kv readiness gate:
+        // SQLite is owned by the plugin, not the host kv store.
+        const observed = observedSessionUsage(info?.id)
+        recordDeletedSession(
+          projectDbPath(api.state.path.state),
+          info,
+          observed,
+        )
         forgetSession(info?.id)
         // Pass the deleted session's projectID as a refresh hint: right after
         // a delete the context may not resolve project.current() yet, and the
-        // Project refresh recovers from the ledger (tombstone included)
-        // instead of surfacing "Unable to load project data".
+        // refresh keeps the hinted projectID so it still sums the live list
+        // plus the (already updated) deleted aggregate — no error flash.
         refreshAll(RECONCILE_DELAY, info?.projectID)
       }),
       api.event.on("session.status", (e) => {
@@ -190,6 +206,11 @@ const tui: TuiPlugin = async (api) => {
         scheduleProjectRefresh(api, RECONCILE_DELAY)
       }
     })
+    // Single bounded polling timer (~2 s) for Project freshness across
+    // sibling OpenCode processes working in the same project. Started once
+    // per plugin, never overlaps an in-flight refresh, and is cleared by
+    // disposeProjectRefresh in the lifecycle below.
+    startProjectPolling(api)
     api.lifecycle.onDispose(() => {
       disposeReconcile()
       disposeProjectRefresh()

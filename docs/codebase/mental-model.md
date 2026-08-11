@@ -4,7 +4,7 @@ This is the foundational page of the codebase guide: how the system fits togethe
 
 ## One-sentence model
 
-Host events invalidate sessions; a debounced reconcile rehydrates usage from the authoritative client SDK; a Solid snapshot signal repaints the sidebar panel in place; and a persistent kv ledger keeps Project totals alive across deletions and restarts.
+Host events invalidate sessions; a debounced reconcile rehydrates usage from the authoritative client SDK; a Solid snapshot signal repaints the sidebar panel in place; and a plugin-owned SQLite store keeps the Project deleted-session aggregate alive across deletions, restarts, and concurrent TUIs.
 
 ## The system in one flow
 
@@ -22,12 +22,15 @@ host events ──► entry (tokenmeter.tsx) ──► store invalidation / upse
  panel/index.tsx repaints in place (no remount) — column-aware lines
 
 Project section (parallel path):
-  project.ts ──► client.project.current() + session.list({scope:"project"})
-      └──────► ledger.ts ──► api.kv tokenmeter.project.history.v1
-                (upsert live by ID, tombstone deleted, idempotent full-sum)
+  project.ts ──► client.project.current()
+               + session.list({scope:"project", limit:10000})
+      └──────► live per-session sum (authoritative, never persisted)
+      └──────► db.ts ──► tokenmeter.sqlite (state dir)
+                (one deleted-session aggregate per project + tombstones)
+      └──────► ~2s polling timer keeps sibling TUIs fresh
 ```
 
-Two independent data paths feed one panel: the **Session** path (active session + delegation tree, rehydrated from client messages) and the **Project** path (all-time project usage, persisted in the kv ledger). A Project failure never touches the Session section.
+Two independent data paths feed one panel: the **Session** path (active session + delegation tree, rehydrated from client messages) and the **Project** path (authoritative live list sum + the SQLite deleted aggregate). A Project failure never touches the Session section.
 
 ## Entry points
 
@@ -42,7 +45,7 @@ Two independent data paths feed one panel: the **Session** path (active session 
 2. `src/tokenmeter/store.ts` — the state model: per-session message maps keyed by message ID, statuses, loaded/rehydrate flags, the `snapshot` signal.
 3. `src/tokenmeter/reconcile.ts` — the freshness engine: debounce, generation counter, rehydration, the 2 s tree-maintenance timer, and `publish`.
 4. `src/tokenmeter/tree.ts` + `groups.ts` — how descendants are discovered and collapsed into per-agent groups.
-5. `src/tokenmeter/project.ts` + `ledger.ts` — the persistent Project path with tombstones and recovery.
+5. `src/tokenmeter/project.ts` + `db.ts` — the persistent Project path: live-list refresh (explicit limit, cap fail-closed), tombstone-admission deleted aggregate, polling timer.
 6. `src/tokenmeter/panel/` — how the signals become rows (with `format.ts`/`text.ts`/`glyphs.ts` as pure support).
 
 ## State ownership
@@ -52,8 +55,8 @@ Two independent data paths feed one panel: the **Session** path (active session 
 | Per-session message usage | `store.ts` (maps) | Replaced from `client.session.messages` on rehydration |
 | Statuses | `store.ts` (map) | `session.status`/`session.idle` events + `api.state.session.status` fallback |
 | Snapshot signal | `store.ts` | `reconcile.publish` (Session) |
-| Project snapshot / error / loading | `project.ts` | Full kv-ledger sum; live-list fallback |
-| Ledger | `api.kv` (`tokenmeter.project.history.v1`) | `ledger.ts` reads/writes |
+| Project snapshot / error / loading | `project.ts` | Live `session.list` sum + SQLite deleted aggregate |
+| Deleted-session aggregate + tombstones | `db.ts` (`tokenmeter.sqlite` under `api.state.path.state`) | Atomic `session.deleted` admission (BEGIN IMMEDIATE + INSERT OR IGNORE); WAL + busy timeout, short open/transaction/close |
 | Expanded state | `api.kv` (`tokenmeter.sidebar.expanded`) | entry toggle |
 | Tree cache + session metadata | `tree.ts` (maps) | Client `session.children`/`get`; purged on `session.created` and by the maintenance timer |
 | Timers | `reconcile.ts` / `project.ts` | Owned by `activateRoot`/`disposeReconcile`/`disposeProjectRefresh`; disposed with the plugin's `createRoot` |
@@ -63,8 +66,9 @@ Two independent data paths feed one panel: the **Session** path (active session 
 - The client SDK is the source of truth; a stale non-empty mirror can never win (replace, never merge).
 - Totals are sums over unique keys (message ID / session ID): repeated events and refreshes never double-count.
 - Raw output and raw reasoning stay separate; the displayed output real (`output + reasoning`) is computed exactly once at the formatting boundary.
-- A session's headline context is one max-observed no-cache snapshot (`input + output + reasoning`); cache is excluded from context by design in both the Session and Project hourglass headlines (it lives only in its own metric).
-- Deleted sessions keep contributing (tombstones); a live list never zeroes a ledger.
+- A session's headline coins total is its COMPLETE CUMULATIVE TOKEN SPEND: `Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write` across ALL assistant messages — the exact reconstruction of OpenCode's billed `tokens.total` (verified against a real payload: 3167 + 249 + 64 + 66816 + 0 = 70296). Cache is fully accumulated, never a latest-message term. Each component (cost/input/output/reasoning/cacheRead/cacheWrite) keeps a per-field high-water so compaction can never lower the spend or its breakdown; payload-only sessions contribute their payload's own five-component sum.
+- Deleted sessions keep contributing through the SQLite aggregate, admitted exactly once per session across processes and duplicate deliveries; the live list is authoritative on every refresh — never persisted, never re-added.
+- Project list calls always carry the explicit 10_000 limit; a truncated (cap-saturated) result fails closed — prior snapshot preserved, stable error surfaced.
 - Every line is column-aware and truncated — the terminal never wraps mid-word.
 - Hooks never throw; a Project failure shows the stable error line and nothing else.
 

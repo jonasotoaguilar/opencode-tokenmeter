@@ -1,5 +1,5 @@
 {
-  "name": "opencode-tokenmeter",
+  "name": "@jonasotoaguilar/opencode-tokenmeter",
   "version": "0.1.0",
   "description": "OpenCode TUI plugin: TokenMeter sidebar — live token usage, cost, and delegation tree for sessions",
   "type": "module",

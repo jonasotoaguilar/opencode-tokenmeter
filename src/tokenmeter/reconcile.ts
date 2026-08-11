@@ -1,13 +1,12 @@
 /**
  * Reconciliation for the TokenMeter sidebar.
  *
- * Loads persisted usage per session and publishes a fresh snapshot. The
- * in-memory TUI mirror is the cheap fast path for unchanged sessions, but a
- * session marked for rehydration (invalidated by activity, or the active
- * root/descendant tree on activation) bypasses the mirror and re-reads the
- * authoritative client messages — a stale non-empty mirror can never win
- * over fresh client data. The usage map is replaced only after a successful
- * authoritative load; empty/failed loads stay retryable. A debounce plus a
+ * Loads persisted usage per session and publishes a fresh snapshot. Every
+ * load reads the authoritative client session messages — the host's
+ * in-memory mirror is capped (the TUI drops the OLDEST messages of a long
+ * session), so a non-empty mirror is never a complete usage source and can
+ * never win over client data. The usage map is replaced only after a
+ * successful load; empty/failed loads stay retryable. A debounce plus a
  * generation counter tolerate event ordering and drop stale async results.
  * Idle sessions are invalidated by the entry before scheduling so their next
  * load REPLACES the stored message map — removals and changed messages are
@@ -15,13 +14,25 @@
  * may still be streaming the session's messages, so the session stays
  * loadable and the next event-driven reconcile re-reads the current
  * messages — a first-open panel transitions from placeholder to populated
- * instead of freezing on an empty map. The headline totalTokens sums each
- * session's max context snapshot (one per session, root + all descendants);
- * input/output/reasoning/cache/cost stay cumulative and separate, with RAW
+ * instead of freezing on an empty map. The headline totalTokens is the sum
+ * of each session's complete TOKEN SPEND — Σ input + Σ output + Σ reasoning
+ * + Σ cache.read + Σ cache.write across ALL assistant messages per session
+ * (the exact reconstruction of OpenCode's billed tokens.total), summed
+ * across the
+ * root session and every recursively discovered descendant, each session ID
+ * exactly once. The high-water never lowers (compaction or a smaller later
+ * snapshot cannot reduce it): the store keeps the in-run per-component
+ * maximum of cost/input/output/reasoning/cacheRead/cacheWrite. Nothing live
+ * is persisted — after a restart every session rebuilds its spend from the
+ * authoritative client messages.
+ * input/output/reasoning/cacheRead/cacheWrite/cost stay cumulative and
+ * separate, with RAW
  * output and RAW reasoning preserved independently (never merged); the
  * displayed output real (output + reasoning) is computed once at the
  * formatting boundary, so no reasoning token is ever counted twice.
- * delegations counts descendant sessions and agents counts distinct agent
+ * Because every per-session spend includes its cumulative
+ * input + output + reasoning, the coins total is always
+ * >= the session's cumulative input + real output. delegations counts descendant sessions and agents counts distinct agent
  * types. A snapshot with nothing
  * to show is not published, so empty sessions keep the placeholder until
  * data arrives. A low-frequency maintenance timer on the active root covers
@@ -36,15 +47,15 @@
  */
 
 import { buildGroups } from "./groups"
-import { sumMessages, usageOf } from "./math"
+import { usageOf } from "./math"
 import {
   clearRehydrate,
   getStatus,
-  hasUsage,
   isLoaded,
   markLoaded,
   markRehydrate,
   needsRehydrate,
+  observedSessionUsage,
   setSnapshot,
   unmarkLoaded,
   usageMap,
@@ -70,7 +81,6 @@ export type ReconcileApi = {
   state: {
     session: {
       status(sessionID: string): { type?: SessionStatusType } | undefined
-      messages(sessionID: string): readonly UsageMessage[]
     }
   }
 }
@@ -85,22 +95,16 @@ let reconcileTimer: ReturnType<typeof setTimeout> | null = null
 let maintenanceTimer: ReturnType<typeof setInterval> | null = null
 let reconcileSeq = 0
 
+/**
+ * Fetches the FULL message list from the authoritative client. The host's
+ * in-memory mirror is never consulted: the TUI caps it (dropping the oldest
+ * messages of a long session), so a non-empty mirror is a truncated view
+ * that would silently undercount the session's usage.
+ */
 async function fetchMessages(
   api: ReconcileApi,
   sessionID: string,
-  authoritative: boolean,
 ): Promise<readonly UsageMessage[]> {
-  // Cheap in-memory fast path for unchanged sessions. An invalidated session
-  // bypasses it entirely: its mirror may be stale, and the client is the
-  // authoritative source.
-  if (!authoritative) {
-    try {
-      const inMemory = api.state.session.messages(sessionID)
-      if (inMemory?.length) return inMemory
-    } catch {
-      /* fall through to client */
-    }
-  }
   const res = await api.client.session.messages({ sessionID })
   return (res?.data ?? []).map((m) => m.info)
 }
@@ -113,7 +117,7 @@ async function loadSessionUsage(
   if (isLoaded(sessionID) && !rehydrate) return
   markLoaded(sessionID)
   try {
-    const messages = await fetchMessages(api, sessionID, rehydrate)
+    const messages = await fetchMessages(api, sessionID)
     const map = usageMap(sessionID)
     map.clear()
     for (const m of messages) {
@@ -177,17 +181,24 @@ function publish(api: ReconcileApi, rootID: string, ids: string[]): void {
   let input = 0
   let output = 0
   let reasoning = 0
+  let cacheRead = 0
+  let cacheWrite = 0
   let cache = 0
   let anyUsage = false
   for (const sid of ids) {
-    if (!hasUsage(sid)) continue
-    const s = sumMessages(usageMap(sid))
+    // observedSessionUsage applies the session's per-component spend
+    // high-water, so a compacted (smaller) message set can never lower the
+    // published spend.
+    const s = observedSessionUsage(sid)
+    if (!s) continue
     anyUsage = true
     cost += s.cost
     totalTokens += s.total
     input += s.input
     output += s.output
     reasoning += s.reasoning
+    cacheRead += s.cacheRead
+    cacheWrite += s.cacheWrite
     cache += s.cache
   }
   const runningOf = (sid: string) => {
@@ -205,6 +216,8 @@ function publish(api: ReconcileApi, rootID: string, ids: string[]): void {
     input,
     output,
     reasoning,
+    cacheRead,
+    cacheWrite,
     cache,
     delegations: ids.length - 1,
     agents: groups.length,

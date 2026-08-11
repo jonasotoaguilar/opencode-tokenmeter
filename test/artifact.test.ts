@@ -58,6 +58,28 @@ describe("production TokenMeter artifact (dist/tokenmeter.js)", () => {
     expect(typeof mod.default.tui).toBe("function")
   })
 
+  test("REGRESSION: the artifact loads bun:sqlite and can execute a real SQLite statement", async () => {
+    const code = readFileSync(ARTIFACT_PATH, "utf8")
+    // The plugin-owned Project store imports bun:sqlite (a Bun builtin the
+    // host cannot provide as an external package); the bundle must keep that
+    // import and never inline or rewrite it.
+    expect(code).toContain('import { Database } from "bun:sqlite"')
+    expect(code).toContain("tokenmeter.sqlite")
+    expect(code).toContain("INSERT OR IGNORE INTO tombstones")
+    // The artifact module graph loads in the Bun runtime (its top-level
+    // bun:sqlite import resolves), and the runtime executes real SQLite
+    // statements — the same path the TUI host will take.
+    // @ts-expect-error - dist/tokenmeter.js is untyped generated output
+    await import("../dist/tokenmeter.js")
+    const { Database } = await import("bun:sqlite")
+    const db = new Database(":memory:")
+    db.exec("CREATE TABLE t (id TEXT PRIMARY KEY)")
+    const run = db.query("INSERT OR IGNORE INTO t (id) VALUES (?)")
+    expect(run.run("a").changes).toBe(1)
+    expect(run.run("a").changes).toBe(0)
+    db.close()
+  })
+
   test("the artifact carries the task text, Subagents and no old tasklist glyph", () => {
     const code = readFileSync(ARTIFACT_PATH, "utf8")
     expect(code).not.toContain("tasklist")
@@ -96,5 +118,27 @@ describe("production TokenMeter artifact (dist/tokenmeter.js)", () => {
     const code = readFileSync(ARTIFACT_PATH, "utf8")
     expect(code).toMatch(/effect as _\$effect/)
     expect(code).toMatch(/insertNode as _\$insertNode/)
+  })
+})
+
+describe("package manifest identity", () => {
+  test("ships the scoped npm name and only the intended files", () => {
+    // The unscoped `opencode-tokenmeter` is registry-blocked (npm E403 —
+    // too similar to the existing `opencode-token-meter`), so the package
+    // identity is the scoped @jonasotoaguilar/opencode-tokenmeter while the
+    // GitHub repository keeps its unscoped path. The tarball must report
+    // the scoped name and ship only dist/.
+    const manifest = JSON.parse(
+      readFileSync(resolve(REPO_ROOT, "package.json"), "utf8"),
+    )
+    expect(manifest.name).toBe("@jonasotoaguilar/opencode-tokenmeter")
+    expect(manifest.files).toEqual(["dist"])
+    expect(manifest.repository.url).toBe(
+      "https://github.com/jonasotoaguilar/opencode-tokenmeter.git",
+    )
+    expect(manifest.publishConfig).toEqual({
+      access: "public",
+      provenance: true,
+    })
   })
 })
