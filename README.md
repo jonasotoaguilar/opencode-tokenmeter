@@ -45,18 +45,55 @@ For every scope, cumulative token spend uses the same formula: `Σ input + Σ ou
 
 ### Displayed metrics
 
-The sidebar uses Nerd Font glyphs. The codepoint and name remain authoritative when a Markdown renderer cannot display a PUA glyph.
+The sidebar uses Nerd Font glyphs (PUA codepoints — a Nerd Font must be active in the terminal). GitHub Markdown cannot render private-use glyphs, so each icon below is a repo-owned SVG image (`docs/icons/`) whose outlines were extracted from the official Nerd Fonts source font; the exact codepoints and source icon names are documented in [docs/icons/README.md](docs/icons/README.md). Colors are the exact DESIGN.md reference values for the runtime theme roles — the sidebar itself stays theme-driven.
 
-| Icon / codepoint | Metric | Displayed value |
-| --- | --- | --- |
-| `U+EDE8` (`fa-coins`) | Cumulative token spend | `Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write`; rendered in fixed coin gold `#D4AF37` |
-| `U+EE9C` (reasoning) | Thinking | Cumulative reasoning tokens; also included once in real output and total spend |
-| `U+F0238` (`md-fire`) | Cost | USD cost calculated by OpenCode from the model's input/output/cache rates |
-| `↑` | Input | Cumulative non-cached input tokens |
-| `↓` | Real output | Cumulative visible output + reasoning tokens |
-| `U+F472` (`oct-database`) | Prompt cache | `R<read>|W<write>`; zero sides are omitted and both-zero renders `0` |
-| `U+F06A9` (`md-robot`) | Agents | Distinct delegated agent types and each group identity |
-| `U+E20F` (tasks) | Delegations/runs | Recursive delegated session count or runs in an agent group |
+<table>
+  <thead>
+    <tr><th>Icon</th><th>Metric</th><th>Displayed value</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td align="center"><img src="docs/icons/fa-coins.svg" alt="fa-coins icon" title="fa-coins" width="16" height="16"></td>
+      <td>Cumulative token spend</td>
+      <td><code>Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write</code>; rendered in fixed coin gold <code>#D4AF37</code></td>
+    </tr>
+    <tr>
+      <td align="center"><img src="docs/icons/reasoning.svg" alt="reasoning icon" title="reasoning" width="16" height="16"></td>
+      <td>Thinking</td>
+      <td>Cumulative reasoning tokens; also included once in real output and total spend</td>
+    </tr>
+    <tr>
+      <td align="center"><img src="docs/icons/md-fire.svg" alt="md-fire icon" title="md-fire" width="16" height="16"></td>
+      <td>Cost</td>
+      <td>USD cost calculated by OpenCode from the model's input/output/cache rates</td>
+    </tr>
+    <tr>
+      <td align="center"><span style="color:#64748B">↑</span></td>
+      <td>Input</td>
+      <td>Cumulative non-cached input tokens</td>
+    </tr>
+    <tr>
+      <td align="center"><span style="color:#64748B">↓</span></td>
+      <td>Real output</td>
+      <td>Cumulative visible output + reasoning tokens</td>
+    </tr>
+    <tr>
+      <td align="center"><img src="docs/icons/oct-database.svg" alt="oct-database icon" title="oct-database" width="16" height="16"></td>
+      <td>Prompt cache</td>
+      <td><code>R&lt;read&gt;|W&lt;write&gt;</code>; zero sides are omitted and both-zero renders <code>0</code></td>
+    </tr>
+    <tr>
+      <td align="center"><img src="docs/icons/md-robot.svg" alt="md-robot icon" title="md-robot" width="16" height="16"></td>
+      <td>Agents</td>
+      <td>Distinct delegated agent types and each group identity</td>
+    </tr>
+    <tr>
+      <td align="center"><img src="docs/icons/tasks.svg" alt="tasks icon" title="tasks" width="16" height="16"></td>
+      <td>Delegations/runs</td>
+      <td>Recursive delegated session count or runs in an agent group</td>
+    </tr>
+  </tbody>
+</table>
 
 Every functional glyph has exactly two visible spaces before its value. Project and Session use the same metric contract; expanded Subagent groups repeat it per agent.
 
@@ -135,6 +172,7 @@ The suite runs **99 tests / 0 failures across 3 files** (899 `expect` calls) on 
 ### Package and release
 
 - Releases are **tag-driven**: push a stable `vX.Y.Z` tag — the release workflow preflights, publishes to npm with provenance, and creates the GitHub Release.
+- Every release needs a **curated release notes body** in the single current release document `docs/releases/<tag>.md`. The lifecycle keeps exactly one document: for a new release, `git mv docs/releases/<old-tag>.md docs/releases/<new-tag>.md`, replace its content with the narrative body (meaningful sections, PR/issue links — see the template in the `ci-cd-and-automation` skill assets), bump the package version, commit, then tag. The release preflight fails the release when `docs/releases/` has zero or multiple documents, the document name does not match the tag, or the body is empty, placeholder-filled, malformed, or mismatched to the tag/version — the GitHub Release is created from that file only, never from a raw commit list.
 - Publishing uses npm **Trusted Publishing (OIDC)** with provenance: no npm tokens exist, and publication runs in the protected `release` environment.
 - The first-ever publish is a one-time **manual authenticated bootstrap** (dist-tag `bootstrap`); the procedure, the npmjs trusted-publisher binding, and the full control list live in [docs/release-security.md](docs/release-security.md).
 
@@ -157,7 +195,9 @@ The suite runs **99 tests / 0 failures across 3 files** (899 `expect` calls) on 
 ├── skills/
 │   ├── opencode-plugin/       # versioned plugin-development skill (authoritative)
 │   └── npm-secure-config/     # npm/pnpm/Bun security-configuration skill
-├── docs/                      # CODEBASE-GUIDE, codebase/, adr/, skill-style-guide
+├── docs/                      # CODEBASE-GUIDE, codebase/, adr/, releases/
+│                              #   (single current release document), icons/
+│                              #   (exact Nerd Font glyph SVGs), skill-style-guide
 ├── openspec/                  # spec-driven requirements (specs/, changes/)
 ├── PRD.md
 ├── ARCHITECTURE.md
@@ -179,6 +219,7 @@ The suite runs **99 tests / 0 failures across 3 files** (899 `expect` calls) on 
 | Navigate the code / dev commands | [docs/CODEBASE-GUIDE.md](docs/CODEBASE-GUIDE.md) |
 | Architecture decision records | [docs/adr/](docs/adr/) |
 | Release pipeline security (controls, bootstrap, drift checklist) | [docs/release-security.md](docs/release-security.md) |
+| Curated release notes (single current release document) | [docs/releases/](docs/releases/) |
 | Authoring the bundled skill | [docs/skill-style-guide.md](docs/skill-style-guide.md) |
 | Branch policy, PR gates, labels | [.github/CONTRIBUTING.md](.github/CONTRIBUTING.md) |
 | Report a vulnerability | [.github/SECURITY.md](.github/SECURITY.md) |

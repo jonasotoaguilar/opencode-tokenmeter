@@ -14,6 +14,7 @@ The release pipeline publishes `@jonasotoaguilar/opencode-tokenmeter` to npm and
 | Provenance | `npm publish --provenance` plus `publishConfig.provenance: true`. Trusted publishing auto-generates provenance for public packages/repos; the explicit flag keeps the intent visible |
 | Exact-tag checkout, no persisted credentials | `actions/checkout` with `fetch-depth: 0`, `fetch-tags: true`, `persist-credentials: false` in every job |
 | Preflight → publish → verify order | Three jobs with explicit timeouts (30/45/15 min); publication is the only write-capable job; preflight runs the full CI gate set; verify confirms the npm entry and the GitHub Release from outside |
+| Curated release notes | `docs/releases/` holds exactly ONE current release document, `docs/releases/<tag>.md`. A new release renames the previous document (`git mv`), replaces its content with the curated narrative body, and reviews it in git before tagging. The preflight hook fails the release when `docs/releases/` has zero or multiple documents, the document name does not match the tag, or the body is empty, placeholder-filled, malformed, or mismatched to the tag/version; the publish hook creates the GitHub Release from that file only (never a raw git-log dump, never `--generate-notes`) |
 | Per-tag concurrency | `release-${{ github.ref }}` with `cancel-in-progress: false` — a second run on the same tag waits instead of cancelling the in-flight release |
 | Fail closed | Every hook must exist and be executable or the run errors out; an already-published npm version or an existing GitHub Release blocks before any write |
 | Runner cleanup | `if: always()` step removes generated release material (`$RUNNER_TEMP/release-material`) on every outcome; the runner is ephemeral regardless |
@@ -59,5 +60,6 @@ Not covered by Trusted Publishing: administrative npm actions that are not publi
 - [ ] No `NPM_TOKEN`/`NODE_AUTH_TOKEN` appears in `.github/workflows/release.yml` or the `release` environment's secrets.
 - [ ] npmjs trusted publisher is configured for `jonasotoaguilar/opencode-tokenmeter` with workflow `release.yml` and environment `release`.
 - [ ] The npm 12 pin step (`npm install -g npm@12`) is present in the publication job before the publish hook.
+- [ ] `docs/releases/` contains exactly one markdown file, `docs/releases/<tag>.md`, at every tagged commit with curated narrative notes (drift happens when a tag is cut without renaming/replacing the current release document).
 - [ ] A first OIDC publish succeeded and the published package shows a provenance attestation.
 - [ ] Old long-lived npm publishing tokens are revoked and the `NPM_TOKEN` secret is removed.

@@ -1,0 +1,11 @@
+Glyph extraction evidence — official Nerd Fonts v3.5.0 SymbolsNerdFont-Regular.ttf
+Source font SHA-256: 0546de2600fecaedb017a02acf4d4ee5b941eaf7afb589db9b4989ef19a4879b
+Transform: font y-up -> SVG y-down via y' = 2*bboxCenterY - y (TransformPen 1,0,0,-1,0,2cy); viewBox unchanged (mirror around bbox center).
+Fill colors: exact DESIGN.md reference values for the runtime semantic roles (see docs/icons/README.md); only fa-coins (SPEND_GOLD) is fixed at runtime, all other roles resolve from the host theme.
+
+U+EDE8 fa-coins         semantic=token spend — SPEND_GOLD (fixed, never theme-driven) fill=#D4AF37  mirror_y=1228.0 bbox=(0,-331,1890x1890) sha256=f698c14616a47951
+U+EE9C fa-brain         semantic=thinking — theme().accent fill=#F5BDE6  ref=active catppuccin-macchiato macPink  mirror_y=1228.0 bbox=(0,-331,1890x1890) sha256=0e020ba76adbf58c
+U+F0238 md-fire          semantic=cost — theme().error (DESIGN.md error) fill=#F87171  mirror_y=1228.3 bbox=(1,-154,1194x1536) sha256=e524279e27aa15cb
+U+F472 oct-database     semantic=prompt cache — theme().textMuted (DESIGN.md textMuted) fill=#64748B  mirror_y=1228.0 bbox=(0,-410,1792x2048) sha256=92fb07ce05390909
+U+F06A9 md-robot         semantic=agents — theme().primary (DESIGN.md primary) fill=#38BDF8  mirror_y=1228.0 bbox=(0,-238,1880x1704) sha256=71e4c21b377a11c1
+U+E20F fae-tools        semantic=delegations/runs — theme().success (DESIGN.md success) fill=#4ADE80  mirror_y=1228.9 bbox=(1,-356,1952x1941) sha256=bcea69209909e15e

@@ -3,8 +3,11 @@ set -euo pipefail
 
 # Release publication (write-capable, single step) for the tag-driven
 # pipeline. Sets the package version from the tag, publishes to npm with
-# provenance, and creates the GitHub Release for RELEASE_TAG with
-# Conventional-commit notes between the previous tag and this one.
+# provenance, and creates the GitHub Release for RELEASE_TAG from the curated
+# release notes file docs/releases/<tag>.md — the single current release
+# document (git mv + content replacement per release), validated by
+# release-preflight and reviewed in git before tagging. Never a raw git-log
+# dump and never auto-generated notes.
 #
 # npm authentication uses Trusted Publishing (OIDC): the job's `id-token:
 # write` lets npm exchange a short-lived GitHub OIDC assertion for a registry
@@ -50,41 +53,26 @@ test "$(jq -r .version package.json)" = "$VERSION"
 echo "package.json version: ${VERSION}"
 echo "::endgroup::"
 
-# Generated release material (notes file) lives under the workflow's
-# release-material dir so the `if: always()` cleanup step removes it on every
-# outcome. npm auth is OIDC-only: the registry token is minted per run and
-# never written to a committed file.
-MATERIAL_DIR="${RUNNER_TEMP:-/tmp}/release-material"
-mkdir -p "$MATERIAL_DIR"
-
 echo "::group::release-publish: npm publish"
 npm publish --provenance --access public
 echo "::endgroup::"
 
 echo "::group::release-publish: GitHub Release"
-NOTES_FILE="$MATERIAL_DIR/release-notes.md"
-PREV_TAG="$(git describe --tags --abbrev=0 "${RELEASE_TAG}^" 2>/dev/null || true)"
-if [[ -n "$PREV_TAG" ]]; then
-  git log --pretty=format:"- %s" "$PREV_TAG".."$RELEASE_TAG" > "$NOTES_FILE"
-  echo "" >> "$NOTES_FILE"
-  echo "notes: conventional commits ${PREV_TAG}..${RELEASE_TAG}"
-else
-  echo "notes: no previous tag — using the tag's full history"
-  git log --pretty=format:"- %s" "$RELEASE_TAG" --max-count=100 > "$NOTES_FILE"
-  echo "" >> "$NOTES_FILE"
-fi
+NOTES_FILE="docs/releases/${RELEASE_TAG}.md"
 if [[ ! -s "$NOTES_FILE" ]]; then
-  echo "::warning::release-publish: no commits available for notes — generating release notes"
-  gh release create "$RELEASE_TAG" \
-    --repo "$RELEASE_REPOSITORY" \
-    --target "$RELEASE_COMMIT" \
-    --generate-notes
-else
-  gh release create "$RELEASE_TAG" \
-    --repo "$RELEASE_REPOSITORY" \
-    --target "$RELEASE_COMMIT" \
-    --notes-file "$NOTES_FILE"
+  echo "::error::release-publish: curated release notes missing or empty: ${NOTES_FILE} — release-preflight validates it at the tagged commit"
+  exit 1
 fi
+NOTES_H1="$(grep -m1 -E '^# ' "$NOTES_FILE" || true)"
+if [[ "$NOTES_H1" != "# v${VERSION}" && "$NOTES_H1" != "# v${VERSION} "* ]]; then
+  echo "::error::release-publish: release notes H1 does not title the release '# v${VERSION} ...' (got: ${NOTES_H1:-<no H1>})"
+  exit 1
+fi
+gh release create "$RELEASE_TAG" \
+  --repo "$RELEASE_REPOSITORY" \
+  --target "$RELEASE_COMMIT" \
+  --notes-file "$NOTES_FILE"
+echo "notes: ${NOTES_FILE} (curated narrative for v${VERSION})"
 echo "::endgroup::"
 
 echo "release-publish: OK"

@@ -13,6 +13,17 @@
 #   - Strict job order preflight -> publication -> verification, each with an
 #     explicit timeout; exact-tag checkout with full history/tags and no
 #     persisted checkout credentials in every job.
+#   - Curated release notes contract (single current release document):
+#     docs/releases/ holds exactly ONE markdown file — the current release
+#     document, named docs/releases/<RELEASE_TAG>.md. A new release renames
+#     the previous document to the new tag name (git mv), replaces its content
+#     with the curated narrative body, and reviews it in git before tagging.
+#     The preflight hook fails the release before publication when
+#     docs/releases has zero or multiple documents, the document name does
+#     not match RELEASE_TAG, or the body is empty, placeholder-filled,
+#     malformed, or mismatched to the tag/version. The publish hook creates
+#     the GitHub Release from that file only — never a raw git-log dump and
+#     never --generate-notes.
 #   - The publication job runs in the protected `release` environment
 #     (required reviewers + tag protection; the workflow does not work
 #     without it) and is the only job that can write. The npm trusted
@@ -21,14 +32,15 @@
 # ADAPTATION:
 #   The project supplies three executable hooks:
 #     scripts/release-preflight (read-only)  — tag/version/registry/release
-#                                               validation plus the full CI
-#                                               gate set; never publishes.
+#                                               validation, the curated
+#                                               release-notes contract, and
+#                                               the full CI gate set; never
+#                                               publishes.
 #     scripts/release-publish   (write-capable, single step) — sets the
 #                               package version from the tag (no git
 #                               tag/commit), `npm publish --provenance`, and
-#                               creates the GitHub Release with
-#                               Conventional-commit notes between the previous
-#                               tag and this one.
+#                               creates the GitHub Release from the curated
+#                               notes file docs/releases/<RELEASE_TAG>.md.
 #     scripts/release-verify    (read-only)  — confirms the npm entry and the
 #                                               GitHub Release from outside.
 #   Every hook step fails closed with an explicit ::error:: when its script is
