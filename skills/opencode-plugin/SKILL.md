@@ -21,6 +21,7 @@ Load when creating or modifying OpenCode plugins: TUI plugins, sidebar UI, Solid
 - **Testing**: `references/testing.md`; TUI plugins also run the production artifact check — preload-backed render tests don't prove the `tui.json` loading boundary.
 - **Pre-publish gates**: `typecheck`, `test`, `audit --prod`, `pack --dry-run`, direct-dist testing — `references/build-and-release.md`.
 - **Runtime dependency packaging**: every module the compiled artifact imports at runtime MUST be declared in `dependencies` of the published package — consumers install only `dependencies`, never `devDependencies` (a TUI bundle importing `@opentui/solid`/`solid-js` that ships them only as devDeps fails to load after install). Check the bundle's bare imports before publishing — `references/publishing.md`.
+- **Entrypoint contract**: ship only the artifact pair(s) your kind needs — `tui.*` (implements `TuiPlugin`, `exports["./tui"]`, registers in `tui.json`); `index.*` (implements `Plugin`, `exports["."]`/`"./runtime"`, registers in `opencode.json`); dual = both pairs, two configs. Never ship `index.*` in a TUI-only package — `references/publishing.md`.
 
 ## Decision Gates
 
@@ -38,7 +39,7 @@ Load when creating or modifying OpenCode plugins: TUI plugins, sidebar UI, Solid
 3. Design: `references/hooks.md`, `hook-patterns.md`, `coding-ts.md`.
 4. Implement modularly: `hook-patterns.md`, `tool-helper.md`, `events.md`, `examples.md`.
 5. Add UI feedback if needed (toasts vs inline).
-6. Test: test folder with `opencode.json` → `opencode run hi` → interactive `opencode`; recommend tests by hook type.
+6. Test: test folder with the entry's config (`opencode.json` for server/runtime plugins → `opencode run hi`; `tui.json` for TUI plugins) → interactive `opencode`; recommend tests by hook type.
 7. Build and package (npm only): single-file tsup bundling, packaging-boundary decision, tarball inspection via `pack --dry-run` — `build-and-release.md`.
 8. Release and share (npm only): versioning/release — semantic-release optional; default is tag-driven `scripts/release-*` (preflight → publish → verify, `vX.Y.Z` tag as authorization): `build-and-release.md`, `publishing.md`, `update-notifications.md`.
 

@@ -1758,8 +1758,8 @@ describe("width resolution and column-safe text (text.ts)", () => {
   })
 
   test("truncateToColumns never exceeds the budget and never splits a wide char", () => {
-    expect(truncateToColumns("TokenMeter 1.0.0", 17)).toBe("TokenMeter 1.0.0")
-    expect(truncateToColumns("TokenMeter 1.0.0", 10)).toBe("TokenMete…")
+    expect(truncateToColumns("TokenMeter 1.0.1", 17)).toBe("TokenMeter 1.0.1")
+    expect(truncateToColumns("TokenMeter 1.0.1", 10)).toBe("TokenMete…")
     expect(truncateToColumns("界界界", 3)).toBe("界…")
     expect(truncateToColumns("abcdef", 0)).toBe("")
     expect(truncateToColumns("abcdef", 1)).toBe("…")

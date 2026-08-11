@@ -1,9 +1,20 @@
 {
   "name": "opencode-tokenmeter-tui",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "OpenCode TUI plugin: TokenMeter sidebar — live token usage, cost, and delegation tree for sessions",
   "type": "module",
-  "main": "./dist/tokenmeter.js",
+  "main": "./dist/tui.js",
+  "types": "./dist/tui.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js"
+    },
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js"
+    }
+  },
   "files": ["dist"],
   "keywords": ["opencode", "opencode-plugin", "plugin", "tokenmeter", "tui"],
   "license": "MIT",
@@ -40,8 +51,8 @@
     "test": "bun test",
     "test:dist": "bun run build && bun test test/artifact.test.ts",
     "audit": "bun audit",
-    "biome:check": "biome check src test scripts tsconfig.json tsconfig.test.json",
-    "biome:format": "biome format --write src test scripts tsconfig.json tsconfig.test.json",
+    "biome:check": "biome check src test scripts tsconfig.json tsconfig.test.json tsconfig.build.json",
+    "biome:format": "biome format --write src test scripts tsconfig.json tsconfig.test.json tsconfig.build.json",
     "hooks:install": "lefthook install",
     "pack:dry-run": "bun pm pack --dry-run"
   },

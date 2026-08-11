@@ -58,7 +58,7 @@ Rules:
 
 - `type: "module"` — OpenCode plugins run as ESM.
 - `main`/`types` MUST point at built `dist/` output, never at `src/` TypeScript.
-- `exports` — optional. A single-entry plugin may expose `.` only or omit the map; multiple entrypoints add subpaths (see §7).
+- `exports` — the public entrypoint contract: `tui.*` implements `TuiPlugin` and MUST be exposed via `"./tui"` (OpenCode resolves npm TUI plugins exclusively through that subpath, never through `main`); `index.*` implements `Plugin` and is exposed via `"."` or an explicit subpath such as `"./runtime"`. A TUI-only package ships `tui.js`/`tui.d.ts` and MUST NOT ship `index.*` without a real server/runtime entry; a dual package exposes both (`"."` → server bundle, `"./tui"` → TUI bundle). Registration follows the entry type: server/runtime in `opencode.json`, TUI in `tui.json`. See the Entrypoint Contract in `references/publishing.md`.
 - `files` — whitelist of what enters the tarball. Source, tests, and local config MUST NOT be listed.
 - `peerDependencies` — every API the host provides (SDK, TUI runtime, shared libs). Duplicate them in `devDependencies` for local typechecking.
 - `prepack` — runs on both `pnpm pack` and `pnpm publish`; build here so a packed/published artifact is never stale.
@@ -90,6 +90,7 @@ export default defineConfig({
 
 - One entry key = one output file (`index` → `dist/index.js` + `dist/index.d.ts`).
 - `dts: true` generates the `.d.ts` that `main`/`types` reference.
+- **Non-tsup (bun) builds** still ship the same pair: bundle with `Bun.build`, then emit the entry declaration with the project's own TypeScript — `tsc -p <config>` with `emitDeclarationOnly` + `declaration` scoped to the entry (`include: ["src/<entry>"]`) — and rename both outputs to the entrypoint names (`dist/tui.js`/`dist/tui.d.ts` for TUI-only). The declaration describes the real default export and is usable by TypeScript consumers.
 
 **A single JS file is NOT automatically self-contained.** `bundle: true` only inlines statically importable JS. The package still needs extra files shipped in `files` when the plugin uses:
 
@@ -254,21 +255,29 @@ jobs:
 
 ## 6. Sharing and installation
 
-OpenCode automatically resolves npm plugin names from config and installs them at runtime — users do NOT run `npm install`:
+OpenCode automatically resolves npm plugin names from config and installs them at runtime — users do NOT run `npm install`. Registration follows the entry type:
 
-```jsonc
-{
-  "plugin": [
-    "opencode-my-plugin@1.0.0", // pinned - no auto-update
-    "opencode-my-plugin"        // unpinned - resolves latest
-  ]
-}
-```
+- **Server/runtime plugins** (`index.*`, implements `Plugin`) register in `opencode.json` with the config spec:
+  ```jsonc
+  {
+    "plugin": [
+      "opencode-my-plugin@1.0.0", // pinned - no auto-update
+      "opencode-my-plugin"        // unpinned - resolves latest
+    ]
+  }
+  ```
+- **TUI plugins** (`tui.*`, implements `TuiPlugin`) register in `tui.json` — the TUI loader resolves `exports["./tui"]` and never loads `index.*`:
+  ```jsonc
+  {
+    "plugin": ["opencode-my-tui-plugin"]
+  }
+  ```
+- **Dual packages** document and register BOTH: the server/runtime entry in `opencode.json`, the TUI entry in `tui.json` — never imply one config loads both runtimes.
 
 - Pinned versions stay cached until the user changes the config; unpinned resolves `latest` at launch.
 - For local development, point config at the built output directly (`/abs/path/to/plugin/dist/index.js`) or at source with `file://` — no npm needed.
 - Tell users to **restart OpenCode** after adding or changing a plugin in config.
-- README installation section: show the config snippet and note auto-install; do NOT include `npm install` instructions.
+- README installation section: show the config snippet(s) matching the entry types and note auto-install; do NOT include `npm install` instructions.
 
 </sharing_install>
 
@@ -309,6 +318,10 @@ export default defineConfig([
 ]);
 ```
 
-Apply this only when the plugin genuinely has multiple entrypoints. A single-entry plugin may expose `.` only or omit the map (see §1); it needs neither extra subpaths nor the split config.
+Apply this only when the plugin genuinely has multiple entrypoints. A single-entry plugin needs neither extra subpaths nor the split config.
+
+**Dual packages load both runtimes** — the `index.*` entry is a real server/runtime `Plugin` (hooks, tools, auth, event processing, or the data-collection companion runtime of a TUI, e.g. the `./runtime` of opencode-subagent-statusline) loaded from `opencode.json`; the `tui.*` entry is the `TuiPlugin` loaded from `tui.json`. Document both configs. An `index.*` without such a runtime is dead weight: the TUI loader never loads it.
+
+**TUI-only packages** keep the `"./tui"` subpath even with a single entry (the TUI loader resolves `exports["./tui"]`, and `"."` may point at the same pair for legacy resolvers). They MUST NOT add an `index.*` entry just to fill the root — an `index.*` pair without a real server/runtime entry is dead weight and misleads consumers.
 
 </dual_entry>

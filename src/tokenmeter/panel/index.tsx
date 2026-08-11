@@ -5,7 +5,7 @@
  * `UsagePanel` from `./tokenmeter/panel` (resolves to this file).
  *
  * Layout, top to bottom:
- *   `TokenMeter 1.0.0` — clean title row, flush left like Project/Session; no toggle here.
+ *   `TokenMeter 1.0.1` — clean title row, flush left like Project/Session; no toggle here.
  *   `Project` (accent) + two metric rows — static `…` placeholder while the
  *     lookup/list runs and no snapshot exists yet; a failed refresh shows a
  *     visible error line in theme().error (see project-section.tsx) instead
@@ -95,10 +95,10 @@ export function UsagePanel(props) {
         <text fg={theme().text}>
           {truncateToColumns(
             "TokenMeter",
-            Math.max(1, inner() - textColumns(" 1.0.0")),
+            Math.max(1, inner() - textColumns(" 1.0.1")),
           )}
         </text>
-        <text fg={theme().textMuted}> 1.0.0</text>
+        <text fg={theme().textMuted}> 1.0.1</text>
       </box>
       <text fg={theme().accent}>Project</text>
       <Show

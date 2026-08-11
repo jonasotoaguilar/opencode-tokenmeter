@@ -73,6 +73,42 @@ For local development (no npm), point config at the built output or source direc
 
 <checklist>
 
+## Entrypoint Contract — ship exactly the artifacts your plugin kind needs
+
+The public surface of a published plugin is its `dist/` artifact pair(s) plus the `exports` map that resolves them. Ship exactly the pair your plugin kind needs, never extra names. The file names are the convention: `tui.js`/`tui.d.ts` for TUI plugins, `index.js`/`index.d.ts` for server/runtime plugins — generate only the pairs that apply.
+
+| Plugin kind | Artifacts in `dist/` | Implements | Resolved by | Registered in |
+| --- | --- | --- | --- | --- |
+| TUI-only (sidebar, tabs, toasts, statusline) | `tui.js` + `tui.d.ts` | `TuiPlugin` | `exports["./tui"]` (plus `"."` → the same pair for legacy resolvers) | `tui.json` |
+| Server/runtime-only (hooks, tools, auth, event processing) | `index.js` + `index.d.ts` | `Plugin` | `exports["."]` or an explicit subpath such as `exports["./runtime"]` | `opencode.json` |
+| Dual (server + TUI in one package) | `index.*` + `tui.*` | `Plugin` + `TuiPlugin` | `"."` → `index.*`, `"./tui"` → `tui.*` (one bundle per entry; see `references/build-and-release.md` §7) | both: `opencode.json` + `tui.json` |
+
+Rules:
+
+- **`tui.*` is a TUI plugin**: it implements `TuiPlugin`, resolves through `exports["./tui"]` — `main` is ignored for TUI loading — and registers in `tui.json`. A TUI package without that subpath (or with a missing/null `exports` map) does not load; that is the classic silent failure of a package that only sets `main`.
+- **`index.*` is the normal/server plugin**: it implements `Plugin` (hooks, tools, auth, event processing), resolves through `exports["."]` (or an explicit subpath such as `exports["./runtime"]`) and registers in `opencode.json` with the corresponding spec. The TUI loader NEVER loads `index.*`.
+- **An `index.js` may be the companion runtime of a TUI** (data collection/persistence/processing, e.g. the experimental `./runtime` of opencode-subagent-statusline) — but it is a separate `Plugin` entry, not a TUI artifact, and is loaded only when registered in `opencode.json`.
+- **A dual package loads both runtimes**: the server/runtime entry from `opencode.json`, the TUI entry from `tui.json`. Document BOTH entries/configs in the README — never suggest one config covers both.
+- **Never generate or ship `index.js`/`index.d.ts` in a TUI-only package.** Without a real server/runtime entry, an `index.*` pair is dead weight that misleads consumers (and this skill's dual-entry pattern is NOT an excuse to add it).
+- Every artifact pair ships both files: the `.js` bundle and the `.d.ts` declaration (emitted from the entry with the project's own TypeScript, e.g. `tsc --emitDeclarationOnly` scoped to the entry).
+- `main`/`types` mirror the single loadable entry for legacy resolvers (TUI-only: point both at `tui.*`).
+
+TUI-only `package.json` (bun-built example):
+
+```json
+{
+  "name": "opencode-my-tui-plugin",
+  "type": "module",
+  "main": "./dist/tui.js",
+  "types": "./dist/tui.d.ts",
+  "exports": {
+    ".": { "types": "./dist/tui.d.ts", "import": "./dist/tui.js" },
+    "./tui": { "types": "./dist/tui.d.ts", "import": "./dist/tui.js" }
+  },
+  "files": ["dist"]
+}
+```
+
 ## Publishing Checklist
 
 1. **Package structure:**
@@ -143,7 +179,7 @@ For local development (no npm), point config at the built output or source direc
    - MUST declare in `dependencies` every module the compiled artifact imports at runtime — never only `devDependencies`. The consumer installs only `dependencies` (OpenCode runs `bun add --force <package>`), so a runtime import that lives only in `devDependencies` fails to resolve after install. TUI plugins are the common trap: a bundle importing `@opentui/solid` / `solid-js` (or `@opentui/core`) must ship them as `dependencies`. Verify the bundle's external imports (`rg -o 'from "[^"]+"' dist/*.js` / `require(...)`) and declare every bare import that is not provided by the host.
    - MUST add `"publishConfig": { "access": "public" }` for scoped packages
    - MUST point `main`/`types` at `dist/` output; the `prepack` script builds before both `npm pack` and `npm publish`
-    - Use an `exports` map to define the public entrypoint; a single-entry plugin may expose `.` only, while multiple entrypoints add subpaths (see `references/build-and-release.md` §7)
+   - Use an `exports` map to define the public entrypoint, following the Entrypoint Contract above: a TUI plugin MUST expose `"./tui"` (OpenCode's TUI resolution path), a server-only plugin exposes `.` only, a dual plugin exposes both with separate bundles (see `references/build-and-release.md` §7). Never ship `index.*` in a TUI-only package.
    - Add `"publishConfig": { "provenance": true }` for signed npm provenance from GitHub Actions (requires public package + OIDC; see `references/build-and-release.md` §5)
 
 3. **example-opencode.json:**
@@ -178,6 +214,8 @@ For local development (no npm), point config at the built output or source direc
    >   "plugin": ["<PACKAGE_NAME>"]
    > }
    > ```
+
+   Dual packages document BOTH configs — the server/runtime entry in `opencode.json`, the TUI entry in `tui.json`; never imply that one config loads both runtimes.
    ````
 
 5. **Pre-publish gates (MUST all pass):**
