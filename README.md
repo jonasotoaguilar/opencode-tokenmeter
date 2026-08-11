@@ -130,21 +130,23 @@ opencode plugin opencode-tokenmeter-tui@1.0.1 --force
 
 The version pin creates a fresh cache directory and `--force` replaces the config entry — do not delete the cache by hand.
 
-This repo also ships an update helper (also exposed as the `opencode-tokenmeter-tui` bin via `npx`):
+**Update helper (no repository needed)** — install it from the repo with the official one-liner, then use it to check and update:
 
 ```bash
-scripts/update-plugin --check     # report if this plugin is outdated, change nothing
-scripts/update-plugin             # update this plugin via the official command
-scripts/update-plugin --dry-run   # show the exact command first
+curl -fsSL https://raw.githubusercontent.com/jonasotoaguilar/opencode-tokenmeter/main/scripts/install.sh | bash
+
+opencode-tokenmeter-update --check     # report if this plugin is outdated, change nothing
+opencode-tokenmeter-update             # update this plugin via the official command
+opencode-tokenmeter-update --dry-run   # show the exact command first
 ```
 
-It reads your opencode configs (global + local), finds this plugin's entry, compares the installed version against the registry, and runs the official command when outdated. It only ever updates this plugin — other plugins are left untouched.
+The helper reads your opencode configs (global + local), finds this plugin's entry, compares the installed version against the registry, and runs the official command when outdated. It only ever updates this plugin — other plugins are left untouched. It ships as a plain bash script (no `npm install`), so npm's `strict-allow-scripts` security default cannot block it; developers with the repo can also run `scripts/update-plugin` directly.
 
 **Quick reference** — see the versions and update from bash:
 
 ```bash
 # Installed version (what opencode actually loads from its cache)
-scripts/update-plugin --check                      # "installed 1.0.1 = latest 1.0.1" or "installed 1.0.0 → latest 1.0.1"
+opencode-tokenmeter-update --check                 # "installed 1.0.1 = latest 1.0.1" or "installed 1.0.0 → latest 1.0.1"
 
 # Latest published version on npm (independent of your install)
 npm view opencode-tokenmeter-tui version

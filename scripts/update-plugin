@@ -28,6 +28,9 @@ set -euo pipefail
 #   scripts/update-plugin --dry-run    # show the command without running it
 #   scripts/update-plugin --global     # only the global config
 #   scripts/update-plugin --local      # only the local config
+#   scripts/update-plugin --package <name>   # override the package name when no
+#                                     # package.json sits next to the script
+#                                     # (curl|bash execution)
 #
 # Exit codes: 0 = up to date (or updated), 1 = error, 2 = --check found updates.
 
@@ -45,9 +48,10 @@ die() { log "error: $*" >&2; exit 1; }
 CHECK=0
 DRY_RUN=0
 SCOPE="both" # both | global | local
+PACKAGE_NAME=""
 
 usage() {
-  sed -n '4,30p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '4,34p' "$0" | sed 's/^# \{0,1\}//' >&2
   exit 1
 }
 
@@ -57,6 +61,11 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY_RUN=1 ;;
     --global) SCOPE="global" ;;
     --local) SCOPE="local" ;;
+    --package)
+      [[ $# -ge 2 ]] || die "--package requires a value"
+      PACKAGE_NAME="$2"
+      shift
+      ;;
     -h | --help) usage ;;
     --*) die "unknown option: $1" ;;
     *) die "unexpected argument: $1 (this script only updates its own plugin)" ;;
@@ -68,12 +77,14 @@ done
 # Identity: this script updates only the package it ships with
 # ---------------------------------------------------------------------------
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PKG_DIR="$(dirname "$SCRIPT_DIR")"
-PACKAGE_NAME="$(
-  node -e "console.log(require(process.argv[1]).name)" "$PKG_DIR/package.json" 2>/dev/null || true
-)"
-[[ -n "$PACKAGE_NAME" ]] || die "could not read package name from $PKG_DIR/package.json"
+if [[ -z "$PACKAGE_NAME" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  PKG_DIR="$(dirname "$SCRIPT_DIR")"
+  PACKAGE_NAME="$(
+    node -e "console.log(require(process.argv[1]).name)" "$PKG_DIR/package.json" 2>/dev/null || true
+  )"
+  [[ -n "$PACKAGE_NAME" ]] || die "could not determine package name — run with --package <name> (no package.json next to this script)"
+fi
 
 # semver_gt A B — true when A is a newer semver than B (numeric, 3 parts)
 semver_gt() {

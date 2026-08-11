@@ -81,9 +81,21 @@ my-plugin --global           # only the global config
 my-plugin --local            # only the local config
 ```
 
-How it works:
+**Users without the repository** install the helper from the repo via the official one-liner (the `curl | bash` pattern — same as gentle-ai's installer), not by cloning it:
 
-1. Reads its own name from the `package.json` in the directory above the script (works both in the repo and when installed as a dependency).
+```bash
+curl -fsSL https://raw.githubusercontent.com/<org>/<repo>/main/scripts/install.sh | bash
+my-plugin-update --check     # report if the plugin is outdated
+my-plugin-update             # update via the official command
+```
+
+The `install.sh` script downloads `update-plugin` from the repository into `~/.local/share/<package>/`, writes a minimal `package.json` next to it (so the helper can identify its own package without a checkout), and installs a launcher at `~/.local/bin/<package>-update`. The helper must accept `--package <name>` as an override for exactly this case (no manifest next to the script when executed standalone).
+
+Why the installer and not `npm install -g <package>`: a published plugin pulls runtime dependencies whose transitive install scripts are blocked by npm's `strict-allow-scripts` security default (which is on by default in newer npm). The update helper itself needs none of those dependencies — it is plain bash + node — so the curl installer is both lighter and unblockable.
+
+How the helper works:
+
+1. Reads its own name from the `package.json` in the directory above the script (`--package <name>` overrides when there is none, e.g. curl|bash execution).
 2. Finds that plugin's entry in the opencode configs (global `~/.config/opencode/{tui,opencode}.json[c]`, local `./{tui,opencode}.json[c]` and `./.opencode/`).
 3. Resolves the registry's latest version (`npm view <name> version`).
 4. Reads the actually-installed version from the package cache (`~/.cache/opencode/packages/<spec>/node_modules/<name>/package.json`).
