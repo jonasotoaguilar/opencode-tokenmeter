@@ -107,12 +107,15 @@ For local development (no npm), point config at the built output or source direc
          "import": "./dist/index.js"
        }
      },
-     "files": ["dist", "README.md", "LICENSE"],
-     "keywords": ["opencode", "opencode-plugin", "plugin"],
-     "license": "<LICENSE>",
-     "peerDependencies": {
-       "@opencode-ai/plugin": ">=1.14.50 <2"
-     },
+      "files": ["dist", "README.md", "LICENSE"],
+      "keywords": ["opencode", "opencode-plugin", "plugin"],
+      "license": "<LICENSE>",
+      "dependencies": {
+        "<RUNTIME_DEP_1>": "<VERSION>"
+      },
+      "peerDependencies": {
+        "@opencode-ai/plugin": ">=1.14.50 <2"
+      },
      "devDependencies": {
        "@opencode-ai/plugin": "^1.14.50",
        "@types/bun": "^1.2.0",
@@ -137,6 +140,7 @@ For local development (no npm), point config at the built output or source direc
 
    Notes:
    - MUST use `peerDependencies` for `@opencode-ai/plugin` - OpenCode provides this at runtime
+   - MUST declare in `dependencies` every module the compiled artifact imports at runtime — never only `devDependencies`. The consumer installs only `dependencies` (OpenCode runs `bun add --force <package>`), so a runtime import that lives only in `devDependencies` fails to resolve after install. TUI plugins are the common trap: a bundle importing `@opentui/solid` / `solid-js` (or `@opentui/core`) must ship them as `dependencies`. Verify the bundle's external imports (`rg -o 'from "[^"]+"' dist/*.js` / `require(...)`) and declare every bare import that is not provided by the host.
    - MUST add `"publishConfig": { "access": "public" }` for scoped packages
    - MUST point `main`/`types` at `dist/` output; the `prepack` script builds before both `npm pack` and `npm publish`
     - Use an `exports` map to define the public entrypoint; a single-entry plugin may expose `.` only, while multiple entrypoints add subpaths (see `references/build-and-release.md` §7)

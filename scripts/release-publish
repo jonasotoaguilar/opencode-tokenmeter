@@ -18,7 +18,7 @@ set -euo pipefail
 # Fails closed: an already-published version or an existing release stops the
 # script before any write. No git tag or commit is created.
 
-PACKAGE_NAME="@jonasotoaguilar/opencode-tokenmeter"
+PACKAGE_NAME="opencode-tokenmeter-tui"
 
 : "${RELEASE_TAG:?release-publish: RELEASE_TAG is required (e.g. v1.2.3)}"
 : "${RELEASE_REPOSITORY:?release-publish: RELEASE_REPOSITORY is required (owner/repo)}"

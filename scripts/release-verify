@@ -9,7 +9,7 @@ set -euo pipefail
 # Context (provided by .github/workflows/release.yml):
 #   RELEASE_TAG / RELEASE_REPOSITORY / GH_TOKEN
 
-PACKAGE_NAME="@jonasotoaguilar/opencode-tokenmeter"
+PACKAGE_NAME="opencode-tokenmeter-tui"
 
 : "${RELEASE_TAG:?release-verify: RELEASE_TAG is required (e.g. v1.2.3)}"
 : "${RELEASE_REPOSITORY:?release-verify: RELEASE_REPOSITORY is required (owner/repo)}"

@@ -110,7 +110,7 @@ Add the plugin to your TUI config (`~/.config/opencode/tui.json` user-level, `.o
 ```json
 {
   "$schema": "https://opencode.ai/tui.json",
-  "plugin": ["@jonasotoaguilar/opencode-tokenmeter"]
+  "plugin": ["opencode-tokenmeter-tui"]
 }
 ```
 
