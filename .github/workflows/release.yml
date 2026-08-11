@@ -1,0 +1,214 @@
+# Release workflow — tag-driven npm + GitHub Release pipeline for
+# opencode-tokenmeter.
+#
+# Contract:
+#   - Trigger: stable version tags ONLY (`vX.Y.Z`). The `!v*-*` exclusion
+#     keeps pre-release tags (vX.Y.Z-rc.N, vX.Y.Z-beta.N, ...) out entirely —
+#     they never reach publication. Branch pushes NEVER trigger this workflow;
+#     pushing a stable tag IS the release authorization.
+#   - Read-only by default (`contents: read`); only the publication job
+#     receives `contents: write` plus `id-token: write` (npm OIDC provenance).
+#   - Concurrency grouped per tag with `cancel-in-progress: false`: a second
+#     run on the same tag waits instead of cancelling the in-flight release.
+#   - Strict job order preflight -> publication -> verification, each with an
+#     explicit timeout; exact-tag checkout with full history/tags and no
+#     persisted checkout credentials in every job.
+#   - The publication job runs in the protected `release` environment
+#     (required reviewers + tag protection; the workflow does not work
+#     without it) and is the only job that can write.
+#
+# ADAPTATION:
+#   The project supplies three executable hooks:
+#     scripts/release-preflight (read-only)  — tag/version/registry/release
+#                                               validation plus the full CI
+#                                               gate set; never publishes.
+#     scripts/release-publish   (write-capable, single step) — sets the
+#                               package version from the tag (no git
+#                               tag/commit), `npm publish --provenance`, and
+#                               creates the GitHub Release with
+#                               Conventional-commit notes between the previous
+#                               tag and this one.
+#     scripts/release-verify    (read-only)  — confirms the npm entry and the
+#                                               GitHub Release from outside.
+#   Every hook step fails closed with an explicit ::error:: when its script is
+#   missing or not executable; no release proceeds on a stub or a broken
+#   command. Credentials reach the hooks only through the publication step's
+#   env: block — NODE_AUTH_TOKEN/NPM_TOKEN from the `release` environment's
+#   secrets, GH_TOKEN from github.token; no credentials live in this file.
+#   Auth material stays runner-local (setup-node's registry-url plumbing) and
+#   any generated release material is removed by the `if: always()` cleanup
+#   step below on every outcome; the runner is ephemeral regardless.
+#
+# ROLLBACK / FIX-FORWARD:
+#   npm cannot republish the same version: a failed publish is fixed forward
+#   from the previously shipped tag (fix the cause, then cut the next patch
+#   tag). GitHub Release creation is deterministic per tag — re-running the
+#   workflow on the same tag reproduces its artifacts; a failed hook step is
+#   fixed by correcting the cause and re-running on that tag, never by
+#   bypassing the hooks. If a published version or release must be removed or
+#   edited (npm deprecate / GitHub UI), do it out-of-band before the
+#   verification job completes.
+#
+# Action pins are floating majors (repo policy); dependency-update automation
+# keeps them current.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "!v*-*"
+
+# Read-only is the workflow default. Only the publication job receives the
+# one write capability a release needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      # Read-only: lets the project's preflight hook confirm the CI conclusion
+      # for this exact commit before any release work starts.
+      actions: read
+    steps:
+      - name: Checkout exact tag
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          # Full history and tags so the preflight hook can inspect the tag
+          # object, ancestors, and the tagged commit. actions/checkout fetches
+          # with --no-tags by default, so this is required for tag refs to
+          # exist on the runner.
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          version: 1.3.11
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Run release preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ ! -x ./scripts/release-preflight ]]; then
+            echo "::error::Project hook missing: scripts/release-preflight is not present or not executable — see the ADAPTATION note at the top of this file."
+            exit 1
+          fi
+          ./scripts/release-preflight
+
+  release:
+    needs: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    # Protected environment: the consuming project creates it and attaches the
+    # release secrets and required reviewers here.
+    environment: release
+    permissions:
+      contents: write
+      # npm OIDC provenance: the publish hook mints the attestation from this
+      # job's OIDC token.
+      id-token: write
+    env:
+      # Blank out the runner's auto-injected token: no run step in this job
+      # receives it by default. Only the publish hook step opts back in.
+      GITHUB_TOKEN: ""
+    steps:
+      - name: Checkout exact tag
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          version: 1.3.11
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # Project hook: the single write-capable step. Build, publish to npm
+      # with provenance, and create the GitHub Release. The project's
+      # publisher token arrives from the `release` environment's secrets and
+      # nowhere else.
+      - name: Run release publication hook
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ ! -x ./scripts/release-publish ]]; then
+            echo "::error::Project hook missing: scripts/release-publish is not present or not executable — see the ADAPTATION note at the top of this file."
+            exit 1
+          fi
+          ./scripts/release-publish
+
+      # Defense in depth: the publish hook materializes any generated release
+      # material under $RUNNER_TEMP/release-material; this step removes it on
+      # every outcome. The runner is ephemeral regardless.
+      - name: Remove release credentials and material from the runner
+        if: always()
+        run: |
+          rm -rf -- "$RUNNER_TEMP/release-material"
+          test ! -e "$RUNNER_TEMP/release-material"
+
+  verify:
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact tag
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          version: 1.3.11
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # Project hook: read-only verification of the published artifacts.
+      - name: Verify published artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ ! -x ./scripts/release-verify ]]; then
+            echo "::error::Project hook missing: scripts/release-verify is not present or not executable — see the ADAPTATION note at the top of this file."
+            exit 1
+          fi
+          ./scripts/release-verify

@@ -1,0 +1,125 @@
+name: Bug Report
+description: Report a bug
+labels: ["bug", "status:needs-review"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## How this works
+
+        1. **Submit** this bug report → it gets the `status:needs-review` label automatically
+        2. A **maintainer reviews** it and adds `status:approved` (or closes it as invalid/duplicate)
+        3. **Only then** should you (or anyone) open a PR to fix it
+
+        PRs that fix issues without `status:approved` will be automatically rejected by CI.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight Checklist
+      options:
+        - label: I checked existing issues and this is not a duplicate
+          required: true
+        - label: I understand that PRs will be rejected if the linked issue does not have `status:approved`
+          required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: Describe the bug clearly and concisely.
+      placeholder: Describe the bug...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the issue.
+      value: |
+        1. 
+        2. 
+        3. 
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened?
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        ## Environment
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / Commit
+      description: Relevant version or commit SHA if applicable.
+      placeholder: "e.g. 2a19f4c"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - macOS
+        - Linux (Ubuntu/Debian)
+        - Linux (Arch/Manjaro)
+        - Linux (Fedora/RHEL)
+        - Linux (Other)
+        - Windows
+        - Windows (WSL)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected Area
+      description: Which part of the project does this impact?
+      options:
+        - Backend / API
+        - Frontend / UI
+        - CLI / Tooling
+        - Database / Storage
+        - CI / Build
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Error Output
+      description: Paste any relevant log output. This will be auto-formatted as code.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Add any additional context, payloads, screenshots, or relevant examples.
+    validations:
+      required: false

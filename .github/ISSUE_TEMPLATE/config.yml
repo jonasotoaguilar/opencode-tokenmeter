@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & Discussions
+    url: https://github.com/jonasotoaguilar/opencode-tokenmeter/discussions
+    about: Use Discussions for usage questions, architecture ideas, or topics not yet ready for a concrete issue.

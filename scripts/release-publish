@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Release publication (write-capable, single step) for the tag-driven
+# pipeline. Sets the package version from the tag, publishes to npm with
+# provenance, and creates the GitHub Release for RELEASE_TAG with
+# Conventional-commit notes between the previous tag and this one.
+#
+# Credentials come from the release workflow env: block only, never from the
+# repository:
+#   NODE_AUTH_TOKEN — npmjs automation token (required; also passed as
+#                     NPM_TOKEN by the workflow)
+#   GH_TOKEN        — GitHub token (required; provided by the workflow)
+# Context: RELEASE_TAG / RELEASE_COMMIT / RELEASE_REPOSITORY.
+# Fails closed: an already-published version or an existing release stops the
+# script before any write. No git tag or commit is created.
+
+PACKAGE_NAME="opencode-tokenmeter"
+
+: "${RELEASE_TAG:?release-publish: RELEASE_TAG is required (e.g. v1.2.3)}"
+: "${RELEASE_REPOSITORY:?release-publish: RELEASE_REPOSITORY is required (owner/repo)}"
+: "${RELEASE_COMMIT:?release-publish: RELEASE_COMMIT is required}"
+: "${GH_TOKEN:?release-publish: GH_TOKEN is required}"
+: "${NODE_AUTH_TOKEN:?release-publish: NODE_AUTH_TOKEN is required}"
+
+if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "::error::release-publish: RELEASE_TAG must be a stable vX.Y.Z tag (got ${RELEASE_TAG})"
+  exit 1
+fi
+
+VERSION="${RELEASE_TAG#v}"
+
+if npm view "${PACKAGE_NAME}@${VERSION}" version >/dev/null 2>&1; then
+  echo "::error::release-publish: ${PACKAGE_NAME}@${VERSION} already exists on npm — refusing to republish"
+  exit 1
+fi
+if gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" >/dev/null 2>&1; then
+  echo "::error::release-publish: GitHub Release ${RELEASE_TAG} already exists for ${RELEASE_REPOSITORY}"
+  exit 1
+fi
+
+echo "::group::release-publish: install and build"
+bun install --frozen-lockfile
+bun run build
+echo "::endgroup::"
+
+echo "::group::release-publish: set package version from tag"
+jq --arg v "$VERSION" '.version = $v' package.json > package.json.tmp
+mv package.json.tmp package.json
+test "$(jq -r .version package.json)" = "$VERSION"
+echo "package.json version: ${VERSION}"
+echo "::endgroup::"
+
+# Generated release material (notes file) lives under the workflow's
+# release-material dir so the `if: always()` cleanup step removes it on every
+# outcome. Auth material is setup-node's runner-local ~/.npmrc plumbing —
+# never written to a committed file.
+MATERIAL_DIR="${RUNNER_TEMP:-/tmp}/release-material"
+mkdir -p "$MATERIAL_DIR"
+
+echo "::group::release-publish: npm publish"
+npm publish --provenance --access public
+echo "::endgroup::"
+
+echo "::group::release-publish: GitHub Release"
+NOTES_FILE="$MATERIAL_DIR/release-notes.md"
+PREV_TAG="$(git describe --tags --abbrev=0 "${RELEASE_TAG}^" 2>/dev/null || true)"
+if [[ -n "$PREV_TAG" ]]; then
+  git log --pretty=format:"- %s" "$PREV_TAG".."$RELEASE_TAG" > "$NOTES_FILE"
+  echo "" >> "$NOTES_FILE"
+  echo "notes: conventional commits ${PREV_TAG}..${RELEASE_TAG}"
+else
+  echo "notes: no previous tag — using the tag's full history"
+  git log --pretty=format:"- %s" "$RELEASE_TAG" --max-count=100 > "$NOTES_FILE"
+  echo "" >> "$NOTES_FILE"
+fi
+if [[ ! -s "$NOTES_FILE" ]]; then
+  echo "::warning::release-publish: no commits available for notes — generating release notes"
+  gh release create "$RELEASE_TAG" \
+    --repo "$RELEASE_REPOSITORY" \
+    --target "$RELEASE_COMMIT" \
+    --generate-notes
+else
+  gh release create "$RELEASE_TAG" \
+    --repo "$RELEASE_REPOSITORY" \
+    --target "$RELEASE_COMMIT" \
+    --notes-file "$NOTES_FILE"
+fi
+echo "::endgroup::"
+
+echo "release-publish: OK"
+echo "  npm:        https://registry.npmjs.org/${PACKAGE_NAME}/${VERSION}"
+echo "  release:    https://github.com/${RELEASE_REPOSITORY}/releases/tag/${RELEASE_TAG}"
