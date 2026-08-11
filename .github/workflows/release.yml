@@ -15,7 +15,8 @@
 #     persisted checkout credentials in every job.
 #   - The publication job runs in the protected `release` environment
 #     (required reviewers + tag protection; the workflow does not work
-#     without it) and is the only job that can write.
+#     without it) and is the only job that can write. The npm trusted
+#     publisher binds to this workflow (release.yml) and this environment.
 #
 # ADAPTATION:
 #   The project supplies three executable hooks:
@@ -32,11 +33,12 @@
 #                                               GitHub Release from outside.
 #   Every hook step fails closed with an explicit ::error:: when its script is
 #   missing or not executable; no release proceeds on a stub or a broken
-#   command. Credentials reach the hooks only through the publication step's
-#   env: block — NODE_AUTH_TOKEN/NPM_TOKEN from the `release` environment's
-#   secrets, GH_TOKEN from github.token; no credentials live in this file.
-#   Auth material stays runner-local (setup-node's registry-url plumbing) and
-#   any generated release material is removed by the `if: always()` cleanup
+#   command. npm authentication uses Trusted Publishing (OIDC): the job's
+#   `id-token: write` lets npm exchange a short-lived GitHub OIDC assertion
+#   for a registry token, so no NPM_TOKEN/NODE_AUTH_TOKEN exists in this file
+#   or the `release` environment — a fallback token would silently mask a
+#   broken trusted-publisher binding. GH_TOKEN comes from github.token.
+#   Any generated release material is removed by the `if: always()` cleanup
 #   step below on every outcome; the runner is ephemeral regardless.
 #
 # ROLLBACK / FIX-FORWARD:
@@ -117,8 +119,11 @@ jobs:
     needs: preflight
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    # Protected environment: the consuming project creates it and attaches the
-    # release secrets and required reviewers here.
+    # Protected environment: the consuming project creates it, binds the npm
+    # trusted publisher to it (the publisher matches this workflow's exact
+    # filename release.yml and this environment name), and attaches required
+    # reviewers here. No npm secrets live in the environment — OIDC replaces
+    # them.
     environment: release
     permissions:
       contents: write
@@ -146,15 +151,24 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      # npm Trusted Publishing requires npm >= 11.5.1 (Node >= 22.14.0) and a
+      # GitHub-hosted runner; setup-node's Node 22 bundles npm 10, so pin npm
+      # 12 (floating major, repo policy) before the publish hook. npm
+      # exchanges the job's
+      # OIDC token for a short-lived registry token — no NPM_TOKEN/
+      # NODE_AUTH_TOKEN is injected, so a missing or broken trusted-publisher
+      # binding fails loudly instead of falling back to a token.
+      - name: Install npm 12 (Trusted Publishing requirement)
+        run: npm install -g npm@12
+
       # Project hook: the single write-capable step. Build, publish to npm
-      # with provenance, and create the GitHub Release. The project's
-      # publisher token arrives from the `release` environment's secrets and
-      # nowhere else.
+      # with provenance via OIDC trusted publishing, and create the GitHub
+      # Release. GH_TOKEN comes from github.token; npm auth comes from the
+      # job's OIDC token — no npm credentials are stored in this workflow or
+      # the `release` environment.
       - name: Run release publication hook
         env:
           GH_TOKEN: ${{ github.token }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_COMMIT: ${{ github.sha }}
           RELEASE_REPOSITORY: ${{ github.repository }}
@@ -168,8 +182,9 @@ jobs:
 
       # Defense in depth: the publish hook materializes any generated release
       # material under $RUNNER_TEMP/release-material; this step removes it on
-      # every outcome. The runner is ephemeral regardless.
-      - name: Remove release credentials and material from the runner
+      # every outcome. The runner is ephemeral regardless. (npm auth is
+      # OIDC-only — no token material exists on the runner.)
+      - name: Remove release material from the runner
         if: always()
         run: |
           rm -rf -- "$RUNNER_TEMP/release-material"
