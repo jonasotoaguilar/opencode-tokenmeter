@@ -138,11 +138,7 @@ Point at the built artifact (run `bun run build` first):
 
 Open a session and check the right sidebar: a `TokenMeter 1.0.0` panel with `Project` and `Session` metric rows appears. The `Subagents ▶` row expands the delegation list; the panel starts collapsed.
 
-<div align="center">
-
-<img src="docs/assets/brand/tokenmeter-sidebar.png" alt="TokenMeter sidebar screenshot" width="100%">
-
-</div>
+<img src="docs/assets/brand/tokenmeter-sidebar.png" alt="TokenMeter sidebar screenshot" width="378">
 
 ---
 
