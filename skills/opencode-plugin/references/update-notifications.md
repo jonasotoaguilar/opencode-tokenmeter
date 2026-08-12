@@ -193,6 +193,8 @@ const plugin: Plugin = async ({ client }) => {
 
 ## Toast Format
 
+The toast always shows the concrete versions detected at runtime (from the registry check) — never a placeholder:
+
 ```
 ┌────────────────────────────────────────────┐
 │ My Plugin: Update Available                │
@@ -204,8 +206,7 @@ const plugin: Plugin = async ({ client }) => {
 The message tells users the official command, since OpenCode manages installation and only the CLI command guarantees a fresh install:
 
 ```bash
-# The update (replaces the config entry and installs the new version)
-opencode plugin my-plugin@1.2.0 --force
+opencode plugin "my-plugin@$(npm view my-plugin version)" --force
 ```
 
 Editing the config alone is NOT a reliable update: changing `my-plugin` to `my-plugin@latest` keeps the existing `@latest` cache directory (cache-first install), so nothing is reinstalled. Only a version pin changes the cache directory. See `updating-plugins.md` for the full mechanism.

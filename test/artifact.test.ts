@@ -157,18 +157,12 @@ describe("package manifest identity", () => {
     // and the scoped `@jonasotoaguilar/opencode-tokenmeter` were rejected, so
     // the package identity is the unscoped `opencode-tokenmeter-tui` while the
     // GitHub repository keeps its path. The tarball must report the package
-    // name and ship dist/ plus the update helper the bin entry executes
-    // (opencode installs plugins cache-first with no auto-update — the bin is
-    // the official update path, see skills/opencode-plugin/references/
-    // updating-plugins.md).
+    // name and ship only dist/.
     const manifest = JSON.parse(
       readFileSync(resolve(REPO_ROOT, "package.json"), "utf8"),
     )
     expect(manifest.name).toBe("opencode-tokenmeter-tui")
-    expect(manifest.files).toEqual(["dist", "scripts/update-plugin"])
-    expect(manifest.bin).toEqual({
-      "opencode-tokenmeter-tui": "./scripts/update-plugin",
-    })
+    expect(manifest.files).toEqual(["dist"])
     expect(manifest.repository.url).toBe(
       "https://github.com/jonasotoaguilar/opencode-tokenmeter.git",
     )
