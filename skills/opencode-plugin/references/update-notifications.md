@@ -118,7 +118,7 @@ export function checkForUpdates(options: UpdateCheckOptions): void {
       await client.tui.showToast({
         body: {
           title: `${pluginName}: Update Available`,
-          message: `v${currentVersion} → v${latest}\nRun: opencode plugin ${packageName}@${latest} --force`,
+          message: `v${currentVersion} → v${latest}\nrm -rf ~/.cache/opencode/packages/${packageName}@latest\nrestart OpenCode`,
           variant: "info",
           duration: 10000,
         },
@@ -193,22 +193,24 @@ const plugin: Plugin = async ({ client }) => {
 
 ## Toast Format
 
+The toast always shows the concrete versions detected at runtime (from the registry check) — never a placeholder:
+
 ```
-┌────────────────────────────────────────────┐
-│ My Plugin: Update Available                │
-│ v1.0.0 → v1.2.0                            │
-│ Run: opencode plugin my-plugin@1.2.0 --force │
-└────────────────────────────────────────────┘
+┌────────────────────────────────────────────────┐
+│ My Plugin: Update Available                    │
+│ v1.0.0 → v1.2.0                                │
+│ rm -rf ~/.cache/opencode/packages/my-plugin@latest │
+│ then restart OpenCode                          │
+└────────────────────────────────────────────────┘
 ```
 
-The message tells users the official command, since OpenCode manages installation and only the CLI command guarantees a fresh install:
+The message tells users the update step: remove the plugin's cache directory and restart OpenCode — it reinstalls the latest version automatically:
 
 ```bash
-# The update (replaces the config entry and installs the new version)
-opencode plugin my-plugin@1.2.0 --force
+rm -rf ~/.cache/opencode/packages/my-plugin@latest
 ```
 
-Editing the config alone is NOT a reliable update: changing `my-plugin` to `my-plugin@latest` keeps the existing `@latest` cache directory (cache-first install), so nothing is reinstalled. Only a version pin changes the cache directory. See `updating-plugins.md` for the full mechanism.
+Editing the config alone is NOT a reliable update: changing `my-plugin` to `my-plugin@latest` keeps the existing `@latest` cache directory (cache-first install), so nothing is reinstalled. See `updating-plugins.md` for the full mechanism.
 
 </examples>
 

@@ -30,7 +30,7 @@ Load when creating or modifying OpenCode plugins: TUI plugins, sidebar UI, Solid
 | Toasts vs inline status | `references/toast-notifications.md` / `references/ui-feedback.md` |
 | TUI plugin | `references/tui-reactivity.md` + `references/tui-api.md` |
 | npm publish | `references/build-and-release.md` + `publishing.md` + `update-notifications.md` |
-| Users updating an installed plugin | `references/updating-plugins.md` — official command `opencode plugin <name>@<version> --force`; never `postinstall` (opencode installs with `ignoreScripts: true`), ship a `bin` or documented command instead |
+| Users updating an installed plugin | `references/updating-plugins.md` — update = remove the plugin's cache directory (`rm -rf ~/.cache/opencode/packages/<entry>`) and restart; opencode reinstalls latest. Never `postinstall` (opencode installs with `ignoreScripts: true`); `@latest` in a command never refreshes |
 | How the plugin host loads/installs plugins | `references/plugin-loading.md` — config entries, spec resolution, cache-first install, manifest targets, config patch, runtime load |
 | Not feasible as plugin | Inform user: OC core → `packages/opencode`; MCP tools → MCP config; automation → shell scripts |
 
@@ -64,5 +64,5 @@ Return: plugin files created (exact paths), hooks and tools used, feasibility ve
 - `references/build-and-release.md` — packaging, gates, release
 - `references/publishing.md` — npm publishing checklist
 - `references/update-notifications.md` — version toast pattern
-- `references/updating-plugins.md` — why plugins go stale (cache-first install), official update command, update script
+- `references/updating-plugins.md` — why plugins go stale (cache-first install), official two-command update flow
 - `references/plugin-loading.md` — how the host loads plugins: config entries, resolution, cache-first install, manifest targets

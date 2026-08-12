@@ -122,42 +122,13 @@ OpenCode resolves npm package names for TUI plugins and installs them automatica
 
 ### Updating
 
-OpenCode installs plugins **cache-first**: once `opencode-tokenmeter-tui` is in the package cache, it is reused forever and newer npm releases are never picked up automatically (there is no auto-update). To update, run the official command with the new version pinned:
+OpenCode installs plugins **cache-first**: once `opencode-tokenmeter-tui` is in the package cache, it is reused forever and newer npm releases are never picked up automatically (there is no auto-update). To update, remove the plugin's cache directory and restart OpenCode — it reinstalls the latest published version automatically:
 
 ```bash
-opencode plugin opencode-tokenmeter-tui@1.0.1 --force
+rm -rf ~/.cache/opencode/packages/opencode-tokenmeter-tui@latest
 ```
 
-The version pin creates a fresh cache directory and `--force` replaces the config entry — do not delete the cache by hand.
-
-**Update helper (no repository needed)** — install it from the repo with the official one-liner, then use it to check and update:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/jonasotoaguilar/opencode-tokenmeter/main/scripts/install.sh | bash
-
-opencode-tokenmeter-update --check     # report if this plugin is outdated, change nothing
-opencode-tokenmeter-update             # update this plugin via the official command
-opencode-tokenmeter-update --dry-run   # show the exact command first
-```
-
-The helper reads your opencode configs (global + local), finds this plugin's entry, compares the installed version against the registry, and runs the official command when outdated. It only ever updates this plugin — other plugins are left untouched. It ships as a plain bash script (no `npm install`), so npm's `strict-allow-scripts` security default cannot block it; developers with the repo can also run `scripts/update-plugin` directly.
-
-**Quick reference** — see the versions and update from bash:
-
-```bash
-# Installed version (what opencode actually loads from its cache)
-opencode-tokenmeter-update --check                 # "installed 1.0.1 = latest 1.0.1" or "installed 1.0.0 → latest 1.0.1"
-
-# Latest published version on npm (independent of your install)
-npm view opencode-tokenmeter-tui version
-
-# Update to the latest published version
-scripts/update-plugin                              # safe: runs `opencode plugin opencode-tokenmeter-tui@<latest> --force`
-# or manually:
-opencode plugin opencode-tokenmeter-tui@<latest> --force
-```
-
-`--check` exits `2` when an update is available (CI-friendly); the update itself prints the official command it runs. Restart OpenCode after updating.
+The cache directory is named after the config entry (`@latest` for a bare name), and OpenCode only skips installation when that directory already exists. Removing it forces a fresh install from npm on next start — no version to remember, nothing accumulates, the config stays untouched. (If you deliberately pin a version in the config, remove that version's directory instead.)
 
 <details>
 <summary><strong>Local development instead of the npm package</strong></summary>
