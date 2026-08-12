@@ -30,7 +30,7 @@ Load when creating or modifying OpenCode plugins: TUI plugins, sidebar UI, Solid
 | Toasts vs inline status | `references/toast-notifications.md` / `references/ui-feedback.md` |
 | TUI plugin | `references/tui-reactivity.md` + `references/tui-api.md` |
 | npm publish | `references/build-and-release.md` + `publishing.md` + `update-notifications.md` |
-| Users updating an installed plugin | `references/updating-plugins.md` — official flow: `npm view <name> version` + `opencode plugin <name>@<version> --force` (cache-first install, no auto-update; never `postinstall` — opencode installs with `ignoreScripts: true`) |
+| Users updating an installed plugin | `references/updating-plugins.md` — update = remove the plugin's cache directory (`rm -rf ~/.cache/opencode/packages/<entry>`) and restart; opencode reinstalls latest. Never `postinstall` (opencode installs with `ignoreScripts: true`); `@latest` in a command never refreshes |
 | How the plugin host loads/installs plugins | `references/plugin-loading.md` — config entries, spec resolution, cache-first install, manifest targets, config patch, runtime load |
 | Not feasible as plugin | Inform user: OC core → `packages/opencode`; MCP tools → MCP config; automation → shell scripts |
 

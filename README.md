@@ -122,13 +122,13 @@ OpenCode resolves npm package names for TUI plugins and installs them automatica
 
 ### Updating
 
-OpenCode installs plugins **cache-first**: once `opencode-tokenmeter-tui` is in the package cache, it is reused forever and newer npm releases are never picked up automatically (there is no auto-update). Updating is a single command — pin the latest published version with the official command:
+OpenCode installs plugins **cache-first**: once `opencode-tokenmeter-tui` is in the package cache, it is reused forever and newer npm releases are never picked up automatically (there is no auto-update). To update, remove the plugin's cache directory and restart OpenCode — it reinstalls the latest published version automatically:
 
 ```bash
-opencode plugin "opencode-tokenmeter-tui@$(npm view opencode-tokenmeter-tui version)" --force
+rm -rf ~/.cache/opencode/packages/opencode-tokenmeter-tui@latest
 ```
 
-The version pin creates a fresh cache directory and `--force` replaces the config entry — do not delete the cache by hand, and do not rely on `@latest` (the cache directory is named after the spec at first install and reused forever). Restart OpenCode after updating.
+The cache directory is named after the config entry (`@latest` for a bare name), and OpenCode only skips installation when that directory already exists. Removing it forces a fresh install from npm on next start — no version to remember, nothing accumulates, the config stays untouched. (If you deliberately pin a version in the config, remove that version's directory instead.)
 
 <details>
 <summary><strong>Local development instead of the npm package</strong></summary>

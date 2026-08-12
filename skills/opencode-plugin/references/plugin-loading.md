@@ -121,8 +121,9 @@ At startup the host reads the config's `plugin` entries, resolves each spec (the
 The same cycle explains the update path — see `updating-plugins.md`:
 
 - Bare/`@latest` entries never refresh: the cache directory already exists.
-- `opencode plugin <name>@<version> --force` is the official update: new pin → new cache directory → guaranteed fresh install, `--force` replaces the config entry.
-- There is no auto-update; the CLI command is the mechanism.
+- The update is removing the entry's cache directory (`rm -rf ~/.cache/opencode/packages/<entry>`) and restarting: the directory no longer exists, so `Npm.add` installs the latest from npm into the same directory — nothing accumulates, config untouched.
+- The pinned CLI command (`opencode plugin <name>@<version> --force`) also works but rewrites the config to the pin and leaves every previous version's directory orphaned in the cache; use it only to deliberately fix a version.
+- There is no auto-update; the cache-removal step is the mechanism.
 
 </update>
 
@@ -134,7 +135,7 @@ The same cycle explains the update path — see `updating-plugins.md`:
 | --- | --- |
 | **Publish the exact artifact pair for your kind** | Manifest detection keys off `exports["./tui"]` / `exports["./server"]` / `main`; a mismatch makes the plugin unloadable |
 | **Never rely on `postinstall`** | `Npm.reify` installs with `ignoreScripts: true` — install-time scripts never run |
-| **Document the pinned update command** | Users must run `opencode plugin <name>@<version> --force`; `@latest` entries never refresh |
+| **Document cache-removal as the update** | `rm -rf ~/.cache/opencode/packages/<entry>` + restart reinstalls latest; `@latest` entries never refresh by themselves |
 | **Treat `@latest` as a snapshot, not a pointer** | The cache dir is named after the spec at first install and reused forever |
 
 </best_practices>
