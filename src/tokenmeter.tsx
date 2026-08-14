@@ -2,9 +2,10 @@
 /**
  * Entrypoint for the TokenMeter sidebar TUI plugin.
  *
- * Wires the session/message/part events into the usage store, owns the
- * kv-persisted expanded/collapsed state (collapsed by default), and registers
- * the append-mode sidebar_content slot that renders the TokenMeter panel. The
+ * Wires the session/message/part events into the usage store, loads the
+ * plugin-owned settings (three-field `settings.v1` object plus the
+ * `sidebar.expanded` Subagents key) once at startup, and registers the
+ * append-mode sidebar_content slot that renders the TokenMeter panel. The
  * sidebar width comes from the slot props/context width chain (fallback 38,
  * clamped 24–52).
  *
@@ -50,9 +51,10 @@
  */
 /** @jsxImportSource @opentui/solid */
 import type { TuiPlugin } from "@opencode-ai/plugin/tui"
-import { createEffect, createRoot, createSignal } from "solid-js"
+import { createEffect, createRoot } from "solid-js"
 import { projectDbPath, recordDeletedSession } from "./tokenmeter/db"
 import { UsagePanel } from "./tokenmeter/panel"
+import { showSettingsDialog } from "./tokenmeter/panel/settings-dialog"
 import {
   disposeProjectRefresh,
   scheduleProjectRefresh,
@@ -66,6 +68,16 @@ import {
   scheduleReconcile,
 } from "./tokenmeter/reconcile"
 import {
+  cycleSubagents,
+  loadSettings,
+  subagentsPref,
+} from "./tokenmeter/settings"
+import {
+  disposeToggleLayer,
+  loadToggleShortcut,
+  registerToggleLayer,
+} from "./tokenmeter/shortcut"
+import {
   forgetSession,
   invalidateUsage,
   observedSessionUsage,
@@ -77,10 +89,42 @@ import { clampSidebarWidth, resolveSidebarWidth } from "./tokenmeter/text"
 import { purgeTreeCache, rememberSession } from "./tokenmeter/tree"
 
 const id = "tokenmeter"
-const EXPANDED_KV_KEY = "tokenmeter.sidebar.expanded"
 
 const tui: TuiPlugin = async (api) => {
   createRoot((disposeRoot) => {
+    // Load the plugin-owned preferences once at startup: the three-field
+    // settings object and the Subagents durable key are sanitized into
+    // per-field defaults; the panel seeds its disclosure from the master.
+    loadSettings(api)
+    // The toggle-sections shortcut preference loads before the toggle layer
+    // registers, so the startup binding reflects the persisted choice.
+    loadToggleShortcut(api)
+    // Palette command (spec: tokenmeter-command-palette), registered through
+    // the modern keymap API: the host palette queries `namespace: "palette"`,
+    // groups by `category` (`TokenMeter`), displays `title`, and dispatches
+    // `name`. `run` opens the plugin-owned settings DialogSelect through
+    // the shared settings-dialog seam (api.ui.dialog.replace) — there is no
+    // in-panel settings screen. The returned disposer is released in the
+    // lifecycle handler below. The legacy `api.command` surface is not used
+    // for this command.
+    const unregisterPalette = api.keymap.registerLayer({
+      commands: [
+        {
+          name: "tokenmeter.settings",
+          namespace: "palette",
+          category: "TokenMeter",
+          title: "TokenMeter: Settings",
+          desc: "Open TokenMeter Settings",
+          run: () => showSettingsDialog(api),
+        },
+      ],
+    })
+    // Toggle-sections layer (quick-direct feature): binds the configurable
+    // shortcut (default ctrl+e) to the palette-visible toggle command and
+    // re-registers on preference change (shortcut.ts) so a new binding takes
+    // effect without a restart. The current layer disposer is tracked inside
+    // shortcut.ts and released in the lifecycle handler below.
+    registerToggleLayer(api)
     // The Project section refreshes on the same debounce cadence as the
     // Session reconcile: both are scheduled together so a single event burst
     // yields one repaint of the whole panel. The optional projectIDHint
@@ -90,14 +134,6 @@ const tui: TuiPlugin = async (api) => {
     const refreshAll = (delay: number, projectIDHint?: string) => {
       scheduleReconcile(api, delay)
       scheduleProjectRefresh(api, delay, projectIDHint)
-    }
-    const [expanded, setExpanded] = createSignal(
-      api.kv.get(EXPANDED_KV_KEY, false) !== false,
-    )
-    const toggleExpanded = () => {
-      const next = !expanded()
-      setExpanded(next)
-      api.kv.set(EXPANDED_KV_KEY, next)
     }
     const disposers = [
       api.event.on("message.updated", (e) => {
@@ -214,6 +250,8 @@ const tui: TuiPlugin = async (api) => {
     api.lifecycle.onDispose(() => {
       disposeReconcile()
       disposeProjectRefresh()
+      unregisterPalette()
+      disposeToggleLayer()
       for (const dispose of disposers) dispose()
       disposeRoot()
     })
@@ -230,8 +268,8 @@ const tui: TuiPlugin = async (api) => {
             <UsagePanel
               api={api}
               sessionID={sessionID}
-              expanded={expanded}
-              onToggleExpanded={toggleExpanded}
+              subagentsPref={subagentsPref}
+              onToggleSubagents={() => cycleSubagents(api)}
               theme={() => ctx.theme.current}
               width={width}
             />

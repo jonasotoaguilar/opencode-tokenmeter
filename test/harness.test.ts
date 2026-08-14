@@ -58,26 +58,40 @@
  *    process working in the same project appears in the sidebar; ticks
  *    never overlap an in-flight refresh, duplicate starts are no-ops, and
  *    disposal stops the timer
- *  - costs render with EXACTLY two decimals everywhere (headline, Project
- *    and groups) via fmtCost — no 3/4-decimal precision
+ *  - costs render with EXACTLY two decimals everywhere via fmtCost — no
+ *    3/4-decimal precision
  *  - agent groups order by spend total descending; cost/runs/name only
  *    break ties
  *  - idle invalidation rehydrates a session's usage from the current
  *    messages, reflecting removed/changed messages instead of merging only
- *  - width/glyph helpers produce column-safe lines at every sidebar width
- *  - no unreliable glyphs or textual tok/in/out/cache/run labels in the UI;
- *    the task count renders as `· <U+E20F> N task` in the expanded metrics
- *    row and on per-agent group rows
- *  - the Subagents row is the only toggle: an accent `Subagents` label with
- *    the chevron button right after it (visible margin); collapsed shows
- *    ONLY that row, while expanded adds the `🖿 N agents · <U+E20F> N task`
- *    metrics row (lowercase `agents`) and then the group list
- *  - each group renders exactly three rows: indented name + task count,
- *    indented spend + thinking + fire cost, indented three-value
- *    input · output real · cache read/write breakdown — the name is the elastic
- *    segment of row 1 and truncates there; the tree marker yields only when
- *    the name cannot keep one column; the indented metric rows never
- *    overflow
+ *  - width helpers produce column-safe lines at every sidebar width
+ *  - the corrected contract renders NO metric icons: labels identify each
+ *    metric and the disclosure chevrons `▶`/`▼` are the only per-row
+ *    glyphs besides the agent-entry `↳`; the primary token+cost line
+ *    renders in the main-text tone with the `$amount` in light red while
+ *    the input/output and reason/cache lines render in the derived detail
+ *    tone; the detail lines read
+ *    `<total> tokens · $<spend>`, `<input> input · <realOutput> output` and
+ *    `<reasoning> reason · <cache> cache` (compact) or the five
+ *    single-metric rows (precise)
+ *  - the Subagents global row toggles `▶ Subagents (N agents · M tasks)`
+ *    ⇄ `▼ Subagents` (aggregate only while collapsed); the three section
+ *    titles (Project/Session/Subagents) render in the semantic yellow
+ *    `theme().warning` — the `●` heading marker is gone entirely; expanded
+ *    renders the
+ *    agent list in a REAL scrollbox containing ALL groups — no slice, no
+ *    clipped cue, no hidden count
+ *  - each compact agent entry is `↳ <name> (<N> tasks) ▶` (`↳` branch and
+ *    the TRAILING per-agent chevron in the main-text tone, agent name in
+ *    the light-blue/cyan theme().info tone, count and parentheses in the
+ *    derived detail tone; the trailing chevron flips `▼` while open) plus
+ *    the elastic
+ *    `<tokens> tokens · $<spend>` L1;
+ *    expanding REPLACES the compact rows with the mode-aware detail rows
+ *    (compact: three, precise: five; L1 rendered exactly once), and
+ *    one-open exclusivity is
+ *    index-keyed and transient (reset on mount/session change, never
+ *    persisted)
  *  - the subtitles read Project and Session (singular), both accent-colored
  */
 import { afterEach, describe, expect, test } from "bun:test"
@@ -91,17 +105,10 @@ import {
   recordDeletedSession,
 } from "../src/tokenmeter/db"
 import {
-  breakdownSegments,
-  formatAgents,
-  formatBreakdown,
+  formatAgentLine,
   formatCachePair,
-  formatGroupLine,
-  formatGroupMeta,
-  formatHeadline,
-  formatHeadlineRow,
-  formatTaskCount,
-  GROUP_ROW_INDENT,
-  MIN_BREAKDOWN_WIDTH,
+  formatCompactSummary,
+  formatMetricLines,
 } from "../src/tokenmeter/format"
 import { GLYPH } from "../src/tokenmeter/glyphs"
 import {
@@ -110,7 +117,7 @@ import {
   sumProjectSessions,
   usageOf,
 } from "../src/tokenmeter/math"
-import { fmtCompact, fmtCost, fmtTokens } from "../src/tokenmeter/numbers"
+import { fmtCost } from "../src/tokenmeter/numbers"
 import {
   disposeProjectRefresh,
   PROJECT_REFRESH_DELAY,
@@ -1750,11 +1757,11 @@ describe("width resolution and column-safe text (text.ts)", () => {
   test("textColumns counts wide glyphs as 2 and Nerd Font PUA glyphs as 1", () => {
     expect(textColumns("abc")).toBe(3)
     expect(textColumns("界")).toBe(2)
-    expect(textColumns(GLYPH.coins)).toBe(1)
-    expect(textColumns(GLYPH.fire)).toBe(1)
-    expect(textColumns(GLYPH.robot)).toBe(1)
-    expect(textColumns(GLYPH.tasks)).toBe(1)
-    expect(textColumns(GLYPH.reasoning)).toBe(1)
+    expect(textColumns("\uEDE8")).toBe(1)
+    expect(textColumns("\u{F0238}")).toBe(1)
+    expect(textColumns("\u{F06A9}")).toBe(1)
+    expect(textColumns("\u{E20F}")).toBe(1)
+    expect(textColumns("\u{EE9C}")).toBe(1)
   })
 
   test("truncateToColumns never exceeds the budget and never splits a wide char", () => {
@@ -1780,72 +1787,17 @@ describe("cost formatting (always exactly two decimals)", () => {
     expect(fmtCost(-1)).toBe("$0.00")
     expect(fmtCost(NaN)).toBe("$0.00")
   })
-
-  test("REGRESSION: headline, Project and group costs all flow through fmtCost — no 3/4-decimal output survives", () => {
-    expect(formatHeadlineRow(1000, 0, 0.005)).toContain("$0.01")
-    expect(formatHeadlineRow(1000, 0, 0.03)).toContain("$0.03")
-    const group = { name: "g", runs: 1, total: 100, reasoning: 0, cost: 0.005 }
-    expect(formatGroupMeta(group).cost).toBe(" · " + GLYPH.fire + " $0.01")
-  })
 })
 
-describe("panel lines fit the default sidebar width (format.ts)", () => {
-  const snap = {
-    totalTokens: 1200000,
-    cost: 1.23,
-    input: 900000,
-    output: 400000,
-    reasoning: 120000,
-    cacheRead: 300000,
-    cacheWrite: 0,
-  }
-  const group = {
-    name: "sdd-apply",
-    runs: 2,
-    running: 0,
-    cost: 0.03,
-    total: 748900,
-    input: 2700000,
-    output: 411200,
-    reasoning: 100000,
-    cacheRead: 10,
-    cacheWrite: 0,
-  }
-  const outputReal = realOutput(snap.output, snap.reasoning)
-
-  test("the three-value breakdown fits the design budget and stays one line", () => {
-    const line = formatBreakdown(
-      snap.input,
-      outputReal,
-      snap.cacheRead,
-      snap.cacheWrite,
-    )
-    expect(textColumns(line)).toBeLessThanOrEqual(MIN_BREAKDOWN_WIDTH)
-    expect(line.split("\n")).toHaveLength(1)
-  })
-
-  test("breakdown keeps a visible gap after every glyph: output real one space, cache two, conditional R|W pair", () => {
-    expect(
-      formatBreakdown(snap.input, outputReal, snap.cacheRead, snap.cacheWrite),
-    ).toContain(`${GLYPH.down} ${fmtCompact(outputReal)}`)
-    expect(
-      formatBreakdown(snap.input, outputReal, snap.cacheRead, snap.cacheWrite),
-    ).toContain(
-      `${GLYPH.cache}  ${formatCachePair(snap.cacheRead, snap.cacheWrite)}`,
-    )
-    expect(
-      formatBreakdown(snap.input, outputReal, snap.cacheRead, snap.cacheWrite),
-    ).toContain("R300k")
-  })
-
+describe("formatCachePair — conditional R|W semantics (corrected contract)", () => {
   test("REGRESSION: cache pair is conditional R|W — zero sides omitted, both zero renders 0, never a slash", () => {
-    expect(formatCachePair(45000000, 10000)).toBe("R45M|W10k")
+    expect(formatCachePair(45000000, 10000)).toBe("R45M|W10K")
     expect(formatCachePair(45000000, 0)).toBe("R45M")
-    expect(formatCachePair(0, 10000)).toBe("W10k")
+    expect(formatCachePair(0, 10000)).toBe("W10K")
     expect(formatCachePair(0, 0)).toBe("0")
     // fmtCompact runs on every side; negatives clamp to zero like the rest
     // of the numeric pipeline.
-    expect(formatCachePair(-5, 3000)).toBe("W3k")
+    expect(formatCachePair(-5, 3000)).toBe("W3K")
     expect(formatCachePair(0, -5)).toBe("0")
     // The slash syntax is gone everywhere in the pair output.
     for (const pair of [
@@ -1857,227 +1809,67 @@ describe("panel lines fit the default sidebar width (format.ts)", () => {
       expect(pair).not.toContain("/")
     }
   })
+})
 
-  test("REGRESSION: every spend headline keeps TWO visible spaces after the coins glyph — a single space is rejected", () => {
-    for (const headline of [
-      formatHeadline({ totalTokens: snap.totalTokens }),
-      formatHeadlineRow(snap.totalTokens, snap.reasoning, snap.cost),
-    ]) {
-      expect(headline).toContain(
-        `${GLYPH.coins}  ${fmtTokens(snap.totalTokens)}`,
-      )
-      expect(headline).not.toContain(
-        `${GLYPH.coins} ${fmtTokens(snap.totalTokens)}`,
-      )
-    }
-    expect(formatGroupMeta(group).context).toContain(
-      `${GLYPH.coins}  ${fmtTokens(group.total)}`,
-    )
-    expect(formatGroupMeta(group).context).not.toContain(
-      `${GLYPH.coins} ${fmtTokens(group.total)}`,
-    )
-    // The one-space failure mode must be impossible: coins followed by a
-    // single space and then the number never renders.
-    expect(formatHeadline({ totalTokens: snap.totalTokens })).not.toMatch(
-      new RegExp(`${GLYPH.coins} \\d`),
-    )
-    expect(formatGroupMeta(group).context).not.toMatch(
-      new RegExp(`${GLYPH.coins} \\d`),
-    )
-  })
+describe("corrected-contract formatter width frames (PR 2)", () => {
+  // Spec scenario: 10M total, $92.24, 152K input, 215M real output,
+  // 414K reasoning, 212M combined cache.
+  const view = {
+    totalTokens: 10_000_000,
+    cost: 92.24,
+    input: 152_000,
+    output: 214_586_000,
+    reasoning: 414_000,
+    cacheRead: 212_000_000,
+    cacheWrite: 0,
+  }
+  const joined = (segments: { text: string }[]): string =>
+    segments.map((segment) => segment.text).join("")
 
-  test("REGRESSION: breakdown order is input, output real, cache R|W with the real values", () => {
-    expect(formatBreakdown(1, 2, 3, 4)).toBe(
-      `${GLYPH.up} 1 · ${GLYPH.down} 2 · ${GLYPH.cache}  R3|W4`,
-    )
-  })
-
-  test("REGRESSION: the breakdown row is fully muted and segments concat to the whole line", () => {
-    const segments = breakdownSegments(
-      snap.input,
-      outputReal,
-      snap.cacheRead,
-      snap.cacheWrite,
-    )
-    expect(segments.map((s) => s.accent)).toEqual([
-      false,
-      false,
-      false,
-      false,
-      false,
-    ])
-    expect(segments.map((s) => s.text).join("")).toBe(
-      formatBreakdown(snap.input, outputReal, snap.cacheRead, snap.cacheWrite),
-    )
-  })
-
-  test("headline, task and subagent lines fit the default content width", () => {
-    const inner = contentWidth(38)
+  test("formatCompactSummary fits the full line at the default width and degrades at the narrowest content width (22)", () => {
     expect(
-      textColumns(
-        formatHeadlineRow(snap.totalTokens, snap.reasoning, snap.cost),
-      ),
-    ).toBeLessThanOrEqual(inner)
-    expect(textColumns(formatTaskCount(3))).toBeLessThanOrEqual(inner)
-    expect(textColumns(` · ${GLYPH.fire} ${"$12.34"}`)).toBeLessThanOrEqual(
-      inner,
-    )
-    expect(textColumns(formatAgents(3))).toBeLessThanOrEqual(inner)
-  })
-
-  test("the headline row degrades at the narrowest clamp (panel hides it, no overflow)", () => {
+      joined(formatCompactSummary(view, "compact", contentWidth(38))),
+    ).toBe("10M tokens · $92.24")
     expect(
-      textColumns(
-        formatHeadlineRow(snap.totalTokens, snap.reasoning, snap.cost),
-      ),
-    ).toBeGreaterThan(contentWidth(24))
-    // The three metric values alone still fit; the thinking/cost additions push the row out.
-    expect(
-      textColumns(formatHeadline({ totalTokens: snap.totalTokens })),
-    ).toBeLessThanOrEqual(contentWidth(24))
+      joined(formatCompactSummary(view, "compact", contentWidth(24))),
+    ).toBe("10M tokens · $92.24")
   })
 
-  test("formatTaskCount carries the U+E20F task glyph, the count and the task text", () => {
-    expect(formatTaskCount(3)).toBe(` · ${GLYPH.tasks}  3 task`)
-    expect(formatTaskCount(0)).toBe(` · ${GLYPH.tasks}  0 task`)
-    expect(formatTaskCount(3)).toContain("task")
-  })
-
-  test("formatAgents keeps two spaces between robot and count, the lowercase agents text, and no task", () => {
-    expect(formatAgents(3)).toBe(`${GLYPH.robot}  3 agents`)
-    expect(formatAgents(1)).toBe(`${GLYPH.robot}  1 agents`)
-    expect(formatAgents(3)).toContain("agents")
-    expect(formatAgents(3)).not.toContain("task")
-    expect(formatAgents(3)).not.toMatch(/Subagents/)
-  })
-
-  test("REGRESSION: each group renders exactly three rows — indented primary-blue robot + name + tasks, indented spend+thinking+cost, indented three metrics — in order", () => {
-    const line = formatGroupLine(group, 36)
-    const meta = formatGroupMeta(group)
-    const breakdown = formatBreakdown(
-      group.input,
-      realOutput(group.output, group.reasoning),
-      group.cacheRead,
-      group.cacheWrite,
-    )
-    expect(line.marker + line.robot + line.name + line.tasks).toBe(
-      `  ↳ ${GLYPH.robot}  sdd-apply · ${GLYPH.tasks}  2 task`,
-    )
-    expect(line.robot).toBe(`${GLYPH.robot}  `)
-    expect(meta.context + meta.thinking + meta.cost).toBe(
-      `${GLYPH.coins}  748.9k · ${GLYPH.reasoning}  100.0k · ${GLYPH.fire} $0.03`,
-    )
-    expect(breakdown).toBe(
-      `${GLYPH.up} 2.7M · ${GLYPH.down} 511k · ${GLYPH.cache}  R10`,
-    )
-  })
-
-  test("group rows 2/3 keep the four-column indent at the default width", () => {
-    const meta = formatGroupMeta(group)
-    const breakdown = formatBreakdown(
-      group.input,
-      realOutput(group.output, group.reasoning),
-      group.cacheRead,
-      group.cacheWrite,
-    )
-    expect(
-      textColumns(GROUP_ROW_INDENT) +
-        textColumns(meta.context + meta.thinking + meta.cost),
-    ).toBeLessThanOrEqual(contentWidth(38))
-    expect(
-      textColumns(GROUP_ROW_INDENT) + textColumns(breakdown),
-    ).toBeLessThanOrEqual(contentWidth(38))
-  })
-
-  test("group row 1 keeps the task count at every clamped width; rows 2-3 never overflow (they hide)", () => {
-    const meta = formatGroupMeta(group)
-    const breakdown = formatBreakdown(
-      group.input,
-      realOutput(group.output, group.reasoning),
-      group.cacheRead,
-      group.cacheWrite,
-    )
-    for (let width = 22; width <= 50; width += 2) {
-      const line = formatGroupLine(group, width)
-      expect(line.tasks).toBe(` · ${GLYPH.tasks}  2 task`)
-      expect(textColumns(line.name)).toBeGreaterThanOrEqual(1)
+  test("formatCompactSummary never overflows its width frame", () => {
+    for (let width = 22; width <= 52; width += 2) {
       expect(
-        textColumns(line.marker + line.robot + line.name + line.tasks),
+        textColumns(joined(formatCompactSummary(view, "compact", width))),
       ).toBeLessThanOrEqual(width)
     }
-    // At the narrowest clamp the indented metric rows cannot fit: the panel
-    // hides them rather than overflowing.
+  })
+
+  test("the three detail lines fit the default content width (36)", () => {
+    const [line1, line2, line3] = formatMetricLines(view, {
+      cache: "combined",
+      numbers: "compact",
+    })
+    for (const line of [line1, line2, line3]) {
+      expect(textColumns(joined(line))).toBeLessThanOrEqual(contentWidth(38))
+    }
+  })
+
+  test("formatAgentLine composes the render-site `↳` entry within the width frame", () => {
+    const at36 = formatAgentLine({ name: "General", runs: 5 }, 36, false)
+    expect(`${at36.indent}${at36.name}${at36.tasks}${at36.chevron}`).toBe(
+      "↳ General (5 tasks) ▶",
+    )
+    const open36 = formatAgentLine({ name: "General", runs: 5 }, 36, true)
     expect(
-      textColumns(GROUP_ROW_INDENT) +
-        textColumns(meta.context + meta.thinking + meta.cost),
-    ).toBeGreaterThan(contentWidth(24))
-  })
-
-  test("group row 1 renders the primary-blue robot icon plus two visible spaces before the name, reserved before truncation", () => {
-    const at36 = formatGroupLine(group, 36)
-    expect(at36.robot).toBe(`${GLYPH.robot}  `)
-    expect(textColumns(at36.robot)).toBe(3)
-    expect(at36.marker + at36.robot + at36.name).toContain(
-      `${GLYPH.robot}  sdd-apply`,
+      `${open36.indent}${open36.name}${open36.tasks}${open36.chevron}`,
+    ).toBe("↳ General (5 tasks) ▼")
+    const at22 = formatAgentLine(
+      { name: "General", runs: 5 },
+      contentWidth(24),
+      false,
     )
-
-    const at34 = formatGroupLine({ ...group, name: "very-long-agent-name" }, 34)
-    // The robot icon + both spaces are reserved BEFORE the name truncates:
-    // the marker and the robot keep their columns while the name loses 3.
-    expect(at34.marker).toBe(`  ↳ `)
-    expect(at34.robot).toBe(`${GLYPH.robot}  `)
-    expect(at34.name).toBe("very-long-agen…")
-
-    const tight = formatGroupLine(group, 8)
-    // Only when the name cannot keep even one column do the marker and the
-    // robot yield together; the task count always survives.
-    expect(tight.marker).toBe("")
-    expect(tight.robot).toBe("")
-    expect(tight.name).toBe("…")
-    expect(tight.tasks).toBe(` · ${GLYPH.tasks}  2 task`)
-  })
-
-  test("REGRESSION: long names truncate on row 1 while rows 2-3 keep every metric; the marker and robot yield only in the extreme", () => {
-    const at34 = formatGroupLine({ ...group, name: "very-long-agent-name" }, 34)
-    expect(at34.marker).toBe(`  ↳ `)
-    expect(at34.robot).toBe(`${GLYPH.robot}  `)
-    expect(at34.name).toBe("very-long-agen…")
-    expect(at34.tasks).toBe(` · ${GLYPH.tasks}  2 task`)
-
-    const at26 = formatGroupLine({ ...group, name: "very-long-agent-name" }, 26)
-    expect(at26.marker).toBe(`  ↳ `)
-    expect(at26.robot).toBe(`${GLYPH.robot}  `)
-    expect(at26.name).toBe("very-l…")
-    expect(at26.tasks).toBe(` · ${GLYPH.tasks}  2 task`)
-    const meta = formatGroupMeta(group)
-    expect(meta.context + meta.thinking + meta.cost).toBe(
-      `${GLYPH.coins}  748.9k · ${GLYPH.reasoning}  100.0k · ${GLYPH.fire} $0.03`,
-    )
-
-    const tight = formatGroupLine(group, 8)
-    expect(tight.marker).toBe("")
-    expect(tight.robot).toBe("")
-    expect(tight.name).toBe("…")
-    expect(tight.tasks).toBe(` · ${GLYPH.tasks}  2 task`)
-  })
-
-  test("growing values recalculate the row-1 name budget from the real rendered texts", () => {
-    const sameWidth = 28
-    const plain = formatGroupLine(
-      { ...group, name: "very-long-agent-name" },
-      sameWidth,
-    )
-    const grown = formatGroupLine(
-      { ...group, name: "very-long-agent-name", runs: 123 },
-      sameWidth,
-    )
-    expect(textColumns(plain.name)).toBeGreaterThan(textColumns(grown.name))
-    expect(plain.tasks).toBe(` · ${GLYPH.tasks}  2 task`)
-    expect(grown.tasks).toBe(` · ${GLYPH.tasks}  123 task`)
-    expect(plain.marker).toBe(`  ↳ `)
-    expect(grown.marker).toBe(`  ↳ `)
-    expect(plain.robot).toBe(`${GLYPH.robot}  `)
-    expect(grown.robot).toBe(`${GLYPH.robot}  `)
+    expect(
+      textColumns(`${at22.indent}${at22.name}${at22.tasks}${at22.chevron}`),
+    ).toBeLessThanOrEqual(contentWidth(24))
   })
 })
 
@@ -2094,6 +1886,10 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
     new URL("../src/tokenmeter/panel/group-rows.tsx", import.meta.url),
     "utf8",
   )
+  const sectionSrc = readFileSync(
+    new URL("../src/tokenmeter/panel/section.tsx", import.meta.url),
+    "utf8",
+  )
   const projectSectionSrc = readFileSync(
     new URL("../src/tokenmeter/panel/project-section.tsx", import.meta.url),
     "utf8",
@@ -2102,35 +1898,47 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
     new URL("../src/tokenmeter/format.ts", import.meta.url),
     "utf8",
   )
-  const colorsSrc = readFileSync(
-    new URL("../src/tokenmeter/panel/colors.ts", import.meta.url),
-    "utf8",
-  )
   const entrySrc = readFileSync(
     new URL("../src/tokenmeter.tsx", import.meta.url),
     "utf8",
   )
 
-  test("glyph constants are the documented stable Nerd Font codepoints", () => {
-    expect(GLYPH.coins).toBe("\uEDE8")
-    expect(GLYPH.cache).toBe("\uF472")
-    expect(GLYPH.fire).toBe("\u{F0238}")
-    expect(GLYPH.robot).toBe("\u{F06A9}")
-    expect(GLYPH.tasks).toBe("\u{E20F}")
-    expect(GLYPH.reasoning).toBe("\u{EE9C}")
-    expect(GLYPH.tree).toBe("↳")
+  test("glyph constants are the disclosure chevrons and the agent indent — the heading marker is gone", () => {
+    // The glyph diet deleted every pre-correction metric glyph AND the `●`
+    // heading marker; the module now exports exactly the two disclosure
+    // chevrons and the `↳` agent-entry tree branch. The section titles
+    // carry the warning tone instead of any marker glyph.
     expect(GLYPH.expand).toBe("▶")
     expect(GLYPH.collapse).toBe("▼")
+    expect(GLYPH.indent).toBe("↳")
+    expect(Object.keys(GLYPH)).toEqual(["expand", "collapse", "indent"])
   })
 
-  test("the old oct-hourglass glyph is gone; fa-coins is the spend glyph everywhere", () => {
-    for (const source of [glyphsSrc, panelSrc, groupRowsSrc, formatSrc]) {
+  test("the pre-correction metric glyphs are gone from glyphs.ts and the panels", () => {
+    for (const source of [
+      glyphsSrc,
+      panelSrc,
+      groupRowsSrc,
+      sectionSrc,
+      formatSrc,
+    ]) {
       expect(source).not.toContain("hourglass")
       expect(source).not.toContain("\\uF4E3")
       expect(source).not.toContain("\\u{F4E3}")
+      expect(source).not.toContain("\\uEDE8")
+      expect(source).not.toContain("\\uF472")
+      expect(source).not.toContain("\\u{F0238}")
+      expect(source).not.toContain("\\u{F06A9}")
+      expect(source).not.toContain("\\u{E20F}")
+      expect(source).not.toContain("\\u{EE9C}")
+      expect(source).not.toContain("GLYPH.coins")
+      expect(source).not.toContain("GLYPH.fire")
+      expect(source).not.toContain("GLYPH.robot")
+      expect(source).not.toContain("GLYPH.tasks")
     }
-    expect(glyphsSrc).toContain("\\uEDE8")
-    expect(formatSrc).toContain("GLYPH.coins")
+    expect(glyphsSrc).not.toMatch(
+      /GLYPH\s*=\s*\{[^}]*?(coins|cache|fire|robot|tasks|reasoning|up|down|tree)/,
+    )
   })
 
   test("no unreliable glyphs, no person glyph, no useTerminalDimensions anywhere in the plugin", () => {
@@ -2138,6 +1946,7 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
       glyphsSrc,
       panelSrc,
       groupRowsSrc,
+      sectionSrc,
       projectSectionSrc,
       formatSrc,
       entrySrc,
@@ -2147,11 +1956,12 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
     }
   })
 
-  test("the old U+F0CA tasks glyph and the old U+F0AE/U+EB67 tasklist glyphs are gone; U+E20F is the task glyph", () => {
+  test("the old U+F0CA tasks glyph and the old U+F0AE/U+EB67 tasklist glyphs are gone", () => {
     for (const source of [
       glyphsSrc,
       panelSrc,
       groupRowsSrc,
+      sectionSrc,
       projectSectionSrc,
       formatSrc,
     ]) {
@@ -2162,133 +1972,246 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
       expect(source).not.toContain("\\uF0CA")
       expect(source).not.toContain("\\u{F0CA}")
     }
-    expect(glyphsSrc).toContain("\\u{E20F}")
   })
 
-  test("no tok/in/out/cache text labels survive in the sources", () => {
+  test("the corrected-contract metric labels live only in format.ts; the panels keep no label literals", () => {
+    // The corrected contract identifies metrics with labels + color, so the
+    // label strings belong to the pure formatters; the panels must compose
+    // formatter segments, never hardcode label text.
     for (const source of [
       glyphsSrc,
       panelSrc,
       groupRowsSrc,
+      sectionSrc,
       projectSectionSrc,
-      formatSrc,
     ]) {
       expect(source).not.toMatch(/\btok\b/)
       expect(source).not.toContain('" in"')
       expect(source).not.toContain('" out"')
       expect(source).not.toContain('" cache"')
     }
+    expect(formatSrc).toContain('labelSegment("tokens")')
+    expect(formatSrc).not.toContain('labelSegment("spent")')
+    expect(formatSrc).toContain('labelSegment("input")')
+    expect(formatSrc).toContain('labelSegment("output")')
+    // The reasoning DISPLAY label is exactly `reason` in every metric row;
+    // the data field/role stays `reasoning`.
+    expect(formatSrc).toContain('labelSegment("reason")')
+    expect(formatSrc).not.toContain('labelSegment("reasoning")')
+    expect(formatSrc).toContain('labelSegment("cache")')
   })
 
-  test("the task text lives in formatTaskCount; the Subagents label is panel-only with the capital S, the metrics row uses lowercase agents", () => {
+  test("the Subagents global row is composed in the panel from formatCount — no formatter-owned header string", () => {
+    // The panel renders the Subagents global row directly: the left chevron
+    // (main-text tone), the title text (warning tone) and the collapsed
+    // aggregate caption built from the pure `formatCount` helpers. The
+    // former formatSubagentsHeader formatter was deleted with the heading
+    // marker — no formatter owns the global row's frame.
     expect(formatSrc).toContain("task")
     expect(formatSrc).toContain("agents")
-    expect(formatSrc).not.toContain("Subagents")
-    expect(formatSrc).not.toMatch(/\bsubagents\b/)
+    expect(formatSrc).not.toContain("formatSubagentsHeader")
     expect(panelSrc).toContain("Subagents")
-    expect(panelSrc).toContain("<text fg={theme().accent}>Subagents</text>")
+    expect(panelSrc).toContain("formatCount(")
+    expect(panelSrc).toContain('formatCount(snap().agents, "agent")')
+    expect(panelSrc).toContain('formatCount(snap().delegations, "task")')
   })
 
-  test("panel colors and layout match the approved theme contract: accent Project/Session subtitles, clean title, accent Subagents label, chevron after Subagents, expanded metrics row", () => {
-    // Subtitles: Project above Session, both accent; the plural is gone.
-    expect(panelSrc).toContain("fg={theme().accent}>Project<")
-    expect(panelSrc).toContain("fg={theme().accent}>Session<")
+  test("panel colors and layout match the approved theme contract: warning-yellow section titles, master disclosure row, chevron disclosure, clean title, expanded metrics row", () => {
+    // The section labels live in the shared Section component
+    // (theme().warning — the complete title text carries the semantic
+    // yellow, never a marker glyph; parameterized title); the panel routes
+    // both sections through it. The title-text element is click-to-toggle
+    // like the chevron (spec: chevron OR section title-text click).
+    expect(sectionSrc).toMatch(
+      /fg=\{theme\(\)\.warning\}\s*selectable=\{false\}\s*onMouseDown=\{props\.onToggle\}\s*>[\s\S]*?\{props\.title\}/,
+    )
+    expect(panelSrc).toContain('title="Project"')
+    expect(panelSrc).toContain('title="Session"')
     expect(panelSrc).not.toContain("Sessions")
     expect(panelSrc.indexOf("Project")).toBeLessThan(
       panelSrc.indexOf("Session"),
     )
-    // The title row is clean: truncated TokenMeter text flush left, no chevron.
+    // The master disclosure row: LEFTMOST `▶`/`▼` chevron before the
+    // truncated TokenMeter title, no version literal. Both the chevron and
+    // the title text toggle the transient master state; there is NO
+    // Settings/Back screen toggle (the palette dialog replaced the in-panel
+    // settings screen — spec: no toggle text, no screen replaces metrics).
     expect(panelSrc).toMatch(/truncateToColumns\(\s*"TokenMeter"/)
+    expect(panelSrc).not.toContain("1.0.1")
     expect(panelSrc).not.toContain(
       '{"  " + (props.expanded() ? GLYPH.collapse : GLYPH.expand)}',
     )
-    // The chevron is the ONLY toggle: it sits right after the accent
-    // Subagents label with a visible single-space margin, and nothing else
-    // is clickable.
-    expect(panelSrc.match(/onMouseDown/g)).toHaveLength(1)
-    expect(panelSrc).toContain(
-      "{` ${props.expanded() ? GLYPH.collapse : GLYPH.expand}`}",
+    expect(panelSrc).toContain("masterCollapsed")
+    expect(panelSrc).toContain("{`${masterChevron()} `}")
+    expect(panelSrc).not.toContain("Settings")
+    expect(panelSrc).not.toContain("Back")
+    // Each section header row has TWO clickable elements: the leading
+    // chevron (main-text tone) and the title text — the COMPLETE title
+    // renders in the semantic yellow theme().warning, no marker glyph of
+    // any kind (spec: chevron OR title-text click toggles). The chevron
+    // stays the LEFTMOST glyph. In the panel: the master chevron + master
+    // title plus the three clickable parts of the Subagents global row
+    // (chevron, warning title, aggregate caption) — five onMouseDown total
+    // (no Settings toggle).
+    expect(sectionSrc.match(/onMouseDown/g)).toHaveLength(2)
+    expect(panelSrc.match(/onMouseDown/g)).toHaveLength(5)
+    expect(sectionSrc).toContain("{`${chevron()} `}")
+    expect(sectionSrc).toContain("onMouseDown={props.onToggle}>")
+    expect(sectionSrc.indexOf("{`${chevron()} `}")).toBeLessThan(
+      sectionSrc.indexOf("{props.title}"),
     )
-    expect(panelSrc).toMatch(/Subagents<\/text>[\s\S]{0,300}onMouseDown/)
-    // The Subagents label is accent; the expanded metrics row renders the
-    // lowercase agents counter (primary) and the global task count (success).
-    expect(panelSrc).toContain("<text fg={theme().accent}>Subagents</text>")
-    expect(panelSrc).toContain(
-      "<text fg={theme().primary}>{formatAgents(snap().agents)}</text>",
+    // The complete title text renders in theme().warning; the `●` heading
+    // marker is gone — no dot glyph anywhere in the panels.
+    expect(sectionSrc).toContain("fg={theme().warning}")
+    expect(sectionSrc).not.toContain("GLYPH.dot")
+    expect(panelSrc).not.toContain("GLYPH.dot")
+    expect(sectionSrc).not.toContain("●")
+    expect(panelSrc).not.toContain("●")
+    expect(sectionSrc.indexOf("{`${chevron()} `}")).toBeLessThan(
+      sectionSrc.indexOf("{props.title}"),
     )
+    // The Subagents global row: LEFTMOST chevron (main-text tone),
+    // warning-yellow title text, muted aggregate caption — the caption
+    // renders only while collapsed, so the expanded header has NO counts at
+    // all. The caption text comes from the pure formatCount helpers.
     expect(panelSrc).toMatch(
-      /<text fg=\{theme\(\)\.success\}>\s*\{formatTaskCount\(snap\(\)\.delegations\)\}\s*<\/text>/,
+      /fg=\{theme\(\)\.warning\}[^>]*>\s*Subagents\s*<\/text>/,
     )
+    expect(panelSrc).toContain("{`${chevron()} `}")
+    expect(panelSrc).toContain(
+      '{` (${formatCount(snap().agents, "agent")} · ${formatCount(snap().delegations, "task")})`}',
+    )
+    expect(panelSrc).toContain('props.subagentsPref() === "expanded"')
+    expect(panelSrc).not.toContain("formatAgents")
+    expect(panelSrc).not.toContain("formatTaskCount")
     expect(panelSrc).not.toContain(
-      "<text fg={theme().text}>{formatAgents(snap().agents)}</text>",
+      '{` ${props.subagentsPref() === "expanded" ? GLYPH.collapse : GLYPH.expand}`}',
     )
-    expect(panelSrc).not.toContain(
-      "<text fg={theme().info}>{formatAgents(snap().agents)}</text>",
+    // The compact summary row is the section's elastic L1; its tone comes
+    // from the shared tone module (segmentTone: main-text except the
+    // $amount in light red), not a per-role color map.
+    expect(sectionSrc).toContain("formatCompactSummary(")
+    expect(sectionSrc).toContain("segmentTone(theme, 0, segment.role)")
+    // The expanded detail renders the mode-aware rows through
+    // formatDetailLines (compact: three, precise: five) — the old
+    // fits-gate that OMITTED non-fitting lines is gone (spec: detail rows
+    // degrade elastically, values never hidden).
+    expect(sectionSrc).toContain("formatDetailLines(")
+    expect(sectionSrc).not.toContain("formatMetricLines(")
+    expect(sectionSrc).not.toContain("fits(")
+    // Per-agent entries (group-rows.tsx): `↳`-indented header
+    // `↳ <name> (<N> tasks) ▶` (`↳` branch and the TRAILING per-agent
+    // chevron in the main-text tone, agent name in the light-blue/cyan
+    // theme().info tone, task count and parentheses in the derived detail
+    // tone — all click-to-toggle; the trailing chevron flips `▶` → `▼`
+    // while open) followed by
+    // the elastic compact L1 rendered through formatCompactSummary in the
+    // primary text tone. Opening REPLACES the compact L1 with the mode-aware
+    // detail rows (formatDetailLines — L1 once by construction, rendered in
+    // the main-text tone while the secondary rows stay in the derived
+    // detail tone; the fits-gate that omitted detail rows is gone). The
+    // header carries the nested-list leading indent (GROUP_INDENT) and the
+    // metric rows the four-column indent (AGENT_METRIC_INDENT), aligned
+    // under the agent name after the `↳` branch (`  ↳ `).
+    expect(groupRowsSrc).toContain("formatAgentLine(")
+    expect(groupRowsSrc).toContain("formatCompactSummary(")
+    expect(groupRowsSrc).toContain("formatDetailLines(")
+    expect(groupRowsSrc).not.toContain("formatMetricLines(")
+    expect(groupRowsSrc).not.toContain("fits(")
+    expect(groupRowsSrc).toContain("fg={theme().info}")
+    expect(groupRowsSrc).toContain("fg={detailTone(theme)}")
+    expect(groupRowsSrc).toMatch(
+      /fg=\{theme\(\)\.text\}\s*selectable=\{false\}\s*onMouseDown=\{props\.onToggle\}/,
     )
-    expect(panelSrc).not.toContain(
-      "<text fg={theme().textMuted}>{formatAgents(snap().agents)}</text>",
+    expect(groupRowsSrc).toMatch(
+      /fg=\{detailTone\(theme\)\}\s*selectable=\{false\}\s*onMouseDown=\{props\.onToggle\}/,
     )
-    expect(panelSrc).not.toContain(
-      "<text fg={theme().info}>{formatTaskCount(snap().delegations)}</text>",
-    )
-    // Per-agent rows (group-rows.tsx): indented marker, robot icon left of
-    // the agent name in the SAME blue (BOTH theme().primary — the clock
-    // stays cyan info), green success task count, fixed-gold spend, accent
-    // thinking, error cost.
-    expect(groupRowsSrc).toContain("fg={props.theme().text}>{line().marker}")
-    expect(groupRowsSrc).toContain("fg={props.theme().primary}>{line().robot}")
-    expect(groupRowsSrc).toContain("fg={props.theme().primary}>{line().name}")
     expect(groupRowsSrc).not.toMatch(
-      /fg=\{props\.theme\(\)\.(text|info|textMuted)\}>\{line\(\)\.robot\}/,
+      /fg=\{theme\(\)\.(primary|success|textMuted)\}\s*selectable=\{false\}\s*onMouseDown=\{props\.onToggle\}/,
     )
-    expect(groupRowsSrc).not.toMatch(
-      /fg=\{props\.theme\(\)\.(text|info|textMuted)\}>\{line\(\)\.name\}/,
-    )
-    expect(groupRowsSrc).toContain("fg={props.theme().success}>{line().tasks}")
-    expect(groupRowsSrc).not.toMatch(
-      /fg=\{props\.theme\(\)\.(info|textMuted)\}>\{line\(\)\.tasks\}/,
-    )
-    expect(groupRowsSrc.indexOf("line().robot")).toBeLessThan(
-      groupRowsSrc.indexOf("line().name"),
-    )
-    // The robot icon + both spaces are reserved before the name truncates,
-    // and the group row-1 prefix (marker + robot) is what yields in the extreme.
-    expect(formatSrc).toContain("const robot = `")
-    expect(formatSrc).toContain("textColumns(robot)")
-    // The group spend total is the FIXED gold (never theme accent); thinking
-    // keeps the accent; cost keeps error.
-    expect(groupRowsSrc).toContain("fg={SPEND_GOLD}>{meta().context}")
-    expect(groupRowsSrc).not.toContain(
-      "fg={props.theme().accent}>{meta().context}",
-    )
-    expect(groupRowsSrc).toContain(
-      "fg={props.theme().accent}>{meta().thinking}",
-    )
-    expect(groupRowsSrc).toContain("fg={props.theme().error}>{meta().cost}")
-    // The headline spend totals (Project and Session) also ride the fixed
-    // gold, while thinking stays theme accent — no theme-derived spend.
-    expect(panelSrc).toContain("fg={SPEND_GOLD}>{formatHeadline")
-    expect(panelSrc).not.toContain("fg={theme().accent}>{formatHeadline")
-    // SPEND_GOLD is the single centralized literal — the fixed coin gold.
-    expect(colorsSrc).toContain('SPEND_GOLD = "#D4AF37"')
-    expect(panelSrc).toContain('SPEND_GOLD } from "./colors"')
-    expect(groupRowsSrc).toContain('SPEND_GOLD } from "./colors"')
-    // Project placeholder fallback survives; the Session placeholder is intact.
-    expect(panelSrc).toContain("fg={theme().textMuted}>…</text>")
-    // Scrollbox gates on 3+ groups and caps at two groups (6 rows).
-    expect(panelSrc).toContain("GROUP_SCROLL_THRESHOLD")
+    expect(groupRowsSrc).toContain("AGENT_METRIC_INDENT")
+    expect(groupRowsSrc).toContain("agent().indent")
+    expect(groupRowsSrc).toContain("agent().chevron")
+    expect(groupRowsSrc).toContain("agent().name")
+    expect(groupRowsSrc).toContain("agent().tasks")
+    expect(groupRowsSrc).not.toContain("line().robot")
+    expect(groupRowsSrc).not.toContain("line().marker")
+    expect(groupRowsSrc).not.toContain("meta()")
+    // The headline formatter is gone, and so is the semantic color module:
+    // tone comes from the shared tone module (tone.ts) — theme roles only,
+    // no colors.ts import, no SPEND_GOLD literal anywhere.
+    expect(sectionSrc).not.toContain("formatHeadline")
+    expect(sectionSrc).not.toContain("metricColor")
+    expect(groupRowsSrc).not.toContain("metricColor")
+    expect(sectionSrc).not.toContain('from "./colors"')
+    expect(groupRowsSrc).not.toContain('from "./colors"')
+    // Section placeholders survive: the loading `…` and the empty copies;
+    // the old `(detail clipped)` cue is gone from the corrected contract.
+    expect(sectionSrc).toContain("fg={theme().textMuted}>…</text>")
+    expect(panelSrc).toContain('emptyCopy="No usage yet"')
+    expect(panelSrc).toContain('emptyCopy="No sessions"')
+    expect(sectionSrc).not.toContain('"(detail clipped)"')
+    // Agent disclosure is a one-open accordion keyed by INDEX: the panel
+    // holds `openGroupIndex: number | null` (transient — reset on
+    // mount/session change, never kv). Each compact entry toggles its own
+    // index; opening one closes the other by construction.
+    expect(panelSrc).toContain("openGroupIndex")
+    expect(panelSrc).toContain("createSignal<number | null>(null)")
     expect(panelSrc).toMatch(
-      /<scrollbox\s+height=\{MAX_SCROLLBOX_ROWS\}\s+scrollY\s+viewportCulling=\{false\}\s*>/,
+      /setOpenGroupIndex\(\s*openGroupIndex\(\) === index\(\) \? null : index\(\),?\s*\)/,
     )
+    // The expanded agent list is a REAL scroll container: a `<scrollbox>`
+    // sized for roughly two compact agents that holds ALL groups through
+    // the `For` — no slice, no clipped cue, no hidden count.
+    expect(panelSrc).toContain("<scrollbox width={inner()} height={4} scrollY>")
+    expect(panelSrc).toContain("<For each={snap().groups}>")
+    expect(panelSrc).not.toContain("slice(")
+    expect(panelSrc).not.toContain("MAX_VISIBLE_GROUPS")
+    expect(panelSrc).not.toContain("more — scroll")
+  })
+
+  test("the tone hierarchy derives ONLY from theme roles plus one relative RGBA blend — no arbitrary hex in tone.ts", () => {
+    const toneSrc = readFileSync(
+      new URL("../src/tokenmeter/panel/tone.ts", import.meta.url),
+      "utf8",
+    )
+    // Secondary rows and task metadata: textMuted blended 50% toward the
+    // active background through the installed RGBA API (toInts/fromInts).
+    expect(toneSrc).toContain("theme().textMuted")
+    expect(toneSrc).toContain("theme().background")
+    expect(toneSrc).toContain("toInts()")
+    expect(toneSrc).toContain("RGBA.fromInts(")
+    expect(toneSrc).toContain("/ 2")
+    // Primary token+cost rows: main text except the `$amount` in the
+    // light-red error tone.
+    expect(toneSrc).toContain('role === "spend"')
+    expect(toneSrc).toContain("theme().error")
+    expect(toneSrc).toContain("theme().text")
+    // The tone module is the ONLY place metric tone lives: no hex literals,
+    // no accent/primary/success on metric data.
+    expect(toneSrc).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
+    expect(toneSrc).not.toContain("theme().accent")
+    expect(toneSrc).not.toContain("theme().primary")
+    expect(toneSrc).not.toContain("theme().success")
+    // The panels consume the shared tone module instead of duplicating
+    // tone branches.
+    expect(sectionSrc).toContain('from "./tone"')
+    expect(groupRowsSrc).toContain('from "./tone"')
+    expect(groupRowsSrc).toContain("detailTone(theme)")
   })
 
   test("the Project loading fallback is the static `…` placeholder — no spinner, no interval, no frame cycling", () => {
     // While the section has no snapshot and no error the placeholder is a
     // plain muted ellipsis; loading never animates.
-    expect(panelSrc).toContain("fg={theme().textMuted}>…</text>")
+    expect(sectionSrc).toContain("fg={theme().textMuted}>…</text>")
     // The spinner is gone: no indicator component, no interval machinery,
     // no loading glyph and no rotation frames anywhere in the panel modules.
-    for (const source of [panelSrc, groupRowsSrc, projectSectionSrc]) {
+    for (const source of [
+      panelSrc,
+      sectionSrc,
+      groupRowsSrc,
+      projectSectionSrc,
+    ]) {
       expect(source).not.toContain("LoadingIndicator")
       expect(source).not.toContain("SPINNER_INTERVAL_MS")
       expect(source).not.toContain("SPINNER_FRAMES")
@@ -2299,11 +2222,13 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
       for (const frame of ["◴", "◷", "◶", "◵"])
         expect(source).not.toContain(frame)
     }
-    // A failed refresh surfaces a visible error line (project-section.tsx):
-    // theme().error, showing ONLY the stable PROJECT_ERROR_MESSAGE (no
-    // "Error: " prefix, no raw runtime message), truncated to the content
-    // width so it never overflows.
-    expect(panelSrc).toContain("projectError()")
+    // A failed refresh surfaces a visible error line (project-section.tsx,
+    // rendered by the Project variant of section.tsx): theme().error,
+    // showing ONLY the stable PROJECT_ERROR_MESSAGE (no "Error: " prefix, no
+    // raw runtime message), truncated to the content width so it never
+    // overflows.
+    expect(sectionSrc).toContain("ProjectError")
+    expect(sectionSrc).toContain('variant === "project"')
     expect(projectSectionSrc).toContain("projectError()")
     expect(projectSectionSrc).toContain(
       "truncateToColumns(message(), props.inner())",
@@ -2311,8 +2236,55 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
     expect(projectSectionSrc).not.toContain("Error: ${message()}")
     expect(projectSectionSrc).toContain("fg={props.theme().error}")
     // Session keeps its own neutral fallback without a loading state.
-    expect(panelSrc).toContain(
-      "<Show when={view()} fallback={<text fg={theme().textMuted}>…</text>}>",
-    )
+    expect(sectionSrc).toContain("when={props.view()}")
+    expect(sectionSrc).toContain("fallback=")
+    // The entry loads the settings once and carries no version literal and
+    // no hand-rolled expanded kv wiring.
+    expect(entrySrc).toContain("loadSettings(api)")
+    expect(entrySrc).not.toContain("EXPANDED_KV_KEY")
+    expect(entrySrc).not.toContain("1.0.1")
+    expect(entrySrc).toContain("subagentsPref")
+    expect(entrySrc).toContain("cycleSubagents")
+  })
+})
+
+describe("palette command registration (keymap.registerLayer seam)", () => {
+  const entrySrc = readFileSync(
+    new URL("../src/tokenmeter.tsx", import.meta.url),
+    "utf8",
+  )
+  const panelSrc = readFileSync(
+    new URL("../src/tokenmeter/panel/index.tsx", import.meta.url),
+    "utf8",
+  )
+
+  test("the entry registers the Settings command via keymap.registerLayer — category TokenMeter, never the legacy api.command/registerExCommands", () => {
+    // Spec: tokenmeter-command-palette — the modern keymap API registers the
+    // command with namespace "palette" and category "TokenMeter"; the
+    // deprecated `api.command` surface and `registerExCommands` must not be
+    // the registration mechanism; `run` opens the dialog through the shared
+    // settings-dialog seam (showSettingsDialog), not an in-panel screen.
+    expect(entrySrc).toContain("keymap.registerLayer")
+    expect(entrySrc).toContain('namespace: "palette"')
+    expect(entrySrc).toContain('category: "TokenMeter"')
+    expect(entrySrc).toContain('name: "tokenmeter.settings"')
+    expect(entrySrc).toContain('title: "TokenMeter: Settings"')
+    expect(entrySrc).toContain("showSettingsDialog(api)")
+    expect(entrySrc).not.toMatch(/api\.command[.(]/)
+    expect(entrySrc).not.toMatch(/command\.register/)
+    expect(entrySrc).not.toContain("registerExCommands")
+  })
+
+  test("the panel exposes no in-panel settings seam — the palette dialog replaced the screen", () => {
+    // Design: the DialogSelect palette menu replaces the sidebar settings
+    // screen; no module-scope `screen` signal or openSettings/showMetrics
+    // seam may remain in the panel module (spec: no Settings/Back title
+    // toggle, no in-panel view may replace the metric body).
+    expect(panelSrc).not.toContain("export function openSettings")
+    expect(panelSrc).not.toContain("export function showMetrics")
+    expect(panelSrc).not.toMatch(/createSignal<"metrics" \| "settings">/)
+    expect(panelSrc).not.toContain("SettingsScreen")
+    expect(panelSrc).not.toContain('"Settings"')
+    expect(panelSrc).not.toContain('"Back"')
   })
 })

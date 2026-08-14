@@ -1,15 +1,15 @@
 ---
 name: opencode-plugin
-description: "Trigger: create OpenCode plugins, TUI plugins, sidebar UI, Solid reactivity, plugin SDK, custom tools, hooks, auth, or tool interception. Build and package plugins with @opencode-ai/plugin."
+description: "Trigger: create OpenCode plugins, TUI plugins, sidebar UI, Solid reactivity, plugin SDK, custom tools, hooks, auth, keymaps/commands, or tool interception. Build and package plugins with @opencode-ai/plugin."
 license: Apache-2.0
 metadata:
   author: jonosotoaguilar
-  version: "1.4"
+  version: "1.5"
 ---
 
 ## Activation Contract
 
-Load when creating or modifying OpenCode plugins: TUI plugins, sidebar UI, Solid reactivity, plugin SDK, custom tools, hooks, auth, or tool interception. Re-read this file during plugin development.
+Load when creating or modifying OpenCode plugins: TUI plugins, sidebar UI, Solid reactivity, plugin SDK, custom tools, hooks, auth, keymaps/commands, or tool interception. Re-read this file during plugin development.
 
 ## Hard Rules
 
@@ -18,6 +18,7 @@ Load when creating or modifying OpenCode plugins: TUI plugins, sidebar UI, Solid
 - **Modularity**: one purpose per function, DRY; extract proactively near 150 lines, SHOULD NOT exceed 200, MUST split over 300; never all code in one `index.ts` — `references/coding-ts.md`.
 - **TUI production boundary**: precompile `.tsx` with the OpenTUI Solid transform, load the compiled ESM artifact from `tui.json`, keep host runtimes external, inspect for reactive bindings and no eager JSX output — `references/tui-reactivity.md`.
 - **Installed-type verification**: verify exact SDK method signatures against INSTALLED `@opencode-ai/plugin/dist/tui.d.ts` and `@opencode-ai/sdk/dist/v2/gen/sdk.gen.d.ts`; no `api.client.experimental.*` client path (`experimental.*` are hook names only); pass `directory` from `api.state.path.directory` to `project.current`/`session.list` — `references/tui-api.md`.
+- **Keymap/commands (REQUIRED)**: use the modern `api.keymap.registerLayer({ commands, bindings })` surface; `api.command` is deprecated (removed in v2) — never use it in new code. Verify against installed `@opentui/keymap/src/keymap.d.ts` + `types.d.ts`; release layer disposers in `api.lifecycle.onDispose`; open host DialogSelect via `api.ui.dialog.replace` ONCE — never re-replace on selection (host `replace` resets the stack, losing filter/focus); guard the close with an idempotent once-flag (`clear()` re-entrancy) — `references/commands.md`.
 - **Testing**: `references/testing.md`; TUI plugins also run the production artifact check — preload-backed render tests don't prove the `tui.json` loading boundary.
 - **Pre-publish gates**: `typecheck`, `test`, `audit --prod`, `pack --dry-run`, direct-dist testing — `references/build-and-release.md`.
 - **Runtime dependency packaging**: every module the compiled artifact imports at runtime MUST be declared in `dependencies` of the published package — consumers install only `dependencies`, never `devDependencies` (a TUI bundle importing `@opentui/solid`/`solid-js` that ships them only as devDeps fails to load after install). Check the bundle's bare imports before publishing — `references/publishing.md`.
@@ -32,6 +33,8 @@ Load when creating or modifying OpenCode plugins: TUI plugins, sidebar UI, Solid
 | npm publish | `references/build-and-release.md` + `publishing.md` + `update-notifications.md` |
 | Users updating an installed plugin | `references/updating-plugins.md` — update = remove the plugin's cache directory (`rm -rf ~/.cache/opencode/packages/<entry>`) and restart; opencode reinstalls latest. Never `postinstall` (opencode installs with `ignoreScripts: true`); `@latest` in a command never refreshes |
 | How the plugin host loads/installs plugins | `references/plugin-loading.md` — config entries, spec resolution, cache-first install, manifest targets, config patch, runtime load |
+| Palette command, keybinding, or both | `references/commands.md` — `registerLayer`; `bindings: []` keeps the command palette-visible with no key; live re-register swaps bindings without restart |
+| Selection/settings picker UI | `references/commands.md` — host `DialogSelect` via `api.ui.dialog.replace` once; once-guarded close |
 | Not feasible as plugin | Inform user: OC core → `packages/opencode`; MCP tools → MCP config; automation → shell scripts |
 
 ## Execution Steps
@@ -39,7 +42,7 @@ Load when creating or modifying OpenCode plugins: TUI plugins, sidebar UI, Solid
 1. Verify SDK reference: run the extract script.
 2. Validate feasibility; if not feasible, inform the user and stop.
 3. Design: `references/hooks.md`, `hook-patterns.md`, `coding-ts.md`.
-4. Implement modularly: `hook-patterns.md`, `tool-helper.md`, `events.md`, `examples.md`.
+4. Implement modularly: `hook-patterns.md`, `tool-helper.md`, `events.md`, `commands.md`, `examples.md`.
 5. Add UI feedback if needed (toasts vs inline).
 6. Test: test folder with the entry's config (`opencode.json` for server/runtime plugins → `opencode run hi`; `tui.json` for TUI plugins) → interactive `opencode`; recommend tests by hook type.
 7. Build and package (npm only): single-file tsup bundling, packaging-boundary decision, tarball inspection via `pack --dry-run` — `build-and-release.md`.
@@ -60,6 +63,7 @@ Return: plugin files created (exact paths), hooks and tools used, feasibility ve
 - `references/examples.md` — examples, locations, structure (npm-dist keeps source in `src/`)
 - `references/toast-notifications.md`, `references/ui-feedback.md` — user feedback
 - `references/tui-reactivity.md`, `references/tui-api.md` — TUI boundary, SDK API
+- `references/commands.md` — modern keymap/commands API: `registerLayer`, command/binding shapes, live re-registration, `dispatchCommand`, lifecycle, DialogSelect
 - `references/testing.md` — testing procedure
 - `references/build-and-release.md` — packaging, gates, release
 - `references/publishing.md` — npm publishing checklist

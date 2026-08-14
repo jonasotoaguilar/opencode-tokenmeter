@@ -1,28 +1,38 @@
 /**
  * Numeric display formatting for the TokenMeter sidebar: compact token
- * magnitudes and fixed two-decimal cost strings. Pure — no I/O, no state.
+ * magnitudes, thousands-separated integers and fixed two-decimal cost
+ * strings. Pure — no I/O, no state.
  * Aggregation lives in math.ts; this module only shapes numbers for display.
  */
-export function fmtTokens(n: number): string {
-  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`
-  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}k`
-  return `${Math.round(n)}`
-}
 
 /**
- * Compact token format for the single-line four-value breakdown rows. Keeps
- * each value at most six columns (`999.9M`, `1000k`) so the rendered
- * input · output · reasoning · cache row stays within the design budget
- * (MIN_BREAKDOWN_WIDTH) at every realistic magnitude. Whole-number
- * thousands drop the decimal that fmtTokens would carry.
+ * Compact token format for the corrected-contract metric lines. Keeps each
+ * value at most six columns (`999.9M`, `1000K`) so the labeled lines stay
+ * within the sidebar's content width at every realistic magnitude.
+ * Whole-number thousands drop the decimal that the removed `fmtTokens`
+ * carried. Magnitudes are UPPERCASE (`152K`, `10M`) per the corrected
+ * formatting contract.
  */
 export function fmtCompact(n: number): string {
   if (n >= 1e6) {
     const scaled = (n / 1e6).toFixed(1)
     return `${scaled.endsWith(".0") ? scaled.slice(0, -2) : scaled}M`
   }
-  if (n >= 1e3) return `${Math.round(n / 1e3)}k`
+  if (n >= 1e3) return `${Math.round(n / 1e3)}K`
   return `${Math.round(n)}`
+}
+
+/**
+ * Precise token format: thousands-separated integers (`1234567` → `1,234,567`),
+ * the `numbers=precise` counterpart to the compact magnitudes above. Rounds
+ * fractional raw values to whole tokens; non-finite input collapses to `0`
+ * so a stray NaN never renders into the panel.
+ */
+export function fmtPrecise(n: number): string {
+  if (!Number.isFinite(n)) return "0"
+  const digits = String(Math.round(Math.abs(n)))
+  const grouped = digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",")
+  return n < 0 ? `-${grouped}` : grouped
 }
 
 /**
