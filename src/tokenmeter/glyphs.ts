@@ -1,31 +1,16 @@
 /**
- * Stable monochrome Nerd Font glyphs for the TokenMeter sidebar.
- *
- * All codepoints live in the PUA ranges shipped by the installed Nerd Fonts
- * (Octicons + Material Design + Codicons) — no icon library is loaded and nothing here is
- * emoji, so every glyph renders as a fixed-width monochrome character. The
- * expanded-group tree marker is the plain Unicode curved arrow "↳" (U+21B3),
- * matching the reference plugin's line style.
+ * The contract's glyphs: the disclosure chevrons `▶`/`▼` (U+25B6/U+25BC)
+ * and the Subagents agent-entry branch `↳` (U+21B3). Every disclosure row
+ * renders its chevron LEFTMOST — the master row, the two section rows and
+ * the Subagents global row — while each `↳`-indented compact agent entry
+ * renders its per-agent chevron TRAILING the header (`↳ <name> (<N>
+ * tasks) ▶` closed / `▼` open). Nothing here is emoji, so every glyph
+ * renders as a fixed-width monochrome character.
  */
 export const GLYPH = {
-  /** fa-coins — cumulative token spend (headline and group totals). */
-  coins: "\uEDE8",
-  /** oct-database — cumulative cache tokens. */
-  cache: "\uF472",
-  /** md-fire (U+F0238, plane-15 PUA) — native cost, root and group summary lines. */
-  fire: "\u{F0238}",
-  /** md-robot (U+F06A9, plane-15 PUA) — subagent count. */
-  robot: "\u{F06A9}",
-  /** U+E20F (PUA, narrow) — task counts, root delegations and group rows. */
-  tasks: "\u{E20F}",
-  /** U+EE9C (PUA, narrow) — reasoning tokens, accent-colored. */
-  reasoning: "\u{EE9C}",
-  /** Direction arrows for the cumulative in/out breakdown. */
-  up: "↑",
-  down: "↓",
-  /** Expand/collapse chevrons for the kv-persisted group list. */
+  /** Expand/collapse disclosure chevrons — leading for master/sections/Subagents, trailing for agent entries. */
   expand: "▶",
   collapse: "▼",
-  /** Curved tree arrow for expanded group lines. */
-  tree: "↳",
+  /** The Subagents agent-entry branch, leading every compact agent line. */
+  indent: "↳",
 } as const

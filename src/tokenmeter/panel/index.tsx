@@ -5,68 +5,106 @@
  * `UsagePanel` from `./tokenmeter/panel` (resolves to this file).
  *
  * Layout, top to bottom:
- *   `TokenMeter 1.0.1` — clean title row, flush left like Project/Session; no toggle here.
- *   `Project` (accent) + two metric rows — static `…` placeholder while the
- *     lookup/list runs and no snapshot exists yet; a failed refresh shows a
- *     visible error line in theme().error (see project-section.tsx) instead
- *     of a silent placeholder, and when a snapshot already exists the
- *     metrics stay with a compact error line below them. Session is
- *     unaffected.
- *   `Session` (accent) + the same two metric rows.
- *   `Subagents [chevron]` — the ONLY toggle button, right after the accent
- *     label with a visible margin; shown in both states. Collapsed shows
- *     only this row.
- *  Expanded: `🖿 N agents · <task> N task` metrics row (agents primary,
- *     task success), then the per-agent group list, indented — rendered by
- *     GroupRows (group-rows.tsx): exactly three rows per group, the last two
- *     indented four columns. With 3+ groups the rows are wrapped in a
- *     scrollbox capped at 2 groups (6 rows) so 3 groups scroll; with fewer
- *     groups no scrollbox is used.
+ *   `▶/▼ TokenMeter` — master disclosure row: the chevron (`▶` collapsed /
+ *     `▼` expanded) is the LEFTMOST glyph, then the title; chevron OR
+ *     title-text click toggles the master state (transient — starts
+ *     EXPANDED, resets on session change, never kv). Collapsed renders
+ *     `▶ TokenMeter` plus EXACTLY ONE compact summary — the elastic L1 of
+ *     the persisted `collapsedSummary` source (session or project) — and no
+ *     other rows. There is no title-row toggle and no in-panel settings
+ *     view: the palette command opens the settings DialogSelect
+ *     (settings-dialog.tsx) and the metric body never changes.
+ *   Project and Session sections render through the shared Section component
+ *     (section.tsx): compact by default — ONE summary row (`<total> tokens ·
+ *     $<spend>`, nested two columns under the heading) — with an
+ *     independent chevron toggle per section
+ *     (chevron OR section title-text click). The heading TITLE texts
+ *     Project and Session render in the semantic yellow `theme().warning`;
+ *     the leading disclosure chevrons stay in the main-text tone. Section
+ *     disclosure is
+ *     transient: sections seed CLOSED at mount (the former
+ *     disclosure-seeding field was removed with the settings model —
+ *     tokenmeter-settings spec; the master disclosure replaces it), reset
+ *     to closed on session change, never written to kv. Project shows the
+ *     stable error line (project-section.tsx) while Session is unaffected.
+ *   Subagents — ONE left-chevron global row: `▶ Subagents (N agents · M
+ *     tasks)` collapsed, `▼ Subagents` (no aggregate — the list is the
+ *     detail) expanded; the title text renders in the semantic yellow
+ *     `theme().warning` like the section titles. Clicking
+ *     the row cycles the durable
+ *     `tokenmeter.sidebar.expanded` preference via the entry-passed handler.
+ *     Expanded, ALL groups render inside a real `<scrollbox>` sized for
+ *     roughly two compact agent entries (viewport 4); nothing is sliced and
+ *     no clipped cue is rendered. Each compact agent entry (GroupRows,
+ *     group-rows.tsx) is a `↳`-indented header
+ *     `↳ <name> (<T> tasks) ▶` whose per-agent chevron trails the header
+ *     and flips `▼` while open, plus its elastic
+ *     compact L1; clicking an entry
+ *     replaces its compact lines with the mode-aware detail rows (compact:
+ *     three, precise: five — L1 once). Exclusivity is index-keyed
+ *     (`openGroupIndex: number | null`): opening one agent closes the other
+ *     and clicking the open agent closes it; the open agent is transient —
+ *     reset on mount/session change, never written to kv.
  *
- * Session and Project share the same two metric rows: row 1 is the spend
- * total (fixed SPEND_GOLD — the coin/token color, never theme-derived), the
- * thinking value right after it (accent), and the fire cost (error); row 2
- * is the muted
- * input · output real · cache read/write breakdown,
- * where output real = raw output + raw reasoning (computed exactly once via
- * realOutput). The metric rows only render when they fit the content
- * width, so a fixed row never overflows; long names truncate on row 1
- * instead. Every line is column-aware and truncated to the content width
- * passed in from the sidebar_content slot ctx/props. Activation runs once on
- * mount so the panel populates on first open, then again on session route
- * changes.
+ * The panel has NO screen seam: every rendered row is the metric body (or
+ * the master-collapsed summary). The preference menu lives in the palette
+ * DialogSelect (spec: tokenmeter-command-palette — no title-row toggle
+ * text, no in-panel view may replace the metric body); the old in-panel
+ * screen module was deleted with the seam. Every line is column-aware and
+ * truncated to the content width passed in from the sidebar_content slot
+ * ctx/props. Activation runs once on mount so the panel populates on first
+ * open, then again on session route changes.
  */
-import { createEffect, createMemo, For, on, onMount, Show } from "solid-js"
 import {
-  breakdownSegments,
-  formatAgents,
-  formatCost,
-  formatHeadline,
-  formatHeadlineRow,
-  formatTaskCount,
-  formatThinking,
-} from "../format"
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  on,
+  onMount,
+  Show,
+} from "solid-js"
+import { formatCount } from "../format"
 import { GLYPH } from "../glyphs"
-import { realOutput } from "../math"
-import {
-  projectError,
-  projectSnapshot,
-  scheduleProjectRefresh,
-} from "../project"
+import { projectSnapshot, scheduleProjectRefresh } from "../project"
 import { activateRoot } from "../reconcile"
+import {
+  projectOpen,
+  resetSectionDisclosure,
+  sessionOpen,
+  setSectionOpen,
+} from "../sections"
+import { settings } from "../settings"
 import { snapshot } from "../store"
-import { contentWidth, textColumns, truncateToColumns } from "../text"
-import { SPEND_GOLD } from "./colors"
+import { contentWidth, truncateToColumns } from "../text"
 import { GroupRows } from "./group-rows"
-import { ProjectError } from "./project-section"
-
-/** Scrollbox height for 3+ groups: at most two groups × three rows each. */
-const MAX_SCROLLBOX_ROWS = 6
-const GROUP_SCROLL_THRESHOLD = 3
+import { Section, SectionSummary } from "./section"
 
 export function UsagePanel(props) {
   const theme = () => props.theme()
   const inner = () => contentWidth(props.width ?? 38)
+
+  // Master disclosure is transient: starts EXPANDED (the resolved contract —
+  // preserves the previous default), resets to expanded on session change,
+  // never written to kv. Collapsed renders `▶ TokenMeter` plus EXACTLY ONE
+  // compact summary — the elastic L1 of the persisted `collapsedSummary`
+  // source (session or project) — and no other rows.
+  const [masterCollapsed, setMasterCollapsed] = createSignal(false)
+  const masterChevron = () =>
+    masterCollapsed() ? GLYPH.expand : GLYPH.collapse
+  const toggleMaster = () => setMasterCollapsed(!masterCollapsed())
+
+  // Section disclosure lives in the shared sections.ts store so the
+  // `tokenmeter.toggle-sections` command (shortcut.ts) can expand/collapse
+  // the sections together: sections seed closed at mount (the removed
+  // legacy seeding is superseded by the master disclosure), reset to closed
+  // on every session change, never written to kv.
+
+  // Open agent of the Subagents accordion, keyed by group INDEX inside the
+  // current snapshot's sorted list. Transient like the section disclosure:
+  // null at mount, reset on session change, never written to kv. Index
+  // exclusivity makes the one-open accordion true by construction.
+  const [openGroupIndex, setOpenGroupIndex] = createSignal<number | null>(null)
 
   // Initial activation on first mount: the panel must reconcile and populate
   // as soon as it opens, without depending on a reactive prop change. The
@@ -74,11 +112,20 @@ export function UsagePanel(props) {
   onMount(() => {
     activateRoot(props.api, props.sessionID)
     scheduleProjectRefresh(props.api)
+    // Mount is the closed seed for the shared transient disclosure (the
+    // signals are module-level so a fresh mount never inherits a previous
+    // panel's open state).
+    resetSectionDisclosure()
   })
   createEffect(
     on(
       () => props.sessionID,
-      (sid) => activateRoot(props.api, sid),
+      (sid) => {
+        activateRoot(props.api, sid)
+        setMasterCollapsed(false)
+        resetSectionDisclosure()
+        setOpenGroupIndex(null)
+      },
       { defer: true },
     ),
   )
@@ -89,192 +136,124 @@ export function UsagePanel(props) {
   })
   const projectView = () => projectSnapshot()
 
+  // The collapsed branch renders the elastic L1 of the persisted
+  // `collapsedSummary` source (session or project) with its empty copy.
+  // NOTE: these accessors return the VIEW VALUE (like Section's Show-callback
+  // accessor), never another accessor — a function-returning-function prop
+  // makes OpenTUI/Solid's Show resolve the inner accessor as the `when`
+  // value, which renders a field-less view (`0 tokens`).
+  const masterSummaryView = () =>
+    settings().collapsedSummary === "project" ? projectView() : view()
+  const masterSummaryEmpty = () =>
+    settings().collapsedSummary === "project" ? "No sessions" : "No usage yet"
+
+  // The Subagents global chevron reads the durable sidebar preference
+  // (tokenmeter.sidebar.expanded) through the entry-passed accessor.
+  const chevron = () =>
+    props.subagentsPref() === "expanded" ? GLYPH.collapse : GLYPH.expand
+
   return (
     <box flexDirection="column">
       <box flexDirection="row">
-        <text fg={theme().text}>
-          {truncateToColumns(
-            "TokenMeter",
-            Math.max(1, inner() - textColumns(" 1.0.1")),
-          )}
+        {/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI text element, not DOM; click-to-toggle is the TUI interaction model. */}
+        <text fg={theme().text} selectable={false} onMouseDown={toggleMaster}>
+          {`${masterChevron()} `}
         </text>
-        <text fg={theme().textMuted}> 1.0.1</text>
+        {/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI text element, not DOM; the master title-text click toggles disclosure (spec: chevron OR title-text). */}
+        <text fg={theme().text} selectable={false} onMouseDown={toggleMaster}>
+          {truncateToColumns("TokenMeter", inner())}
+        </text>
       </box>
-      <text fg={theme().accent}>Project</text>
       <Show
-        when={projectView()}
+        when={masterCollapsed()}
         fallback={
-          <Show
-            when={projectError()}
-            fallback={<text fg={theme().textMuted}>…</text>}
-          >
-            <ProjectError theme={theme} inner={inner} />
-          </Show>
+          <>
+            <Section
+              title="Project"
+              variant="project"
+              view={projectView}
+              emptyCopy="No sessions"
+              open={projectOpen}
+              onToggle={() => setSectionOpen("project", !projectOpen())}
+              theme={theme}
+              inner={inner}
+            />
+            <Section
+              title="Session"
+              view={view}
+              emptyCopy="No usage yet"
+              open={sessionOpen}
+              onToggle={() => setSectionOpen("session", !sessionOpen())}
+              theme={theme}
+              inner={inner}
+            />
+            {/* The Subagents section renders ONLY while the snapshot has at
+                least one group: with zero groups there is no heading, no
+                scrollbox and no `0 agents · 0 tasks` caption — the section
+                consumes zero vertical space and appears automatically once
+                the first delegated group exists. */}
+            <Show when={view()}>
+              {(snap) => (
+                <Show when={snap().groups.length > 0}>
+                  <box flexDirection="row">
+                    {/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI text element, not DOM; click-to-toggle is the TUI interaction model. */}
+                    <text
+                      fg={theme().text}
+                      selectable={false}
+                      onMouseDown={props.onToggleSubagents}
+                    >
+                      {`${chevron()} `}
+                    </text>
+                    {/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI text element, not DOM; click-to-toggle is the TUI interaction model. */}
+                    <text
+                      fg={theme().warning}
+                      selectable={false}
+                      onMouseDown={props.onToggleSubagents}
+                    >
+                      Subagents
+                    </text>
+                    <Show when={props.subagentsPref() === "collapsed"}>
+                      {/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI text element, not DOM; click-to-toggle is the TUI interaction model. */}
+                      <text
+                        fg={theme().textMuted}
+                        selectable={false}
+                        onMouseDown={props.onToggleSubagents}
+                      >
+                        {` (${formatCount(snap().agents, "agent")} · ${formatCount(snap().delegations, "task")})`}
+                      </text>
+                    </Show>
+                  </box>
+                  <Show when={props.subagentsPref() === "expanded"}>
+                    <scrollbox width={inner()} height={4} scrollY>
+                      <For each={snap().groups}>
+                        {(group, index) => (
+                          <GroupRows
+                            group={group}
+                            inner={inner}
+                            theme={theme}
+                            open={() => openGroupIndex() === index()}
+                            onToggle={() =>
+                              setOpenGroupIndex(
+                                openGroupIndex() === index() ? null : index(),
+                              )
+                            }
+                          />
+                        )}
+                      </For>
+                    </scrollbox>
+                  </Show>
+                </Show>
+              )}
+            </Show>
+          </>
         }
       >
-        {(project) => (
-          <>
-            <Show
-              when={
-                textColumns(
-                  formatHeadlineRow(
-                    project().context,
-                    project().reasoning,
-                    project().cost,
-                  ),
-                ) <= inner()
-              }
-            >
-              <box flexDirection="row">
-                <text fg={SPEND_GOLD}>
-                  {formatHeadline({ totalTokens: project().context })}
-                </text>
-                <text fg={theme().accent}>
-                  {formatThinking(project().reasoning)}
-                </text>
-                <text fg={theme().error}>
-                  {` · ${formatCost(project().cost)}`}
-                </text>
-              </box>
-            </Show>
-            <Show
-              when={
-                textColumns(
-                  breakdownSegments(
-                    project().input,
-                    realOutput(project().output, project().reasoning),
-                    project().cacheRead,
-                    project().cacheWrite,
-                  )
-                    .map((segment) => segment.text)
-                    .join(""),
-                ) <= inner()
-              }
-            >
-              <box flexDirection="row">
-                <For
-                  each={breakdownSegments(
-                    project().input,
-                    realOutput(project().output, project().reasoning),
-                    project().cacheRead,
-                    project().cacheWrite,
-                  )}
-                >
-                  {(segment) => (
-                    <text
-                      fg={segment.accent ? theme().accent : theme().textMuted}
-                    >
-                      {segment.text}
-                    </text>
-                  )}
-                </For>
-              </box>
-            </Show>
-            <ProjectError theme={theme} inner={inner} />
-          </>
-        )}
-      </Show>
-      <Show when={view()} fallback={<text fg={theme().textMuted}>…</text>}>
-        {(snap) => (
-          <>
-            <text fg={theme().accent}>Session</text>
-            <Show
-              when={
-                textColumns(
-                  formatHeadlineRow(
-                    snap().totalTokens,
-                    snap().reasoning,
-                    snap().cost,
-                  ),
-                ) <= inner()
-              }
-            >
-              <box flexDirection="row">
-                <text fg={SPEND_GOLD}>{formatHeadline(snap())}</text>
-                <text fg={theme().accent}>
-                  {formatThinking(snap().reasoning)}
-                </text>
-                <text fg={theme().error}>
-                  {` · ${formatCost(snap().cost)}`}
-                </text>
-              </box>
-            </Show>
-            <Show
-              when={
-                textColumns(
-                  breakdownSegments(
-                    snap().input,
-                    realOutput(snap().output, snap().reasoning),
-                    snap().cacheRead,
-                    snap().cacheWrite,
-                  )
-                    .map((segment) => segment.text)
-                    .join(""),
-                ) <= inner()
-              }
-            >
-              <box flexDirection="row">
-                <For
-                  each={breakdownSegments(
-                    snap().input,
-                    realOutput(snap().output, snap().reasoning),
-                    snap().cacheRead,
-                    snap().cacheWrite,
-                  )}
-                >
-                  {(segment) => (
-                    <text
-                      fg={segment.accent ? theme().accent : theme().textMuted}
-                    >
-                      {segment.text}
-                    </text>
-                  )}
-                </For>
-              </box>
-            </Show>
-            <box flexDirection="row">
-              <text fg={theme().accent}>Subagents</text>
-              {/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI text element, not DOM; click-to-toggle is the TUI interaction model. */}
-              <text
-                fg={theme().text}
-                selectable={false}
-                onMouseDown={() => props.onToggleExpanded()}
-              >
-                {` ${props.expanded() ? GLYPH.collapse : GLYPH.expand}`}
-              </text>
-            </box>
-            <Show when={props.expanded()}>
-              <box flexDirection="row">
-                <text fg={theme().primary}>{formatAgents(snap().agents)}</text>
-                <text fg={theme().success}>
-                  {formatTaskCount(snap().delegations)}
-                </text>
-              </box>
-              <Show
-                when={snap().groups.length >= GROUP_SCROLL_THRESHOLD}
-                fallback={
-                  <For each={snap().groups}>
-                    {(group) => (
-                      <GroupRows group={group} inner={inner} theme={theme} />
-                    )}
-                  </For>
-                }
-              >
-                <scrollbox
-                  height={MAX_SCROLLBOX_ROWS}
-                  scrollY
-                  viewportCulling={false}
-                >
-                  <For each={snap().groups}>
-                    {(group) => (
-                      <GroupRows group={group} inner={inner} theme={theme} />
-                    )}
-                  </For>
-                </scrollbox>
-              </Show>
-            </Show>
-          </>
-        )}
+        <SectionSummary
+          view={masterSummaryView}
+          emptyCopy={masterSummaryEmpty()}
+          theme={theme}
+          inner={inner}
+        />
       </Show>
     </box>
   )

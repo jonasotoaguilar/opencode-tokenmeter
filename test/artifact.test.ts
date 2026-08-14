@@ -56,6 +56,42 @@ describe("production TokenMeter artifact (dist/tui.js)", () => {
     expect(code).not.toMatch(/jsx-runtime/)
   })
 
+  test("REGRESSION: the artifact ships no version literal in the title render path", () => {
+    // The sidebar title is versionless (spec "Resolve version hardcoding";
+    // design: "Remove from title; no literal version in source"). The
+    // shipped bundle must not render a ` 1.0.1`-style literal next to
+    // "TokenMeter", nor reserve title width for one.
+    const code = readFileSync(ARTIFACT_PATH, "utf8")
+    expect(code).not.toContain(" 1.0.1")
+    expect(code).not.toMatch(/textColumns\(" \d+\.\d+\.\d+"/)
+    expect(code).not.toMatch(/createTextNode\(` ?\d+\.\d+\.\d+/)
+  })
+
+  test("the versionless title keeps the reactive bindings", () => {
+    // The stale build removed the version but must never slip back to the
+    // eager-JSX shape that stopped production repainting (file docstring).
+    const code = readFileSync(ARTIFACT_PATH, "utf8")
+    expect(code).toMatch(/effect as _\$effect/)
+    expect(code).toMatch(/_\$insert\(/)
+    expect(code).not.toMatch(/jsxDEV/)
+    expect(code).not.toMatch(/jsx-runtime/)
+  })
+
+  test("the artifact registers the palette command via keymap.registerLayer — no legacy api.command", () => {
+    // Spec: tokenmeter-command-palette — the BUILT artifact must carry the
+    // modern keymap registration (namespace "palette", TokenMeter category,
+    // Settings command) and never fall back to the deprecated api.command
+    // surface or registerExCommands.
+    const code = readFileSync(ARTIFACT_PATH, "utf8")
+    expect(code).toContain("keymap.registerLayer")
+    expect(code).toContain('"palette"')
+    expect(code).toContain("tokenmeter.settings")
+    expect(code).toContain("TokenMeter: Settings")
+    expect(code).toContain('category: "TokenMeter"')
+    expect(code).not.toMatch(/api\.command[.(]/)
+    expect(code).not.toContain("registerExCommands")
+  })
+
   test("exports the TokenMeter TUI plugin module without starting a TUI", async () => {
     // The path is runtime-computed, so TypeScript types this dynamic import
     // as `any` whether or not dist/ exists (a fresh checkout has no build).
@@ -96,15 +132,24 @@ describe("production TokenMeter artifact (dist/tui.js)", () => {
     expect(code).toContain("Subagents")
   })
 
-  test("the artifact ships the new U+E20F task and U+EE9C reasoning glyphs, and no old U+F0CA/U+F0AE/U+EB67 glyphs or generated sum", () => {
+  test("the artifact ships ONLY the disclosure chevrons, and no metric glyphs or old tasklist glyphs", () => {
     const code = readFileSync(ARTIFACT_PATH, "utf8")
-    // Bun's printer normalizes braced source escapes to the short form
-    // (e.g. \u{E20F} → \uE20F); the codepoints must match regardless.
-    expect(code).toContain("\\uE20F")
-    expect(code).toContain("\\uEE9C")
+    // The glyph diet: the disclosure chevrons ▶/▼ (U+25B6/U+25BC) are the
+    // only per-row glyphs; the pre-correction metric glyphs (U+E20F task,
+    // U+EE9C reasoning, U+F0CA/U+F0AE/U+EB67 tasklist era, coins/fire/robot)
+    // must never reach the shipped bundle. Bun's printer normalizes braced
+    // source escapes to the short form (e.g. \u{E20F} → \uE20F); the
+    // codepoints must match regardless.
+    expect(code).toContain("\\u25B6")
+    expect(code).toContain("\\u25BC")
+    expect(code).not.toContain("\\uE20F")
+    expect(code).not.toContain("\\uEE9C")
     expect(code).not.toContain("\\uF0CA")
     expect(code).not.toContain("\\uEB67")
     expect(code).not.toContain("\\uF0AE")
+    expect(code).not.toContain("\\uEDE8")
+    expect(code).not.toContain("\\u{F0238}")
+    expect(code).not.toContain("\\u{F06A9}")
     expect(code).not.toMatch(/generated/)
   })
 

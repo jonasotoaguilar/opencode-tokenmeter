@@ -1,10 +1,10 @@
 # Architecture — opencode-tokenmeter
 
-> **Status**: Approved &nbsp;|&nbsp; **Last updated**: 2026-08-10 &nbsp;|&nbsp; **Author**: jonasotoaguilar
+> **Status**: Approved &nbsp;|&nbsp; **Last updated**: 2026-08-14 &nbsp;|&nbsp; **Author**: jonasotoaguilar
 
 ## System Overview
 
-`opencode-tokenmeter` is an OpenCode TUI plugin that renders a live usage sidebar: per-session token spend, cost, and the delegation tree of the active session. The entry (`src/tokenmeter.tsx`) subscribes to the host's `session`/`message`/`part` events, feeds a reactive usage store, and registers a `sidebar_content` slot (order 95) that renders a collapsible Solid panel. The panel never remounts to repaint: every refresh event invalidates the affected session and schedules a debounced reconcile that rehydrates usage from the authoritative client `session.messages()` endpoint (replace, not merge). A second section aggregates all-time Project usage from `session.list({ scope: "project", limit: 10000 })` — the authoritative live per-session sum, refreshed on every render — plus ONE per-project DELETED-session aggregate persisted in a plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`, never `api.kv`, which concurrent TUIs would clobber). The headline coins total is each session's complete CUMULATIVE TOKEN SPEND — `Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write` across ALL assistant messages, the exact reconstruction of OpenCode's billed `tokens.total` — never lowered by compaction or restarts. The shipped artifact is a bundled ESM file whose reactive bindings are asserted at build time.
+`opencode-tokenmeter` is an OpenCode TUI plugin that renders a live usage sidebar: per-session token spend, cost, and the delegation tree of the active session. The entry (`src/tokenmeter.tsx`) subscribes to the host's `session`/`message`/`part` events, feeds a reactive usage store, and registers a `sidebar_content` slot (order 95) that renders a collapsible Solid panel. The panel never remounts to repaint: every refresh event invalidates the affected session and schedules a debounced reconcile that rehydrates usage from the authoritative client `session.messages()` endpoint (replace, not merge). The panel shows three sections — Project (all-time usage), Session (active session + delegation tree), and Subagents (the per-agent delegation list, hidden until the first group exists) — under a master `▶/▼ TokenMeter` disclosure row; master and per-section disclosure are transient and never written to kv. A second data path aggregates all-time Project usage from `session.list({ scope: "project", limit: 10000 })` — the authoritative live per-session sum, refreshed on every render — plus ONE per-project DELETED-session aggregate persisted in a plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`, never `api.kv`, which concurrent TUIs would clobber). The headline token total is each session's complete CUMULATIVE TOKEN SPEND — `Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write` across ALL assistant messages, the exact reconstruction of OpenCode's billed `tokens.total` — never lowered by compaction or restarts. The plugin also registers two palette-visible commands through the modern keymap API (`api.keymap.registerLayer`, category `TokenMeter`, namespace `palette`): `tokenmeter.settings` opens the settings host `DialogSelect`, and `tokenmeter.toggle-sections` expands/collapses all three sections together with a configurable shortcut (default `Ctrl+E`, persisted in kv, re-registered live on change). The shipped artifact is a bundled ESM file whose reactive bindings are asserted at build time.
 
 ## Architecture Pattern
 
@@ -30,6 +30,7 @@ graph TD
         Kv[("api.kv store")]
         State[("state dir / tokenmeter.sqlite")]
         Slot["sidebar_content slot (order 95)"]
+        Keymap["api.keymap (layers)"]
     end
 
     subgraph "Plugin — opencode-tokenmeter"
@@ -39,6 +40,9 @@ graph TD
         Tree["tree.ts (delegation discovery)"]
         Project["project.ts (project section)"]
         Db["db.ts (sqlite persistence)"]
+        Settings["settings.ts (preferences)"]
+        Sections["sections.ts (transient disclosure)"]
+        Shortcut["shortcut.ts (toggle command + shortcut)"]
         Panel["panel/index.tsx (UsagePanel)"]
         MathFmt["math / numbers / format / text / glyphs"]
     end
@@ -48,6 +52,9 @@ graph TD
     Entry --> Store
     Entry --> Reconcile
     Entry --> Project
+    Entry --> Settings
+    Entry --> Shortcut
+    Entry --> Keymap
     Project --> Db
     Reconcile --> Tree
     Reconcile --> Store
@@ -60,6 +67,11 @@ graph TD
     Entry --> Slot
     Slot --> Panel
     Panel --> MathFmt
+    Panel --> Settings
+    Panel --> Sections
+    Shortcut --> Keymap
+    Shortcut --> Sections
+    Settings --> Kv
 ```
 
 ### Runtime Flow
@@ -111,16 +123,16 @@ erDiagram
     }
 ```
 
-The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`) keeps exactly TWO tables. `projects` holds ONE aggregate row per projectID: the sum of every deleted session's final usage (cost/input/output/reasoning/cacheRead/cacheWrite/cache/context as resolved payload+observed per-component maxima, with `context == input + output + reasoning + cacheRead + cacheWrite`). `tombstones` holds the minimal (sessionID, projectID) exactly-once admission set: a `session.deleted` event opens a `BEGIN IMMEDIATE` transaction, `INSERT OR IGNORE`s its tombstone, and ONLY the transaction that inserted the row increments the aggregate — so duplicate deliveries and concurrent TUIs count each session exactly once, while a delete with no usage never consumes its tombstone. No live session/root snapshot is ever persisted; the authoritative live total is re-read from `session.list` on every refresh. The host kv store (`tokenmeter.sidebar.expanded`) still owns the panel collapse state. The obsolete v4 kv ledger is never read, converted, migrated or written — legacy keys are ignored. Every open/close of the store uses WAL journal mode plus a busy timeout, and every operation is a short transaction, so every TUI process reads the latest committed state.
+The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`) keeps exactly TWO tables. `projects` holds ONE aggregate row per projectID: the sum of every deleted session's final usage (cost/input/output/reasoning/cacheRead/cacheWrite/cache/context as resolved payload+observed per-component maxima, with `context == input + output + reasoning + cacheRead + cacheWrite`). `tombstones` holds the minimal (sessionID, projectID) exactly-once admission set: a `session.deleted` event opens a `BEGIN IMMEDIATE` transaction, `INSERT OR IGNORE`s its tombstone, and ONLY the transaction that inserted the row increments the aggregate — so duplicate deliveries and concurrent TUIs count each session exactly once, while a delete with no usage never consumes its tombstone. No live session/root snapshot is ever persisted; the authoritative live total is re-read from `session.list` on every refresh. The host kv store owns the Subagents section preference (`tokenmeter.sidebar.expanded`), the settings object (`tokenmeter.settings.v1`) and the toggle shortcut (`tokenmeter.toggle.shortcut`); Project/Session section disclosure is transient and never persisted. The obsolete v4 kv ledger is never read, converted, migrated or written — legacy keys are ignored. Every open/close of the store uses WAL journal mode plus a busy timeout, and every operation is a short transaction, so every TUI process reads the latest committed state.
 
 ## Component Details
 
 ### `src/tokenmeter.tsx` — Entry (event composer)
 
 - **Technology**: TypeScript + Solid JSX (`@opentui/solid`), `TuiPlugin` from `@opencode-ai/plugin/tui`.
-- **Responsibility**: Wires every event into the store and the debounced reconcile/project refresh; owns the kv-persisted expanded state; records `session.deleted` into the SQLite store before forgetting the session; starts the single bounded project polling timer; registers the `sidebar_content` slot (order 95) that resolves the sessionID and width and renders `UsagePanel`.
+- **Responsibility**: Wires every event into the store and the debounced reconcile/project refresh; loads the settings and toggle-shortcut preferences once at startup; registers the palette layers — the `tokenmeter.settings` command and the toggle layer — through `api.keymap.registerLayer` with disposers released in `api.lifecycle.onDispose`; records `session.deleted` into the SQLite store before forgetting the session; starts the single bounded project polling timer; registers the `sidebar_content` slot (order 95) that resolves the sessionID and width and renders `UsagePanel`.
 - **Scaling**: N/A (single host process).
-- **Dependencies**: store, reconcile, project, db, tree, panel, text.
+- **Dependencies**: store, reconcile, project, db, tree, panel, settings, shortcut, text.
 - **Failure modes**: every handler is a no-throw subscription; a failing listener cannot break the host turn.
 
 ### `src/tokenmeter/store.ts` — Reactive usage store
@@ -159,15 +171,33 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 - **Dependencies**: `bun:sqlite` (Bun builtin — the build target is Bun), `node:path`, math (entry resolution).
 - **Failure modes**: a missing state directory is a no-op (never a throw); malformed rows are never produced (schema-constrained); the obsolete v4 kv ledger is never read, written or migrated.
 
+### `src/tokenmeter/settings.ts` — Preferences model
+
+- **Responsibility**: Owns the three object-backed preferences (`cache`, `numbers`, `collapsedSummary`) persisted as one versioned whole-object kv entry (`tokenmeter.settings.v1`, ready-gated writes; `persisted()` reports dropped writes) plus the Subagents preference in its durable `tokenmeter.sidebar.expanded` key (never duplicated inside `settings.v1`); sanitizes absent or malformed stored values to per-field defaults without throwing.
+- **Dependencies**: `api.kv` through the structural `SettingsApi` subset.
+- **Failure modes**: kv not ready → the in-memory value updates for the session, no write is issued, `persisted()` flips to `false`; never throws, never produces NaN.
+
+### `src/tokenmeter/sections.ts` — Transient section disclosure
+
+- **Responsibility**: Holds the Project/Session open/closed signals shared between the panel and the `tokenmeter.toggle-sections` command; seeds closed at mount, resets on every session change, never written to kv. `toggleSections` expands all three sections when every one is collapsed and collapses them otherwise (the Subagents change persists through its durable preference; the Project/Session changes stay transient).
+- **Dependencies**: settings.
+- **Failure modes**: none (signals only).
+
+### `src/tokenmeter/shortcut.ts` — Toggle command and shortcut
+
+- **Responsibility**: Owns the durable `tokenmeter.toggle.shortcut` preference (default `ctrl+e`; cycle `ctrl+e` → `ctrl+shift+e` → `ctrl+m` → `off`), registers the keymap layer that binds the shortcut to the palette-visible `tokenmeter.toggle-sections` command (category `TokenMeter`, namespace `palette`), re-registers the layer whenever the preference cycles so the change takes effect live without a restart (`off` drops the binding while the command stays palette-queryable), and releases the current disposer on plugin dispose.
+- **Dependencies**: settings, sections, `api.keymap`.
+- **Failure modes**: registration is idempotent (any previous layer is disposed first); the disposer is a no-op when no layer is registered.
+
 ### `src/tokenmeter/panel/` — UsagePanel module
 
-- **Responsibility**: The rendered panel. `panel/index.tsx` is the stable entry (`UsagePanel`): title row, Project + Session metric sections, Subagents toggle, scrollbox for 3+ groups; activates on mount and on sessionID changes. `panel/group-rows.tsx` renders the per-agent three-row group blocks; `panel/project-section.tsx` renders the Project error line (stable `PROJECT_ERROR_MESSAGE`, truncated to the content width). Every line is measured and truncated to the content width.
-- **Dependencies**: store/project snapshots, format, math, numbers, text, glyphs, reconcile/project activation.
-- **Failure modes**: width-derived `contentWidth` floors at 10; metric rows render only when they fit, so no row overflows.
+- **Responsibility**: The rendered panel. `panel/index.tsx` is the stable entry (`UsagePanel`): the master `▶/▼ TokenMeter` disclosure row (transient, starts expanded; collapsed renders exactly one compact summary from the persisted `collapsedSummary` source), the Project and Session sections through the shared `panel/section.tsx` (heading titles in the semantic yellow `theme().warning`, leading chevrons in the main-text tone, summaries and detail rows nested two columns under the heading), the Subagents section (hidden entirely while zero groups exist; `▶ Subagents (N agents · M tasks)` collapsed / `▼ Subagents` expanded; all groups inside a real scrollbox of viewport 4), and the one-open per-agent accordion in `panel/group-rows.tsx` (`↳ name (N tasks) ▶` / `▼` with the per-agent chevron trailing the header, agent name in `theme().info`, task counts in the detail tone, metric rows indented four columns). `panel/tone.ts` derives the tone hierarchy from the host theme (primary token+cost lines in main text with the `$amount` in light red; secondary rows in a detail tone derived theme-relatively — `textMuted` blended 50% toward `background`). `panel/settings-dialog.tsx` opens the settings host `DialogSelect` (preference rows cycle without recreating the dialog, preserving focus/filter). `panel/project-section.tsx` renders the Project error line (stable `PROJECT_ERROR_MESSAGE`, truncated to the content width). Every line is measured and truncated to the content width.
+- **Dependencies**: store/project snapshots, settings, sections, format, math, numbers, text, glyphs, reconcile/project activation.
+- **Failure modes**: width-derived `contentWidth` floors at 10; rows degrade elastically (never wrap), so no row overflows.
 
 ### `src/tokenmeter/math.ts`, `numbers.ts`, `format.ts`, `text.ts`, `glyphs.ts`, `types.ts` — Pure helpers
 
-- **Responsibility**: `math` = per-message/per-session/per-project aggregation (spend = per-session CUMULATIVE TOKEN SPEND: `Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write` across ALL assistant messages — the exact reconstruction of OpenCode's billed `tokens.total`, verified against a real payload 3167+249+64+66816+0 = 70296 — so cache is never a "latest message" term; every component keeps a per-field high-water so compaction can never lower it and the spend is always >= the cumulative input + real output; raw output and raw reasoning stay separate; displayed output real = output + reasoning computed once); `numbers` = numeric display formatting (`fmtTokens`/`fmtCompact`/`fmtCost` — costs always exactly two decimals); `format` = column-aware line formatters (headline and group totals use the fa-coins glyph; cache renders as `R<read>|W<write>`, omits zero sides, and renders `0` when both sides are zero); `text` = terminal column math and width resolution/clamping (fallback 38, clamp 24–52); `glyphs` = stable monochrome Nerd Font PUA glyphs (fa-coins U+EDE8, oct-database U+F472, md-fire U+F0238, md-robot U+F06A9, codicons tasks U+E20F, reasoning U+EE9C) + Unicode `↳`; `types` = narrow structural types kept local so the bundle never depends on SDK type resolution.
+- **Responsibility**: `math` = per-message/per-session/per-project aggregation (spend = per-session CUMULATIVE TOKEN SPEND: `Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write` across ALL assistant messages — the exact reconstruction of OpenCode's billed `tokens.total`, verified against a real payload 3167+249+64+66816+0 = 70296 — so cache is never a "latest message" term; every component keeps a per-field high-water so compaction can never lower it and the spend is always >= the cumulative input + real output; raw output and raw reasoning stay separate; displayed output real = output + reasoning computed once); `numbers` = numeric display formatting (`fmtTokens`/`fmtCompact`/`fmtCost` — costs always exactly two decimals); `format` = column-aware line formatters (primary token+cost lines render `<total> tokens · $<spend>` with the word `spent` never rendered; labeled secondary rows `input`/`output`/`reason`/`cache` — the reasoning display label is exactly `reason`; cache renders as `R<read>|W<write>` in separated mode, omits zero sides, and renders `0` when both sides are zero; compact = three labeled rows, precise = five single-metric rows); `text` = terminal column math and width resolution/clamping (fallback 38, clamp 24–52); `glyphs` = the disclosure chevrons `▶`/`▼` (U+25B6/U+25BC) and the agent-entry branch `↳` (U+21B3) — plain Unicode, no Nerd Font dependency; `types` = narrow structural types kept local so the bundle never depends on SDK type resolution.
 - **Dependencies**: none between them beyond `types` (format imports numbers).
 - **Failure modes**: none (pure); `num()` coercion keeps malformed payloads from leaking NaN.
 
@@ -183,7 +213,9 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 
 | Store | What it holds | Format | Rationale |
 | --- | --- | --- | --- |
-| Host `api.kv` — `tokenmeter.sidebar.expanded` | Panel collapsed/expanded state | boolean | KV is the host's plugin persistence for this single boolean; survives restarts |
+| Host `api.kv` — `tokenmeter.settings.v1` | The three object-backed preferences (`cache`, `numbers`, `collapsedSummary`) | object | One whole-object write per change, ready-gated; survives restarts |
+| Host `api.kv` — `tokenmeter.sidebar.expanded` | Subagents section preference | boolean | Durable Subagents disclosure; survives restarts |
+| Host `api.kv` — `tokenmeter.toggle.shortcut` | Toggle-sections shortcut preference | string | Default `ctrl+e`; re-registers the keymap layer live on change |
 | Plugin SQLite — `tokenmeter.sqlite` (`projects`, `tombstones`) | ONE deleted-session aggregate row per projectID + (sessionID, projectID) exactly-once tombstones | SQLite (WAL) under `api.state.path.state` | `api.kv` is a whole-file read-modify-write shared by every plugin process: concurrent TUIs would overwrite each other's Project history. SQLite gives atomic per-session admission and cross-process consistency; the live total is never persisted (the list is authoritative) |
 
 ### Consistency & Concurrency
@@ -219,7 +251,7 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 
 ### Maintainability
 
-- Every module has one concern (store / reconcile / tree / groups / project / db / math / format / text / glyphs / types / panel); pure helpers are side-effect free and unit-tested through a fake SDK client.
+- Every module has one concern (store / reconcile / tree / groups / project / db / settings / sections / shortcut / math / format / text / glyphs / types / panel); pure helpers are side-effect free and unit-tested through a fake SDK client.
 - The build embeds its own regression guard; the artifact test re-verifies the shipped bundle independently of source tests.
 - CI runs the full gate set (frozen install, typecheck, coverage, build, test:dist, audit, pack dry-run, Biome) on every PR and on `main`.
 
@@ -237,6 +269,7 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 | Headline = cumulative TOKEN SPEND (Σ input + output + reasoning + cache.read + cache.write per session) | TokenMeter must show cumulative spend, not a context-window: the five-channel sum exactly reconstructs OpenCode's billed `tokens.total` (verified 3167+249+64+66816+0 = 70296 on a real payload) | The OpenCode Context formula (latest-message cache only), which under-reports billed cache tokens |
 | Per-component spend high-water (cost/input/output/reasoning/cacheRead/cacheWrite per-field maxima) | Compaction or a smaller later snapshot can never lower the displayed spend or its breakdown | Single-number context high-water |
 | Agent-type grouping with deterministic ordering | Repeated runs of one agent collapse into one group; ordering is stable | Per-session rows only |
+| Modern keymap API + configurable toggle shortcut | `api.keymap.registerLayer` exposes the commands to the host palette (namespace `palette`, category `TokenMeter`) and binds the toggle shortcut; the kv-persisted preference re-registers the layer live so a change applies without a restart, and `Off` keeps the palette command with no key binding | Legacy `api.command` surface; a fixed hardcoded shortcut; an in-panel settings screen |
 
 ## Failure Modes & Mitigations
 
@@ -249,7 +282,7 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 | Truncated session.list (at the 10_000 cap) | Silent undercount | The refresh fails closed: prior snapshot preserved, stable error surfaced — a partial total never renders |
 | Cross-process kv clobbering / stale reads | Lost or duplicated Project history | Project history lives in plugin-owned SQLite (WAL + busy timeout + short transactions); tombstones make admission exactly-once |
 | Artifact degrades to eager JSX | Panel never repaints (silent) | Build-time assertion + `test/artifact.test.ts` fail the build/CI |
-| Plugin load/dispose mistakes | Leaked timers or broken turn | All signals/timers owned by one `createRoot`; `api.lifecycle.onDispose` disposes everything |
+| Plugin load/dispose mistakes | Leaked timers or broken turn | All signals/timers owned by one `createRoot`; `api.lifecycle.onDispose` disposes everything, including the keymap layer disposers and the toggle layer |
 
 ## ADRs
 

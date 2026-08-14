@@ -19,7 +19,8 @@
  * client list and proves invalidation rehydrates the SAME mounted panel
  * from the authoritative client source. Project-section tests cover the
  * projectID crossing, the failure error line, the collapsed/expanded
- * Subagents row, the chevron position and the 3+ group scrollbox.
+ * Subagents row, the chevron position and the real scrollbox holding ALL
+ * agent groups.
  */
 /** @jsxImportSource @opentui/solid */
 import { describe, expect, test } from "bun:test"
@@ -31,6 +32,9 @@ import { testRender } from "@opentui/solid"
 import { createSignal } from "solid-js"
 import plugin from "../src/tokenmeter"
 import { GLYPH } from "../src/tokenmeter/glyphs"
+import { UsagePanel } from "../src/tokenmeter/panel"
+import { showSettingsDialog } from "../src/tokenmeter/panel/settings-dialog"
+import { detailTone } from "../src/tokenmeter/panel/tone"
 import {
   disposeProjectRefresh,
   projectError,
@@ -45,6 +49,18 @@ import {
   MAINTENANCE_DELAY,
   RECONCILE_DELAY,
 } from "../src/tokenmeter/reconcile"
+import {
+  cycleSubagents,
+  SETTINGS_KV_KEY,
+  SUBAGENTS_KV_KEY,
+  settings,
+  subagentsPref,
+} from "../src/tokenmeter/settings"
+import {
+  TOGGLE_COMMAND_NAME,
+  TOGGLE_SHORTCUT_KV_KEY,
+  toggleShortcut,
+} from "../src/tokenmeter/shortcut"
 import { snapshot, upsertMessageUsage, usageMap } from "../src/tokenmeter/store"
 import { purgeTreeCache } from "../src/tokenmeter/tree"
 import type {
@@ -55,15 +71,16 @@ import type {
 
 const THEME = {
   current: {
-    // Deliberately PINK accent: the spend gold must NOT follow the theme
-    // accent, so the render tests prove the fixed-gold contract is
-    // theme-independent (a theme that maps accent to pink must still render
-    // coin gold spend totals).
+    // Deliberately PINK accent: the main-text/muted metric tones must NOT
+    // follow the theme accent, so the render tests prove the tone contract
+    // is theme-independent (a theme that maps accent to pink must still
+    // render white primary lines and dimmed secondary lines).
     accent: RGBA.fromHex("#ff69b4"),
     // Primary blue mirroring the tokyo-night-dev theme the plugin runs
-    // under (blue #7aa2f7): the agent names, the robot icons and the agents
-    // metric share theme().primary, distinct from the cyan info clock and
-    // the near-white theme().text.
+    // under (blue #7aa2f7): reserved for the palette dialog accent —
+    // agent names use theme().info and metric lines never use it, distinct
+    // from the near-white theme().text (primary lines) and theme().textMuted
+    // (which the detail tone is derived from).
     primary: RGBA.fromHex("#7aa2f7"),
     textMuted: RGBA.fromHex("#a9b1d6"),
     text: RGBA.fromHex("#a8b4dc"),
@@ -71,6 +88,9 @@ const THEME = {
     success: RGBA.fromHex("#00ff88"),
     info: RGBA.fromHex("#00aaff"),
     error: RGBA.fromHex("#ff4500"),
+    // Active background of the tokyo-night-dev theme the plugin runs
+    // under; the detail tone blends textMuted toward it (tone.ts).
+    background: RGBA.fromHex("#1a1b26"),
   },
 }
 
@@ -139,16 +159,234 @@ async function waitForFrameDriven(
   throw new Error("waitForFrameDriven: timed out waiting for frame")
 }
 
+/**
+ * Clicks the disclosure chevron of a section header row (e.g. `▶ Project`)
+ * at its rendered frame coordinates, driving the real `onMouseDown` handler
+ * through the headless renderer's mock mouse. The chevron is the LEFTMOST
+ * glyph of the row (column 0), so the click lands on the first cell.
+ */
+async function clickRowChevron(
+  setup: Awaited<ReturnType<typeof testRender>>,
+  frame: string,
+  rowLabel: string,
+): Promise<void> {
+  const lines = frame.split(/[\r\n]+/)
+  const idx = lines.findIndex((line) => {
+    const trimmed = line.trimEnd()
+    return (
+      trimmed === `${GLYPH.expand} ${rowLabel}` ||
+      trimmed === `${GLYPH.collapse} ${rowLabel}`
+    )
+  })
+  expect(idx).toBeGreaterThanOrEqual(0)
+  const row = lines[idx]
+  if (row === undefined) {
+    throw new Error(`clickRowChevron: row "${rowLabel}" not found in frame`)
+  }
+  await setup.mockMouse.click(0, idx)
+}
+
+/** Counts non-overlapping occurrences of `needle` in a rendered frame. */
+function countOccurrences(frame: string, needle: string): number {
+  return frame.split(needle).length - 1
+}
+
+/**
+ * Clicks a compact agent row (`↳ <name> (<N> tasks) ▶` closed /
+ * `↳ <name> (<N> tasks) ▼` open) at its end column, driving the real
+ * `onMouseDown` detail toggle on the row. The header stays put while open —
+ * only the trailing per-agent chevron flips — and the detail lines appear
+ * below it. The end column counts CODE POINTS (the indent glyphs are single
+ * codepoints, so UTF-16 length equals the rendered cell width here).
+ */
+async function clickAgentRow(
+  setup: Awaited<ReturnType<typeof testRender>>,
+  frame: string,
+  name: string,
+): Promise<void> {
+  const lines = frame.split(/[\r\n]+/)
+  const idx = lines.findIndex((line) => {
+    // Agent rows carry the nested-list leading indent, so the marker match
+    // must tolerate the leading padding; the TRAILING per-agent chevron may
+    // read `▶` (closed) or `▼` (open).
+    const trimmed = line.trim()
+    return (
+      (trimmed.startsWith(`↳ ${name} (`) && trimmed.endsWith(GLYPH.expand)) ||
+      (trimmed.startsWith(`↳ ${name} (`) && trimmed.endsWith(GLYPH.collapse))
+    )
+  })
+  expect(idx).toBeGreaterThanOrEqual(0)
+  const row = lines[idx]
+  if (row === undefined) {
+    throw new Error(`clickAgentRow: agent "${name}" not found in frame`)
+  }
+  const endColumn = [...row.trimEnd()].length - 1
+  await setup.mockMouse.click(endColumn, idx)
+}
+
+/**
+ * Clicks the Subagents global row at its LEFTMOST cell — the disclosure
+ * chevron (`▶ Subagents (…)` / `▼ Subagents`), driving the real
+ * `onMouseDown` cycle-subagents handler through the mock mouse.
+ */
+async function clickSubagentsHeader(
+  setup: Awaited<ReturnType<typeof testRender>>,
+  frame: string,
+): Promise<void> {
+  const lines = frame.split(/[\r\n]+/)
+  const idx = lines.findIndex((line) => {
+    const trimmed = line.trim()
+    return (
+      trimmed.startsWith(`${GLYPH.expand} Subagents`) ||
+      trimmed.startsWith(`${GLYPH.collapse} Subagents`)
+    )
+  })
+  expect(idx).toBeGreaterThanOrEqual(0)
+  await setup.mockMouse.click(0, idx)
+}
+
+/**
+ * Clicks the master disclosure row's LEFTMOST cell — the `▶`/`▼` chevron
+ * (`▶ TokenMeter` / `▼ TokenMeter`, always the first glyph) — driving the
+ * real `onMouseDown` master toggle through the mock mouse.
+ */
+async function clickMasterChevron(
+  setup: Awaited<ReturnType<typeof testRender>>,
+  frame: string,
+): Promise<void> {
+  const lines = frame.split(/[\r\n]+/)
+  const idx = lines.findIndex(
+    (line) =>
+      line.trim().startsWith(`${GLYPH.expand} TokenMeter`) ||
+      line.trim().startsWith(`${GLYPH.collapse} TokenMeter`),
+  )
+  expect(idx).toBeGreaterThanOrEqual(0)
+  await setup.mockMouse.click(0, idx)
+}
+
+/**
+ * Clicks the master disclosure row's TITLE TEXT (column 3 — inside
+ * `TokenMeter`, not the chevron at column 0 nor the right-side Settings
+ * toggle) — the spec's "Chevron OR title-text click MUST toggle".
+ */
+async function clickMasterTitle(
+  setup: Awaited<ReturnType<typeof testRender>>,
+  frame: string,
+): Promise<void> {
+  const lines = frame.split(/[\r\n]+/)
+  const idx = lines.findIndex((line) => line.includes("TokenMeter"))
+  expect(idx).toBeGreaterThanOrEqual(0)
+  await setup.mockMouse.click(3, idx)
+}
+
+/**
+ * Finds the real `ScrollBoxRenderable` of the Subagents list in the
+ * headless renderer tree (the only scrollbox the panel mounts), so tests
+ * can assert its content and drive real scrolling.
+ */
+function findScrollbox(
+  setup: Awaited<ReturnType<typeof testRender>>,
+): ScrollBoxHandle | null {
+  const walk = (node: { getChildren?: () => unknown[] }): unknown => {
+    const kids =
+      typeof node.getChildren === "function" ? node.getChildren() : []
+    for (const kid of kids) {
+      if (
+        kid !== null &&
+        typeof kid === "object" &&
+        (kid as { constructor?: { name?: string } }).constructor?.name ===
+          "ScrollBoxRenderable"
+      )
+        return kid
+      const found = walk(kid as { getChildren?: () => unknown[] })
+      if (found) return found
+    }
+    return null
+  }
+  return walk(setup.renderer.root) as ScrollBoxHandle | null
+}
+
+type ScrollBoxHandle = {
+  getChildren: () => { constructor: { name: string } }[]
+  scrollHeight: number
+  scrollTo: (position: number) => void
+}
+
+/**
+ * Host `api.ui.DialogSelect` stand-in (installed `TuiDialogSelectProps`):
+ * renders the title + one row per option so frames are assertable, and
+ * records the props so tests can drive the REAL `onSelect` wiring. The
+ * production module builds the options from the live settings signals; the
+ * mock only presents them.
+ */
+type DialogOption = { title: string; value: string }
+type DialogSelectMockProps = {
+  title: string
+  options: DialogOption[]
+  onSelect?: (option: DialogOption) => void
+}
+const dialogProps: Array<DialogSelectMockProps> = []
+// Host-side simulation: the real DialogSelect keeps its filter query in
+// component-internal state (its own `store.filter`), never in props — the
+// installed API only exposes the outbound `onFilter`. The mock mirrors that:
+// a per-instance signal whose setter is exposed through this ref so tests
+// can type a query, plus a marker row that renders it. Because the query
+// lives INSIDE the instance, recreating the dialog (replace churn) is the
+// only thing that can reset it.
+const mockDialogSelectApiRef: {
+  current: { setFilter: (query: string) => void } | null
+} = { current: null }
+function MockDialogSelect(props: DialogSelectMockProps) {
+  dialogProps.push(props)
+  const [filter, setFilter] = createSignal("")
+  mockDialogSelectApiRef.current = { setFilter }
+  return (
+    <box flexDirection="column">
+      <text>{props.title}</text>
+      {props.options.map((opt) => (
+        <text>{opt.title}</text>
+      ))}
+      {filter() ? <text>{`[filter: ${filter()}]`}</text> : null}
+    </box>
+  )
+}
+
 async function mountEntry(
   state: MutableApi,
   project: ProjectState = {},
   expanded = true,
+  settingsV1?: Record<string, unknown>,
+  kvReady = true,
 ) {
   const handlers = new Map<string, (event: unknown) => void>()
   const disposes: Array<() => void> = []
+  // Layers registered through the modern keymap API by the entry — the
+  // palette-command seam (spec: tokenmeter-command-palette) plus the
+  // toggle-sections layer (shortcut.ts). The mock stores each layer object
+  // (commands AND bindings) and returns a real unregister disposer.
+  const layers: Array<{
+    commands?: Array<Record<string, unknown>>
+    bindings?: Array<Record<string, unknown>>
+  }> = []
   const kv = new Map<string, unknown>([
     ["tokenmeter.sidebar.expanded", expanded],
   ])
+  if (settingsV1 !== undefined) kv.set("tokenmeter.settings.v1", settingsV1)
+  // Every durable write the panel issues, in order — the no-kv-write probe
+  // for the transient open-group accordion state.
+  const kvWrites: string[] = []
+  // Host `api.ui.dialog` stand-in (installed `TuiDialogStack`): `replace`
+  // stores the render function + the stack-level `onClose` cancel hook (the
+  // host fires it on Escape); `clear` records and empties the stack.
+  const dialogStack: Array<{
+    render: () => unknown
+    onClose?: () => void
+  }> = []
+  // `clears` is exposed through a ref so the counter survives the mock's
+  // closure (the api object outlives the mountEntry scope). `replaces`
+  // counts every `dialog.replace` call the same way.
+  const dialogClearsRef = { value: 0 }
+  const dialogReplacesRef = { value: 0 }
   const [route, setRoute] = createSignal<{
     name: string
     params: Record<string, unknown>
@@ -167,16 +405,45 @@ async function mountEntry(
   const stateDir = mkdtempSync(join(tmpdir(), "tokenmeter-render-"))
   const api = {
     kv: {
-      ready: true,
-      get: (key: string, fallback?: unknown) =>
-        kv.has(key) ? kv.get(key) : fallback,
-      set: (key: string, value: unknown) => void kv.set(key, value),
+      ready: kvReady,
+      get: <Value = unknown>(key: string, fallback?: Value) =>
+        (kv.has(key) ? (kv.get(key) as Value) : fallback) as Value,
+      set: (key: string, value: unknown) => {
+        kvWrites.push(key)
+        void kv.set(key, value)
+      },
     },
     event: {
       on: (type: string, handler: (event: unknown) => void) => {
         handlers.set(type, handler)
         return () => void handlers.delete(type)
       },
+    },
+    keymap: {
+      registerLayer: (layer: {
+        commands?: Array<Record<string, unknown>>
+        bindings?: Array<Record<string, unknown>>
+      }) => {
+        layers.push(layer)
+        return () => {
+          const index = layers.indexOf(layer)
+          if (index >= 0) layers.splice(index, 1)
+        }
+      },
+    },
+    ui: {
+      dialog: {
+        replace: (render: () => unknown, onClose?: () => void) => {
+          dialogReplacesRef.value++
+          dialogStack.length = 0
+          dialogStack.push({ render, onClose })
+        },
+        clear: () => {
+          dialogClearsRef.value++
+          dialogStack.length = 0
+        },
+      },
+      DialogSelect: MockDialogSelect,
     },
     lifecycle: {
       onDispose: (fn: () => void) => {
@@ -234,6 +501,14 @@ async function mountEntry(
     handlers.get(type)?.({ type, properties })
   return {
     fire,
+    api,
+    kvWrites,
+    layers,
+    dialog: {
+      stack: dialogStack,
+      clears: () => dialogClearsRef.value,
+      replaces: () => dialogReplacesRef.value,
+    },
     slot: slot as NonNullable<typeof slot>,
     setRoute,
     dispose: () => {
@@ -291,10 +566,10 @@ describe("render-level live refresh", () => {
     // placeholder survives anywhere in the frame.
     await waitFor(() => projectSnapshot() !== null)
     await setup.waitForFrame(
-      (frame) => frame.includes("41.0k") && !frame.includes("…"),
+      (frame) => frame.includes("41K tokens") && !frame.includes("…"),
     )
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("41.0k")
+    expect(frame).toContain("41K tokens · $0.01")
     expect(frame).toContain("Session")
     expect(frame).not.toContain("Sessions")
     expect(frame).not.toContain("…")
@@ -328,7 +603,7 @@ describe("render-level live refresh", () => {
         height: 20,
       },
     )
-    await setupA.waitForFrame((frame) => frame.includes("41.0k"))
+    await setupA.waitForFrame((frame) => frame.includes("41K tokens"))
 
     // Switching chats changes the route; the plugin's route effect must
     // reactivate the new root WITHOUT any event and without remounting the
@@ -344,7 +619,7 @@ describe("render-level live refresh", () => {
         height: 20,
       },
     )
-    await setupB.waitForFrame((frame) => frame.includes("705.0k"))
+    await setupB.waitForFrame((frame) => frame.includes("705K tokens"))
     disposeReconcile()
     dispose()
   }, 20000)
@@ -370,7 +645,7 @@ describe("render-level live refresh", () => {
       },
     )
     await waitFor(() => snapshot()?.rootID === rootID)
-    await setup.waitForFrame((frame) => frame.includes("41.0k"))
+    await setup.waitForFrame((frame) => frame.includes("41K tokens"))
 
     // The session grows while open: a patch tool completes and a new message
     // with higher context lands. The part event must invalidate and rehydrate
@@ -389,10 +664,10 @@ describe("render-level live refresh", () => {
       },
     })
     await waitFor(() => snapshot()?.totalTokens === 746000)
-    await setup.waitForFrame((frame) => frame.includes("746.0k"))
+    await setup.waitForFrame((frame) => frame.includes("746K tokens"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("746.0k")
-    expect(after).not.toContain("41.0k")
+    expect(after).toContain("746K tokens")
+    expect(after).not.toContain("41K tokens")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -425,7 +700,7 @@ describe("render-level live refresh", () => {
     await waitFor(() => projectSnapshot() !== null)
     await setup.renderOnce()
     const before = setup.captureCharFrame()
-    expect(before).toContain("41.0k")
+    expect(before).toContain("41K tokens · $0.01")
     expect(before).not.toContain("…")
 
     // The final message.updated is MISSED (simulated): only the current
@@ -437,10 +712,10 @@ describe("render-level live refresh", () => {
     ]
     fire("session.idle", { sessionID: rootID })
     await waitFor(() => snapshot()?.totalTokens === 746000)
-    await setup.waitForFrame((frame) => frame.includes("746.0k"))
+    await setup.waitForFrame((frame) => frame.includes("746K tokens"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("746.0k")
-    expect(after).not.toContain("41.0k")
+    expect(after).toContain("746K tokens")
+    expect(after).not.toContain("41K tokens")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -474,7 +749,7 @@ describe("render-level live refresh", () => {
     await waitFor(
       () => snapshot()?.rootID === rootID && snapshot()?.totalTokens === 41000,
     )
-    await setup.waitForFrame((frame) => frame.includes("41.0k"))
+    await setup.waitForFrame((frame) => frame.includes("41K tokens"))
 
     // The session updates while open, but the TUI's in-memory mirror LAGS:
     // it still holds the old one-message list while the client is fresh.
@@ -494,10 +769,10 @@ describe("render-level live refresh", () => {
       },
     })
     await waitFor(() => snapshot()?.totalTokens === 746000)
-    await setup.waitForFrame((frame) => frame.includes("746.0k"))
+    await setup.waitForFrame((frame) => frame.includes("746K tokens"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("746.0k")
-    expect(after).not.toContain("41.0k")
+    expect(after).toContain("746K tokens")
+    expect(after).not.toContain("41K tokens")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -561,7 +836,7 @@ describe("render-level live refresh", () => {
       info: { id: childID, sessionID: childID, parentID: rootID },
     })
     await waitFor(() => snapshot()?.totalTokens === 74500)
-    await setup.waitForFrame((frame) => frame.includes("74.5k"))
+    await setup.waitForFrame((frame) => frame.includes("75K tokens"))
     expect(snapshot()?.totalTokens).toBe(74500)
     expect(snapshot()?.cache).toBe(20000)
     expect(snapshot()?.cacheRead).toBe(20000)
@@ -624,7 +899,7 @@ describe("render-level live refresh", () => {
       info: { id: childID, projectID: "proj_test" },
     })
     await waitFor(() => projectSnapshot()?.context === 54500)
-    expect(setup.captureCharFrame()).toContain("54.5k")
+    expect(setup.captureCharFrame()).toContain("55K tokens")
     expect(projectSnapshot()?.context).not.toBe(6000)
     disposeReconcile()
     dispose()
@@ -657,7 +932,7 @@ describe("render-level live refresh", () => {
       },
     )
     await waitFor(() => snapshot()?.rootID === rootID)
-    await setup.waitForFrame((frame) => frame.includes("41.0k"))
+    await setup.waitForFrame((frame) => frame.includes("41K tokens"))
 
     // The child is created while still invisible to client.session.children,
     // and the event carries NO parentID: the whole tree cache is purged, but
@@ -678,9 +953,9 @@ describe("render-level live refresh", () => {
     expect(snapshot()!.delegations).toBe(0)
     expect(snapshot()?.totalTokens).toBe(41000)
     const stuck = setup.captureCharFrame()
-    expect(stuck).toContain("41.0k")
-    expect(stuck).not.toContain("51.5k")
-    expect(stuck).not.toContain("↳")
+    expect(stuck).toContain("41K tokens · $0.01")
+    expect(stuck).not.toContain("52K tokens")
+    expect(stuck).not.toContain("(1 task)")
 
     // The 2s maintenance tick purges the tree cache and re-discovers the
     // child: the SAME mounted panel now sums child tokens and shows one
@@ -691,11 +966,10 @@ describe("render-level live refresh", () => {
         snapshot()?.totalTokens === 41000 + 10500,
       6000,
     )
-    await setup.waitForFrame((frame) => frame.includes("51.5k"))
+    await setup.waitForFrame((frame) => frame.includes("52K tokens"))
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("51.5k")
-    expect(frame).toContain(GLYPH.tasks + "  1")
-    expect(frame).toContain("↳")
+    expect(frame).toContain("52K tokens · $0.02")
+    expect(frame).toContain(`↳ sdd-apply (1 task) ${GLYPH.expand}`)
 
     // Cleanup is exercised: disposal clears the maintenance timer, so the
     // snapshot object stays put across another maintenance window.
@@ -703,129 +977,6 @@ describe("render-level live refresh", () => {
     const settled = snapshot()
     await sleep(MAINTENANCE_DELAY + 200)
     expect(snapshot()).toBe(settled)
-    dispose()
-  }, 20000)
-
-  test("REGRESSION: expanded groups render exactly three rows — indented name + task count, indented context + thinking + cost, indented three-value breakdown", async () => {
-    const rootID = "ses_groups_render"
-    const childID = "ses_child_render"
-    const state: MutableApi = {
-      sessions: {
-        [rootID]: [
-          msg("r1", rootID, { input: 5000, output: 500, total: 6000 }, 0.01),
-        ],
-        [childID]: [msg("c1", childID, { input: 10000, output: 500 }, 0.005)],
-      },
-      children: {
-        [rootID]: [
-          {
-            id: childID,
-            agent: "sdd-apply",
-            title: "fix (@sdd-apply subagent)",
-          },
-        ],
-      },
-      metas: {
-        [rootID]: { id: rootID, title: "Root" },
-        [childID]: { id: childID, agent: "sdd-apply" },
-      },
-    }
-    purgeTreeCache()
-    const { fire, slot, dispose } = await mountEntry(state)
-    const setup = await testRender(
-      () => slot({ theme: THEME, width: 52 }, { session_id: rootID }) as never,
-      {
-        width: 60,
-        height: 20,
-      },
-    )
-    await waitFor(() => snapshot()?.rootID === rootID)
-    fire("session.idle", { sessionID: rootID })
-    await waitFor(() => snapshot()!.groups.length === 1)
-    await setup.waitForFrame((frame) => frame.includes("↳"))
-    const frame = setup.captureCharFrame()
-    expect(frame).toContain("Session")
-    expect(frame).not.toContain("Sessions")
-    // The expanded dropdown keeps the Subagents row and the agents/task
-    // metrics row; per-agent task counts live on group row 1.
-    expect(frame).toContain("Subagents")
-    // Row 1: indented tree marker + blue robot + two spaces + agent name + green task count.
-    expect(frame).toContain(
-      `  ↳ ${GLYPH.robot}  sdd-apply · ${GLYPH.tasks}  1 task`,
-    )
-    // Row 2: four-space indent + fixed-gold spend + accent thinking + error cost.
-    expect(frame).toContain(
-      "    " +
-        GLYPH.coins +
-        "  10.5k · " +
-        GLYPH.reasoning +
-        "  0 · " +
-        GLYPH.fire +
-        " $0.01",
-    )
-    // Row 3: four-space indent + the three-value breakdown (output real = output + reasoning, cache pair both zero).
-    expect(frame).toContain(
-      "    " +
-        GLYPH.up +
-        " 10k · " +
-        GLYPH.down +
-        " 500 · " +
-        GLYPH.cache +
-        "  0",
-    )
-    // Session rows: headline spend · thinking · cost; three-value breakdown.
-    expect(frame).toContain(
-      GLYPH.coins +
-        "  16.0k · " +
-        GLYPH.reasoning +
-        "  0 · " +
-        GLYPH.fire +
-        " $0.02",
-    )
-    expect(frame).toContain(
-      GLYPH.up + " 15k · " + GLYPH.down + " 1k · " + GLYPH.cache + "  0",
-    )
-    // Exactly three visual rows per group, in order: row 1 (robot + name +
-    // tasks), row 2 (spend + thinking + cost), row 3 (the three metrics).
-    const lines = frame
-      .split(/[\r\n]+/)
-      .filter((line) => line.trim().length > 0)
-    const idx = lines.findIndex((line) => line.includes("↳"))
-    expect(idx).toBeGreaterThanOrEqual(0)
-    expect(lines[idx].trimEnd()).toBe(
-      `  ↳ ${GLYPH.robot}  sdd-apply · ${GLYPH.tasks}  1 task`,
-    )
-    expect(lines[idx + 1].trimEnd()).toBe(
-      "    " +
-        GLYPH.coins +
-        "  10.5k · " +
-        GLYPH.reasoning +
-        "  0 · " +
-        GLYPH.fire +
-        " $0.01",
-    )
-    expect(lines[idx + 2].trimEnd()).toBe(
-      "    " +
-        GLYPH.up +
-        " 10k · " +
-        GLYPH.down +
-        " 500 · " +
-        GLYPH.cache +
-        "  0",
-    )
-    expect(lines.length).toBe(idx + 3)
-    // The spend totals in the frame are coin gold, the thinking values are
-    // the pink theme accent — the fixed gold rides no theme role.
-    const spans = setup.captureSpans().lines.flatMap((line) => line.spans)
-    const gold = rgbToHex(RGBA.fromHex("#D4AF37"))
-    const pink = rgbToHex(RGBA.fromHex("#ff69b4"))
-    const coins = spans.filter((span) => span.text.includes(GLYPH.coins))
-    expect(coins.length).toBeGreaterThanOrEqual(1)
-    for (const span of coins) expect(rgbToHex(span.fg)).toBe(gold)
-    const thinking = spans.filter((span) => span.text.includes(GLYPH.reasoning))
-    expect(thinking.length).toBeGreaterThanOrEqual(1)
-    for (const span of thinking) expect(rgbToHex(span.fg)).toBe(pink)
-    disposeReconcile()
     dispose()
   }, 20000)
 })
@@ -902,25 +1053,21 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
     )
     await waitFor(() => projectSnapshot()?.sessions === 2)
     await waitFor(() => snapshot()?.rootID === rootID)
-    await setup.waitForFrame((frame) => frame.includes("5k"))
+    await setup.waitForFrame((frame) => frame.includes("5K tokens"))
+    // The Project detail is collapsed by default (compact): expand it so the
+    // labeled metric lines can be pinned below.
+    await clickRowChevron(setup, setup.captureCharFrame(), "Project")
+    await waitForFrameDriven(setup, (frame) => frame.includes("3K input"))
     const frame = setup.captureCharFrame()
     expect(frame).toContain("Project")
     expect(frame.indexOf("Project")).toBeLessThan(frame.indexOf("Session"))
-    // Project headline: complete per-session spend per session — Σ input +
-    // raw output + raw reasoning + Σ cache.read + Σ cache.write when
-    // observed (ps1: 1850, ps2: 3000) · thinking · cost.
-    expect(frame).toContain(
-      GLYPH.coins +
-        "  4.8k · " +
-        GLYPH.reasoning +
-        "  500 · " +
-        GLYPH.fire +
-        " $0.03",
-    )
-    // Project breakdown: input · output real · cache R|W.
-    expect(frame).toContain(
-      GLYPH.up + " 3k · " + GLYPH.down + " 2k · " + GLYPH.cache + "  R100|W50",
-    )
+    // Project detail: L1 exactly once — Σ input + raw output + raw reasoning
+    // + Σ cache.read + Σ cache.write when observed (ps1: 1850, ps2: 3000) ·
+    // two-decimal spend; then the two labeled metric lines (real output =
+    // raw output + raw reasoning; combined cache 150).
+    expect(frame).toContain("5K tokens · $0.03")
+    expect(frame).toContain("3K input · 2K output")
+    expect(frame).toContain("500 reason · 150 cache")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -946,7 +1093,7 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
       },
     )
     await waitFor(() => snapshot()?.rootID === rootID)
-    await setup.waitForFrame((frame) => frame.includes("41.0k"))
+    await setup.waitForFrame((frame) => frame.includes("41K tokens"))
     // Give the debounced (300ms) failed project refresh time to run, then
     // drive the repaint: the section must surface a visible error line in
     // theme().error with ONLY the stable message — the `…` placeholder is
@@ -966,7 +1113,7 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
     expect(frame).not.toContain("undefined is not an object")
     expect(frame).not.toContain("…")
     expect(frame).toContain("Session")
-    expect(frame).toContain("41.0k")
+    expect(frame).toContain("41K tokens · $0.01")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -1035,7 +1182,7 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
     // (ps1's complete context includes its 150 cache: 1850 + 3000). Live
     // sessions are never persisted — the list is the live source.
     await waitFor(() => projectSnapshot()?.sessions === 2)
-    await setup.waitForFrame((frame) => frame.includes("5k"))
+    await setup.waitForFrame((frame) => frame.includes("5K tokens"))
     // The delete lands while project.current() starts failing (the transient
     // context gap right after a delete). The delete handler records ps1 into
     // the SQLite deleted aggregate BEFORE the refresh and passes projectID
@@ -1050,170 +1197,12 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
     expect(projectSnapshot()?.sessions).toBe(2)
     expect(projectSnapshot()?.context).toBe(4850)
     expect(projectError()).toBeNull()
-    await waitForFrameDriven(setup, (frame) => frame.includes("5k"))
+    await waitForFrameDriven(setup, (frame) => frame.includes("5K tokens"))
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("5k")
+    expect(frame).toContain("5K tokens")
     expect(frame).not.toContain("Unable to load project data")
     disposeReconcile()
     dispose()
-  }, 20000)
-
-  test("collapsed shows ONLY the Subagents toggle row; expanded adds the agents/task metrics row above the groups", async () => {
-    const rootID = "ses_collapse_row"
-    const childID = "ses_collapse_child"
-    const state: MutableApi = {
-      sessions: {
-        [rootID]: [
-          msg("r1", rootID, { input: 5000, output: 500, total: 6000 }, 0.01),
-        ],
-        [childID]: [msg("c1", childID, { input: 10000, output: 500 }, 0.005)],
-      },
-      children: { [rootID]: [{ id: childID, agent: "sdd-apply" }] },
-      metas: {
-        [rootID]: { id: rootID, title: "Root" },
-        [childID]: { id: childID, agent: "sdd-apply" },
-      },
-    }
-    purgeTreeCache()
-    const collapsed = await mountEntry(state, {}, false)
-    const setupCollapsed = await testRender(
-      () => collapsed.slot({ theme: THEME }, { session_id: rootID }) as never,
-      {
-        width: 60,
-        height: 20,
-      },
-    )
-    await waitFor(
-      () => snapshot()?.rootID === rootID && snapshot()!.delegations === 1,
-    )
-    await setupCollapsed.waitForFrame((frame) => frame.includes("Subagents"))
-    const collapsedFrame = setupCollapsed.captureCharFrame()
-    // Clean title: no leading gap (flush left like Project/Session), no
-    // chevron, and the chevron lives after Subagents instead.
-    expect(collapsedFrame).toContain("TokenMeter 1.0.1")
-    expect(collapsedFrame).not.toContain(GLYPH.expand + " TokenMeter")
-    // Minimized shows only the Subagents row with the chevron right after
-    // the label (one visible space); no robot/count/task metrics, no group rows.
-    expect(collapsedFrame).toContain("Subagents " + GLYPH.expand)
-    expect(collapsedFrame).not.toContain(GLYPH.robot)
-    expect(collapsedFrame).not.toContain(GLYPH.tasks)
-    expect(collapsedFrame).not.toContain("task")
-    expect(collapsedFrame).not.toContain("↳")
-    disposeReconcile()
-    collapsed.dispose()
-
-    purgeTreeCache()
-    const expanded = await mountEntry(state, {}, true)
-    const setupExpanded = await testRender(
-      () => expanded.slot({ theme: THEME }, { session_id: rootID }) as never,
-      {
-        width: 60,
-        height: 20,
-      },
-    )
-    await waitFor(
-      () => snapshot()?.rootID === rootID && snapshot()!.delegations === 1,
-    )
-    await setupExpanded.waitForFrame((frame) => frame.includes("↳"))
-    const expandedFrame = setupExpanded.captureCharFrame()
-    expect(expandedFrame).not.toContain(GLYPH.collapse + " TokenMeter")
-    // The Subagents row is kept, with the collapse chevron right after it.
-    expect(expandedFrame).toContain("Subagents " + GLYPH.collapse)
-    // The metrics row renders the lowercase agents counter and the global
-    // task count; the group rows follow below.
-    expect(expandedFrame).toContain(
-      GLYPH.robot + "  1 agents · " + GLYPH.tasks + "  1 task",
-    )
-    expect(expandedFrame).toContain("↳")
-    expect(expandedFrame).toContain(GLYPH.tasks + "  1 task")
-    disposeReconcile()
-    expanded.dispose()
-  }, 20000)
-
-  test("with 3+ groups the panel wraps the groups in a scrollbox capped at 2 groups; fewer groups render inline", async () => {
-    const rootID = "ses_scroll"
-    const c1 = "ses_scroll_1"
-    const c2 = "ses_scroll_2"
-    const c3 = "ses_scroll_3"
-    const makeState = (): MutableApi => ({
-      sessions: {
-        [rootID]: [msg("r1", rootID, { input: 1000, output: 100 }, 0.001)],
-        [c1]: [msg("a1", c1, { input: 4000, output: 200 })],
-        [c2]: [msg("b1", c2, { input: 6000, output: 300 })],
-        [c3]: [msg("d1", c3, { input: 10000, output: 400 })],
-      },
-      children: {
-        [rootID]: [
-          { id: c1, agent: "general" },
-          { id: c2, agent: "explore" },
-          { id: c3, agent: "build" },
-        ],
-      },
-      metas: {
-        [rootID]: { id: rootID, title: "Root" },
-        [c1]: { id: c1, agent: "general" },
-        [c2]: { id: c2, agent: "explore" },
-        [c3]: { id: c3, agent: "build" },
-      },
-    })
-    purgeTreeCache()
-    const three = await mountEntry(makeState())
-    const setupThree = await testRender(
-      () => three.slot({ theme: THEME }, { session_id: rootID }) as never,
-      {
-        width: 60,
-        height: 20,
-      },
-    )
-    await waitFor(
-      () => snapshot()?.rootID === rootID && snapshot()!.groups.length === 3,
-    )
-    await setupThree.waitForFrame((frame) => frame.includes("↳"))
-    const threeFrame = setupThree.captureCharFrame()
-    // The scrollbox shows at most two groups (six rows): the two largest
-    // (build, then explore by context) are visible; the third is clipped.
-    expect(threeFrame).toContain("build")
-    expect(threeFrame).toContain("explore")
-    expect(threeFrame).not.toContain("general")
-    disposeReconcile()
-    three.dispose()
-
-    purgeTreeCache()
-    const two = await mountEntry({
-      sessions: {
-        [rootID]: [msg("r1", rootID, { input: 1000, output: 100 }, 0.001)],
-        [c1]: [msg("a1", c1, { input: 4000, output: 200 })],
-        [c2]: [msg("b1", c2, { input: 6000, output: 300 })],
-      },
-      children: {
-        [rootID]: [
-          { id: c1, agent: "general" },
-          { id: c2, agent: "explore" },
-        ],
-      },
-      metas: {
-        [rootID]: { id: rootID, title: "Root" },
-        [c1]: { id: c1, agent: "general" },
-        [c2]: { id: c2, agent: "explore" },
-      },
-    })
-    const setupTwo = await testRender(
-      () => two.slot({ theme: THEME }, { session_id: rootID }) as never,
-      {
-        width: 60,
-        height: 20,
-      },
-    )
-    await waitFor(
-      () => snapshot()?.rootID === rootID && snapshot()!.groups.length === 2,
-    )
-    await setupTwo.waitForFrame((frame) => frame.includes("↳"))
-    const twoFrame = setupTwo.captureCharFrame()
-    // Fewer than 3 groups: no scrollbox, every group visible.
-    expect(twoFrame).toContain("explore")
-    expect(twoFrame).toContain("general")
-    disposeReconcile()
-    two.dispose()
   }, 20000)
 
   test("REGRESSION: with no snapshot while the project refresh runs, the panel shows the static `…` placeholder — no spinner frames ever render — then the data once it lands", async () => {
@@ -1254,7 +1243,7 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
     // and no loading character is left anywhere in the frame.
     await waitForFrameDriven(
       setup,
-      (frame) => !frame.includes("…") && frame.includes("41.0k"),
+      (frame) => !frame.includes("…") && frame.includes("41K tokens"),
     )
     const settled = setup.captureCharFrame()
     for (const ch of spinnerChars) expect(settled).not.toContain(ch)
@@ -1311,9 +1300,9 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
     })
     await waitFor(() => projectSnapshot()?.sessions === 1)
     expect(projectSnapshot()?.context).toBe(1700)
-    await setup.waitForFrame((frame) => frame.includes("1.7k"))
+    await setup.waitForFrame((frame) => frame.includes("2K tokens"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("1.7k")
+    expect(after).toContain("2K tokens · $0.01")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -1342,7 +1331,7 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
       },
     )
     await waitFor(() => snapshot()?.totalTokens === 103000)
-    await setup.waitForFrame((frame) => frame.includes("103.0k"))
+    await setup.waitForFrame((frame) => frame.includes("103K tokens"))
 
     // The r2 message disappears from the client; message.removed must
     // invalidate and remove the stored usage so the next reconcile
@@ -1359,12 +1348,16 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
     await waitFor(() => usageMap(rootID).size === 1)
     expect(snapshot()?.input).toBe(100000)
     expect(snapshot()?.totalTokens).toBe(103000)
-    await setup.waitForFrame(
-      (frame) => frame.includes("103.0k") && frame.includes("↑ 100k"),
+    // The breakdown row lives in the collapsed-by-default detail: expand the
+    // session so the cumulative input high-water is visible in the frame.
+    await clickRowChevron(setup, setup.captureCharFrame(), "Session")
+    await waitForFrameDriven(
+      setup,
+      (frame) => frame.includes("103K tokens") && frame.includes("100K input"),
     )
     const after = setup.captureCharFrame()
-    expect(after).toContain("103.0k")
-    expect(after).toContain("↑ 100k")
+    expect(after).toContain("103K tokens · $0.03")
+    expect(after).toContain("100K input")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -1390,7 +1383,7 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
       },
     )
     await waitFor(() => snapshot()?.totalTokens === 41000)
-    await setup.waitForFrame((frame) => frame.includes("41.0k"))
+    await setup.waitForFrame((frame) => frame.includes("41K tokens"))
 
     // The client grows, but a non-idle status must NOT invalidate: the next
     // reconcile keeps the cheap in-memory mirror (42.0k) instead of forcing
@@ -1402,16 +1395,16 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
     fire("session.status", { sessionID: rootID, status: { type: "running" } })
     await sleep(50)
     expect(snapshot()?.totalTokens).toBe(41000)
-    expect(setup.captureCharFrame()).toContain("41.0k")
+    expect(setup.captureCharFrame()).toContain("41K tokens · $0.01")
 
     // The idle status invalidates: the mounted panel rehydrates from the
     // authoritative client and repaints with the new total.
     fire("session.status", { sessionID: rootID, status: { type: "idle" } })
     await waitFor(() => snapshot()?.totalTokens === 746000)
-    await setup.waitForFrame((frame) => frame.includes("746.0k"))
+    await setup.waitForFrame((frame) => frame.includes("746K tokens"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("746.0k")
-    expect(after).not.toContain("41.0k")
+    expect(after).toContain("746K tokens")
+    expect(after).not.toContain("41K tokens")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -1437,7 +1430,7 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
       },
     )
     await waitFor(() => snapshot()?.totalTokens === 41000)
-    await setup.waitForFrame((frame) => frame.includes("41.0k"))
+    await setup.waitForFrame((frame) => frame.includes("41K tokens"))
 
     state.sessions[rootID] = [
       msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
@@ -1445,10 +1438,10 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
     ]
     fire("session.compacted", { sessionID: rootID })
     await waitFor(() => snapshot()?.totalTokens === 746000)
-    await setup.waitForFrame((frame) => frame.includes("746.0k"))
+    await setup.waitForFrame((frame) => frame.includes("746K tokens"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("746.0k")
-    expect(after).not.toContain("41.0k")
+    expect(after).toContain("746K tokens")
+    expect(after).not.toContain("41K tokens")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -1474,7 +1467,7 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
       },
     )
     await waitFor(() => snapshot()?.totalTokens === 41000)
-    await setup.waitForFrame((frame) => frame.includes("41.0k"))
+    await setup.waitForFrame((frame) => frame.includes("41K tokens"))
 
     // With a sessionID the session is invalidated and rehydrated from the
     // client; the panel must never blank out on an error event.
@@ -1484,13 +1477,13 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
     ]
     fire("session.error", { sessionID: rootID })
     await waitFor(() => snapshot()?.totalTokens === 746000)
-    await setup.waitForFrame((frame) => frame.includes("746.0k"))
+    await setup.waitForFrame((frame) => frame.includes("746K tokens"))
     // Without a sessionID the handler still schedules a refresh and the
     // mounted panel keeps its data.
     fire("session.error", {})
     await sleep(50)
     expect(snapshot()?.totalTokens).toBe(746000)
-    expect(setup.captureCharFrame()).toContain("746.0k")
+    expect(setup.captureCharFrame()).toContain("746K tokens")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -1516,7 +1509,7 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
       },
     )
     await waitFor(() => snapshot()?.totalTokens === 41000)
-    await setup.waitForFrame((frame) => frame.includes("41.0k"))
+    await setup.waitForFrame((frame) => frame.includes("41K tokens"))
 
     state.sessions[rootID] = [
       msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
@@ -1524,10 +1517,10 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
     ]
     fire("message.part.removed", { sessionID: rootID, messageID: "r2" })
     await waitFor(() => snapshot()?.totalTokens === 746000)
-    await setup.waitForFrame((frame) => frame.includes("746.0k"))
+    await setup.waitForFrame((frame) => frame.includes("746K tokens"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("746.0k")
-    expect(after).not.toContain("41.0k")
+    expect(after).toContain("746K tokens")
+    expect(after).not.toContain("41K tokens")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -1615,7 +1608,7 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
       },
     )
     await waitFor(() => projectSnapshot()?.sessions === 1)
-    await setup.waitForFrame((frame) => frame.includes("1.7k"))
+    await setup.waitForFrame((frame) => frame.includes("2K tokens"))
 
     // The project's session list changes (a session of another worktree
     // joins); both project events must schedule a refresh so the section
@@ -1636,7 +1629,7 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
     ]
     fire("project.updated", {})
     await waitFor(() => projectSnapshot()?.sessions === 2)
-    await setup.waitForFrame((frame) => frame.includes("5k"))
+    await setup.waitForFrame((frame) => frame.includes("5K tokens"))
 
     project.sessions = [
       {
@@ -1660,9 +1653,2268 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
     ]
     fire("project.directories.updated", {})
     await waitFor(() => projectSnapshot()?.sessions === 3)
-    await setup.waitForFrame((frame) => frame.includes("9.0k"))
+    await setup.waitForFrame((frame) => frame.includes("9K tokens"))
     const after = setup.captureCharFrame()
-    expect(after).toContain("9.0k")
+    expect(after).toContain("9K tokens")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+})
+
+describe("progressive disclosure (compact default, independent detail, empty vs loading, cache modes)", () => {
+  const sessionState = (rootID: string): MutableApi => ({
+    sessions: {
+      [rootID]: [
+        msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+      ],
+    },
+    children: {},
+    metas: { [rootID]: { id: rootID, title: "Root" } },
+  })
+
+  const projectWithSessions: ProjectState = {
+    current: { id: "proj_disc", worktree: "/wt" },
+    sessions: [
+      {
+        id: "ps1",
+        projectID: "proj_disc",
+        cost: 0.01,
+        tokens: {
+          input: 1000,
+          output: 500,
+          reasoning: 200,
+          cache: { read: 100, write: 50 },
+        },
+      },
+      {
+        id: "ps2",
+        projectID: "proj_disc",
+        cost: 0.02,
+        tokens: { input: 2000, output: 700, reasoning: 300 },
+      },
+    ],
+  }
+
+  const seedProjectUsage = () => {
+    upsertMessageUsage(
+      msg(
+        "pm1",
+        "ps1",
+        {
+          input: 1000,
+          output: 500,
+          reasoning: 200,
+          cache: { read: 100, write: 50 },
+        },
+        0.01,
+      ),
+    )
+    upsertMessageUsage(
+      msg("pm2", "ps2", { input: 2000, output: 700, reasoning: 300 }, 0.02),
+    )
+  }
+
+  test("compact default: one summary row per section, no detail rows, no version literal", async () => {
+    const rootID = "ses_compact_default"
+    purgeTreeCache()
+    seedProjectUsage()
+    const { slot, dispose } = await mountEntry(
+      sessionState(rootID),
+      projectWithSessions,
+    )
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      {
+        width: 60,
+        height: 20,
+      },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitFor(() => projectSnapshot() !== null)
+    await waitForFrameDriven(
+      setup,
+      (frame) => frame.includes("5K") && frame.includes("41K"),
+    )
+    const frame = setup.captureCharFrame()
+    // Title carries no version literal.
+    expect(frame).toContain("TokenMeter")
+    expect(frame).not.toContain("1.0.1")
+    // One compact summary row per section: the elastic L1 labeled line
+    // (total tokens · two-decimal spend, `$`-prefixed).
+    expect(frame).toContain("5K tokens · $0.03")
+    expect(frame).toContain("41K tokens · $0.01")
+    // No metric icons anywhere: no coins/fire/thinking/arrows.
+    expect(frame).not.toContain("\uEDE8")
+    expect(frame).not.toContain("\u{F0238}")
+    expect(frame).not.toContain("\u{EE9C}")
+    expect(frame).not.toContain("↑")
+    expect(frame).not.toContain("↓")
+    // Every disclosure chevron is the LEFTMOST glyph of its row.
+    expect(frame).toContain(`${GLYPH.expand} Project`)
+    expect(frame).toContain(`${GLYPH.expand} Session`)
+    expect(frame).not.toContain(`Project ${GLYPH.expand}`)
+    expect(frame).not.toContain(`Session ${GLYPH.expand}`)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("independent disclosure: expanding Project detail leaves Session collapsed", async () => {
+    const rootID = "ses_independent"
+    purgeTreeCache()
+    seedProjectUsage()
+    const { slot, dispose } = await mountEntry(
+      sessionState(rootID),
+      projectWithSessions,
+    )
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      {
+        width: 60,
+        height: 20,
+      },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitFor(() => projectSnapshot() !== null)
+    await waitForFrameDriven(setup, (frame) => frame.includes("5K tokens"))
+    // Compact first: no detail anywhere (and no metric icons at all).
+    expect(setup.captureCharFrame()).not.toContain("\u{EE9C}")
+    expect(setup.captureCharFrame()).not.toContain("\uEDE8")
+
+    await clickRowChevron(setup, setup.captureCharFrame(), "Project")
+    // Project detail appears: L1 (exactly once, replacing the compact
+    // summary) plus the two labeled metric lines, while Session stays
+    // collapsed.
+    await waitForFrameDriven(setup, (frame) => frame.includes("3K input"))
+    const frame = setup.captureCharFrame()
+    expect(countOccurrences(frame, "5K tokens · $0.03")).toBe(1)
+    expect(frame).toContain("3K input · 2K output")
+    expect(frame).toContain("500 reason · 150 cache")
+    expect(frame).not.toContain("\uEDE8")
+    expect(frame).not.toContain("\u{F0238}")
+    // Session detail must NOT render: its labeled lines are absent and its
+    // header keeps the collapsed left chevron.
+    expect(frame).not.toContain("41K input")
+    expect(frame).toContain(`${GLYPH.expand} Session`)
+    expect(frame).toContain(`${GLYPH.collapse} Project`)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("expanded detail tone hierarchy: primary line white with light-red spend, secondary lines in the derived detail tone, yellow heading dots only on section titles", async () => {
+    const rootID = "ses_role_colors"
+    const childID = "ses_role_colors_child"
+    purgeTreeCache()
+    seedProjectUsage()
+    // A zero-usage delegated session forms one group, so the Subagents
+    // section renders and its title participates in the tone contract
+    // (agent names add the info tone to the frame's hues).
+    const { slot, dispose } = await mountEntry(
+      {
+        sessions: {
+          [rootID]: [
+            msg(
+              "r1",
+              rootID,
+              { input: 40000, output: 1000, total: 42000 },
+              0.01,
+            ),
+          ],
+          [childID]: [],
+        },
+        children: { [rootID]: [{ id: childID, agent: "general" }] },
+        metas: {
+          [rootID]: { id: rootID, title: "Root" },
+          [childID]: { id: childID, agent: "general" },
+        },
+      },
+      projectWithSessions,
+    )
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      {
+        width: 60,
+        height: 20,
+      },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitFor(() => snapshot()?.groups.length === 1)
+    await waitFor(() => projectSnapshot() !== null)
+    await waitForFrameDriven(setup, (frame) => frame.includes("5K tokens"))
+    await clickRowChevron(setup, setup.captureCharFrame(), "Project")
+    await waitForFrameDriven(setup, (frame) => frame.includes("3K input"))
+    const frame = setup.captureCharFrame()
+    // Exactly three labeled lines (compact mode), each value+label exactly
+    // once; the reasoning label reads `reason` and no `spent` word appears.
+    expect(countOccurrences(frame, "5K tokens · $0.03")).toBe(1)
+    expect(countOccurrences(frame, "3K input · 2K output")).toBe(1)
+    expect(countOccurrences(frame, "500 reason · 150 cache")).toBe(1)
+    // The compact summary is gone (replaced by L1): no coins/fire icons.
+    expect(frame).not.toContain("\uEDE8")
+    expect(frame).not.toContain("\u{F0238}")
+    expect(frame).not.toContain("spent")
+    expect(frame).not.toContain("reasoning")
+    // Tone hierarchy (tone.ts): L1 renders in the main-text tone with the
+    // $amount in the light-red error tone; the input/output and
+    // reason/cache lines render in the derived detail tone (textMuted
+    // blended 50% toward the active background).
+    const spans = setup.captureSpans().lines.flatMap((line) => line.spans)
+    const fgOf = (text: string) =>
+      spans
+        .filter((span) => span.text.includes(text))
+        .map((span) => rgbToHex(span.fg))
+    const white = rgbToHex(RGBA.fromHex("#a8b4dc"))
+    const error = rgbToHex(RGBA.fromHex("#ff4500"))
+    const warning = rgbToHex(RGBA.fromHex("#ffcc00"))
+    const muted = rgbToHex(RGBA.fromHex("#a9b1d6"))
+    const detail = rgbToHex(detailTone(() => THEME.current))
+    // L1: tokens/label/separator white, spend light red.
+    expect(fgOf("$0.03")).toEqual([error])
+    expect(fgOf("$0.01")).toEqual([error])
+    expect(fgOf("5K")).toContain(white)
+    expect(fgOf(" tokens")).toContain(white)
+    // Secondary rows: the derived detail tone, dimmer than textMuted.
+    expect(fgOf("3K")).toEqual([detail])
+    expect(fgOf("2K")).toEqual([detail])
+    expect(fgOf("500")).toEqual([detail])
+    expect(fgOf("150")).toEqual([detail])
+    // The three section TITLES (Project, Session, Subagents) render in the
+    // semantic yellow theme().warning — the complete title text, with no
+    // `●` marker glyph anywhere.
+    const titleColors = fgOf("Project").concat(
+      fgOf("Session"),
+      fgOf("Subagents"),
+    )
+    expect(titleColors).toHaveLength(3)
+    expect(titleColors.every((color) => color === warning)).toBe(true)
+    // Detail rows align two columns beneath the heading (the summary and
+    // detail share the same nested indent), and no `●` marker leads any
+    // metric row.
+    const frameLines = frame.split(/[\r\n]+/)
+    const detailRows = frameLines.filter(
+      (line) =>
+        line.includes("tokens · $0.03") ||
+        line.includes("input · 2K output") ||
+        line.includes("reason · 150 cache"),
+    )
+    expect(detailRows).toHaveLength(3)
+    for (const line of detailRows) {
+      expect([...line].findIndex((ch) => ch !== " ")).toBe(2)
+      expect(line).not.toContain("●")
+    }
+    // The only content hues in the frame are the contract's tones: white
+    // (primary), detail (secondary), error (spend) and warning (section
+    // titles), plus textMuted (the Subagents aggregate caption) and info
+    // (the Subagents agent name — the group renders in the frame).
+    const info = rgbToHex(RGBA.fromHex("#00aaff"))
+    const hues = new Set(
+      spans
+        .filter((span) => span.text.trim().length > 0)
+        .map((span) => rgbToHex(span.fg))
+        .filter(
+          (color) =>
+            ![white, detail, error, warning, muted, info].includes(color),
+        ),
+    )
+    expect(hues).toEqual(new Set([]))
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("detail renders the real output (output + reasoning) exactly once", async () => {
+    const rootID = "ses_real_output"
+    const state: MutableApi = {
+      sessions: {
+        [rootID]: [
+          msg("r1", rootID, {
+            input: 30000,
+            output: 10,
+            reasoning: 5,
+            total: 30015,
+          }),
+        ],
+      },
+      children: {},
+      metas: { [rootID]: { id: rootID, title: "Root" } },
+    }
+    purgeTreeCache()
+    const { slot, dispose } = await mountEntry(state)
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      {
+        width: 60,
+        height: 20,
+      },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitForFrameDriven(setup, (frame) => frame.includes("30K"))
+    await clickRowChevron(setup, setup.captureCharFrame(), "Session")
+    await waitForFrameDriven(setup, (frame) => frame.includes(" · 15 output"))
+    const frame = setup.captureCharFrame()
+    // The real output (output + reasoning) renders exactly once in L2.
+    expect(countOccurrences(frame, " · 15 output")).toBe(1)
+    expect(frame).not.toContain(" · 10 output")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("cache mode: combined shows one summed value; separated shows R|W from the same raw pair", async () => {
+    const rootID = "ses_cache_modes"
+    const state: MutableApi = {
+      sessions: {
+        [rootID]: [
+          msg(
+            "r1",
+            rootID,
+            {
+              input: 1000,
+              output: 100,
+              reasoning: 0,
+              cache: { read: 45000000, write: 10000 },
+              total: 45011000,
+            },
+            0.01,
+          ),
+        ],
+      },
+      children: {},
+      metas: { [rootID]: { id: rootID, title: "Root" } },
+    }
+    purgeTreeCache()
+    // Default settings: cache is combined — one summed cache value.
+    const combined = await mountEntry(state)
+    const setupCombined = await testRender(
+      () => combined.slot({ theme: THEME }, { session_id: rootID }) as never,
+      {
+        width: 60,
+        height: 20,
+      },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitForFrameDriven(setupCombined, (frame) => frame.includes("45M"))
+    await clickRowChevron(
+      setupCombined,
+      setupCombined.captureCharFrame(),
+      "Session",
+    )
+    await waitForFrameDriven(setupCombined, (frame) =>
+      frame.includes("45M cache"),
+    )
+    const combinedFrame = setupCombined.captureCharFrame()
+    expect(combinedFrame).toContain("1K input · 100 output")
+    expect(combinedFrame).toContain("0 reason · 45M cache")
+    expect(combinedFrame).not.toContain("R45M|W10K")
+    disposeReconcile()
+    combined.dispose()
+
+    // cache=separated renders the same raw pair as R|W.
+    purgeTreeCache()
+    const separated = await mountEntry(state, {}, true, {
+      cache: "separated",
+      numbers: "compact",
+    })
+    const setupSeparated = await testRender(
+      () => separated.slot({ theme: THEME }, { session_id: rootID }) as never,
+      {
+        width: 60,
+        height: 20,
+      },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitForFrameDriven(setupSeparated, (frame) => frame.includes("45M"))
+    await clickRowChevron(
+      setupSeparated,
+      setupSeparated.captureCharFrame(),
+      "Session",
+    )
+    await waitForFrameDriven(setupSeparated, (frame) =>
+      frame.includes("R45M|W10K"),
+    )
+    const separatedFrame = setupSeparated.captureCharFrame()
+    expect(separatedFrame).toContain("1K input · 100 output")
+    expect(separatedFrame).toContain("0 reason · R45M|W10K")
+    expect(separatedFrame).not.toContain("45M cache")
+    disposeReconcile()
+    separated.dispose()
+  }, 20000)
+
+  test("zero-usage snapshot shows the empty copy, never the loading `…`", async () => {
+    const rootID = "ses_empty"
+    const childID = "ses_empty_child"
+    const state: MutableApi = {
+      sessions: { [rootID]: [], [childID]: [] },
+      children: { [rootID]: [{ id: childID, agent: "sdd-apply" }] },
+      metas: {
+        [rootID]: { id: rootID, title: "Root" },
+        [childID]: { id: childID, agent: "sdd-apply" },
+      },
+    }
+    purgeTreeCache()
+    const { slot, dispose } = await mountEntry(state)
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      {
+        width: 60,
+        height: 20,
+      },
+    )
+    await waitFor(
+      () => snapshot()?.rootID === rootID && snapshot()?.totalTokens === 0,
+    )
+    await waitFor(() => projectSnapshot() !== null)
+    await waitForFrameDriven(
+      setup,
+      (frame) =>
+        frame.includes("No usage yet") && frame.includes("No sessions"),
+    )
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("No usage yet")
+    expect(frame).toContain("No sessions")
+    expect(frame).not.toContain("…")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("narrow width: detail rows never wrap and degrade elastically at 22 columns — reasoning/cache values are never omitted", async () => {
+    const rootID = "ses_clipped"
+    const state: MutableApi = {
+      sessions: {
+        [rootID]: [
+          msg(
+            "r1",
+            rootID,
+            {
+              input: 30000,
+              output: 10,
+              reasoning: 999999,
+              cache: { read: 45000000, write: 10000 },
+              total: 46010009,
+            },
+            0.01,
+          ),
+        ],
+      },
+      children: {},
+      metas: { [rootID]: { id: rootID, title: "Root" } },
+    }
+    purgeTreeCache()
+    const { slot, dispose } = await mountEntry(state)
+    const setup = await testRender(
+      () => slot({ theme: THEME, width: 24 }, { session_id: rootID }) as never,
+      {
+        width: 30,
+        height: 20,
+      },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitForFrameDriven(setup, (frame) => frame.includes("46M"))
+    const compactFrame = setup.captureCharFrame()
+    // The compact L1 fits the narrowest content width (22) in full —
+    // nothing wraps and no cue ever renders.
+    expect(compactFrame).toContain("46M tokens · $0.01")
+    expect(compactFrame).not.toContain("(detail clipped)")
+
+    await clickRowChevron(setup, compactFrame, "Session")
+    // Open: the THREE elastic lines (compact mode) render — the ladder
+    // drops labels and elides/truncates values, but NO line is ever
+    // omitted: the reason/cache line renders with BOTH values at 22
+    // columns (the trailing label drops first).
+    await waitForFrameDriven(setup, (frame) => frame.includes("30K input · 1M"))
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("46M tokens · $0.01")
+    expect(frame).toContain("30K input · 1M")
+    expect(frame).toContain("1000K reason · 45M")
+    expect(frame).not.toContain("(detail clipped)")
+    const detail = frame
+      .split(/[\r\n]+/)
+      .filter(
+        (line) =>
+          line.includes("46M tokens · $0.01") ||
+          line.includes("30K input · 1M") ||
+          line.includes("1000K reason · 45M"),
+      )
+    expect(detail).toHaveLength(3)
+    for (const line of detail) {
+      expect([...line.trimEnd()].length).toBeLessThanOrEqual(22)
+      // Two-column nested indent: the data sits two columns beneath the
+      // heading in both compact and expanded presentation.
+      expect([...line].findIndex((ch) => ch !== " ")).toBe(2)
+    }
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("precise at 22 columns: expanded Session renders EXACTLY five rows — every precise value visible, no metric dropped", async () => {
+    const rootID = "ses_precise_22"
+    const state: MutableApi = {
+      sessions: {
+        [rootID]: [
+          msg(
+            "r1",
+            rootID,
+            {
+              input: 3000,
+              output: 10,
+              reasoning: 500,
+              cache: { read: 45000000, write: 10000 },
+              total: 45013510,
+            },
+            0.01,
+          ),
+        ],
+      },
+      children: {},
+      metas: { [rootID]: { id: rootID, title: "Root" } },
+    }
+    purgeTreeCache()
+    const { slot, dispose } = await mountEntry(state, {}, true, {
+      cache: "combined",
+      numbers: "precise",
+    })
+    const setup = await testRender(
+      () => slot({ theme: THEME, width: 24 }, { session_id: rootID }) as never,
+      {
+        width: 30,
+        height: 20,
+      },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitForFrameDriven(setup, (frame) => frame.includes("45,013,510"))
+    // Collapsed compact L1 at 22 columns: labels/sep yield, the total and
+    // the spend survive elision.
+    expect(setup.captureCharFrame()).toContain("45,013,510")
+    await clickRowChevron(setup, setup.captureCharFrame(), "Session")
+    // Expanded (precise): exactly FIVE single-metric rows — total/cost,
+    // input, output, reason, cache — every value present at 22 columns
+    // (the spend elides to `$…` before the ` tokens` label drops, same
+    // ladder as compact), rows degrade individually, a metric is never
+    // omitted and the reasoning label reads `reason`.
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes("45,010,000 cache"),
+    )
+    const frame = setup.captureCharFrame()
+    const detail = frame
+      .split(/[\r\n]+/)
+      .filter(
+        (line) =>
+          line.includes("45,013,510 · $…") ||
+          line.includes("3,000 input") ||
+          line.includes("510 output") ||
+          line.includes("500 reason") ||
+          line.includes("45,010,000 cache"),
+      )
+    expect(detail).toHaveLength(5)
+    for (const line of detail) {
+      expect([...line.trimEnd()].length).toBeLessThanOrEqual(22)
+      // Two-column nested indent: the data sits two columns beneath the
+      // heading in both compact and expanded presentation.
+      expect([...line].findIndex((ch) => ch !== " ")).toBe(2)
+    }
+    expect(detail[0]).toContain("45,013,510")
+    expect(detail[1]).toContain("3,000 input")
+    expect(detail[2]).toContain("510 output")
+    expect(detail[3]).toContain("500 reason")
+    expect(detail[4]).toContain("45,010,000 cache")
+    expect(frame).not.toContain("(detail clipped)")
+    expect(frame).not.toContain("reasoning")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("precise at 22 columns: expanded Project and every agent also render exactly five rows — all values visible after indentation", async () => {
+    // The contract: precise mode MUST render exactly five rows for every
+    // expanded Project, Session and agent; at the 22-column floor the
+    // section rows get 20 columns (22 − 2) and the agent metric rows get
+    // 17 (22 − the full `  ↳ ` prefix of 4 − the scrollbar column), and
+    // every value must stay visible.
+    const rootID = "ses_precise_five"
+    const childID = "ses_precise_child"
+    const state: MutableApi = {
+      sessions: {
+        [rootID]: [
+          msg(
+            "r1",
+            rootID,
+            {
+              input: 522000,
+              output: 196000,
+              reasoning: 140000,
+              cache: { read: 18900000, write: 0 },
+              total: 19758000,
+            },
+            0.09,
+          ),
+        ],
+        [childID]: [
+          msg(
+            "c1",
+            childID,
+            {
+              input: 522000,
+              output: 196000,
+              reasoning: 140000,
+              cache: { read: 18900000, write: 0 },
+              total: 19758000,
+            },
+            0.09,
+          ),
+        ],
+      },
+      children: { [rootID]: [{ id: childID, agent: "plan" }] },
+      metas: {
+        [rootID]: { id: rootID, title: "Root" },
+        [childID]: { id: childID, agent: "plan" },
+      },
+    }
+    const project: ProjectState = {
+      current: { id: "proj_five", worktree: "/wt" },
+      sessions: [
+        {
+          id: "pf1",
+          projectID: "proj_five",
+          cost: 0.09,
+          tokens: {
+            input: 522000,
+            output: 196000,
+            reasoning: 140000,
+            cache: { read: 18900000, write: 0 },
+          },
+        },
+      ],
+    }
+    purgeTreeCache()
+    const { slot, dispose } = await mountEntry(state, project, true, {
+      cache: "combined",
+      numbers: "precise",
+    })
+    const setup = await testRender(
+      () => slot({ theme: THEME, width: 24 }, { session_id: rootID }) as never,
+      {
+        width: 30,
+        height: 24,
+      },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitFor(() => snapshot()?.groups.length === 1)
+    await waitFor(() => projectSnapshot() !== null)
+    // Compact L1s at 22 columns: the spend elides to `$…` (the preserved
+    // compact-summary ladder). The Session sums root + child (39,516,000),
+    // the Project view and the agent group each hold the child's
+    // 19,758,000.
+    await waitForFrameDriven(
+      setup,
+      (frame) =>
+        frame.includes("19,758,000 · $…") && frame.includes("39,516,000 · $…"),
+    )
+
+    // Expand Project and Session: each renders exactly the five rows. Each
+    // click is followed by a repaint wait so the next row lookup uses a
+    // fresh frame (expanding Project shifts Session down).
+    await clickRowChevron(setup, setup.captureCharFrame(), "Project")
+    await waitForFrameDriven(setup, (frame) => frame.includes("522,000 input"))
+    await clickRowChevron(setup, setup.captureCharFrame(), "Session")
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes("1,044,000 input"),
+    )
+    const frame = setup.captureCharFrame()
+    // Project five rows (the agent's compact summary still shows its own
+    // `19,758,000 · $…` L1).
+    expect(countOccurrences(frame, "19,758,000 · $…")).toBe(2)
+    expect(countOccurrences(frame, "522,000 input")).toBe(1)
+    expect(countOccurrences(frame, "336,000 output")).toBe(1)
+    expect(countOccurrences(frame, "140,000 reason")).toBe(1)
+    expect(countOccurrences(frame, "18,900,000 cache")).toBe(1)
+    // Session five rows (root + child: every value doubled).
+    expect(countOccurrences(frame, "39,516,000 · $…")).toBe(1)
+    expect(countOccurrences(frame, "1,044,000 input")).toBe(1)
+    expect(countOccurrences(frame, "672,000 output")).toBe(1)
+    expect(countOccurrences(frame, "280,000 reason")).toBe(1)
+    expect(countOccurrences(frame, "37,800,000 cache")).toBe(1)
+    // Every section detail row starts at column 2 and never overflows 22.
+    for (const line of frame.split(/[\r\n]+/)) {
+      if (
+        line.includes("522,000 input") ||
+        line.includes("336,000 output") ||
+        line.includes("140,000 reason") ||
+        line.includes("18,900,000 cache") ||
+        line.includes("1,044,000 input") ||
+        line.includes("672,000 output") ||
+        line.includes("280,000 reason") ||
+        line.includes("37,800,000 cache")
+      ) {
+        expect([...line].findIndex((ch) => ch !== " ")).toBe(2)
+        expect([...line.trimEnd()].length).toBeLessThanOrEqual(22)
+      }
+    }
+
+    // Open the agent: its detail is the same five rows inside the real
+    // scrollbox (header + 5 detail rows = 6 children), aligned under the
+    // name after the `  ↳ ` prefix (4 columns).
+    await clickAgentRow(setup, setup.captureCharFrame(), "plan")
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`↳ plan (1 task) ${GLYPH.collapse}`),
+    )
+    const agentFrame = setup.captureCharFrame()
+    expect(agentFrame).toContain(`↳ plan (1 task) ${GLYPH.collapse}`)
+    const scrollbox = findScrollbox(setup)
+    expect(scrollbox).not.toBeNull()
+    expect(scrollbox!.getChildren().length).toBe(6)
+    // Top of the viewport: the header plus the first rows; the agent's L1
+    // keeps the total and the `$…` spend marker at 17 columns.
+    expect(agentFrame).toContain("19,758,000 · $…")
+    expect(agentFrame).toContain("522,000 input")
+    // Scroll to the bottom: the last precise rows are visible too — all
+    // five values render inside the scroll container. At the 15-column
+    // agent floor the cache row degrades to its bare value (the label
+    // drops before any value), so the agent's rows now double the section
+    // counts.
+    scrollbox!.scrollTo(scrollbox!.scrollHeight)
+    await waitForFrameDriven(
+      setup,
+      (frame) => countOccurrences(frame, "18,900,000") === 2,
+    )
+    const bottom = setup.captureCharFrame()
+    expect(countOccurrences(bottom, "336,000 output")).toBe(2)
+    expect(countOccurrences(bottom, "140,000 reason")).toBe(2)
+    expect(countOccurrences(bottom, "18,900,000")).toBe(2)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("a stale legacy view seed is ignored: sections mount closed", async () => {
+    const rootID = "ses_seed_mount"
+    const state: MutableApi = {
+      sessions: {
+        [rootID]: [
+          msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+        ],
+      },
+      children: {},
+      metas: { [rootID]: { id: rootID, title: "Root" } },
+    }
+    purgeTreeCache()
+    // The legacy view preference was removed from the settings model
+    // (tokenmeter-settings spec); the sanitizer ignores the stale field, so
+    // the panel must NOT seed any section open from it. (4.3 sweep: the
+    // fixture uses a generic stale key — the unshipped legacy field name is
+    // gone from the codebase.)
+    const { slot, dispose } = await mountEntry(state, {}, true, {
+      legacyView: "detailed",
+      cache: "combined",
+      numbers: "compact",
+    })
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      {
+        width: 60,
+        height: 20,
+      },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
+    // Compact default through the real entry flow: L1 exactly once, no L2
+    // detail, expand chevron left — the stale seed changed nothing.
+    const frame = setup.captureCharFrame()
+    expect(countOccurrences(frame, "41K tokens · $0.01")).toBe(1)
+    expect(frame).not.toContain("40K input · 1K output")
+    expect(frame).toContain(`${GLYPH.expand} Session`)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("a session change resets disclosure to the closed seed", async () => {
+    const aID = "ses_reset_a"
+    const bID = "ses_reset_b"
+    const state: MutableApi = {
+      sessions: {
+        [aID]: [
+          msg("a1", aID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+        ],
+        [bID]: [
+          msg("b1", bID, { input: 700000, output: 5000, total: 720000 }, 0.02),
+        ],
+      },
+      children: {},
+      metas: { [aID]: { id: aID, title: "A" }, [bID]: { id: bID, title: "B" } },
+    }
+    purgeTreeCache()
+    // The panel is mounted directly with a reactive sessionID prop so the
+    // session change lands on the SAME mounted instance (through the plugin
+    // slot the host remounts per session switch, which the mount-seed test
+    // covers; this test covers the prop-change reset path).
+    const { api, dispose } = await mountEntry(state, {}, true, {
+      cache: "combined",
+      numbers: "compact",
+    })
+    const [sid, setSid] = createSignal(aID)
+    const setup = await testRender(
+      () =>
+        (
+          <UsagePanel
+            api={api}
+            sessionID={sid()}
+            subagentsPref={subagentsPref}
+            onToggleSubagents={() => cycleSubagents(api)}
+            theme={() => THEME.current}
+            width={38}
+          />
+        ) as never,
+      {
+        width: 60,
+        height: 20,
+      },
+    )
+    await waitFor(() => snapshot()?.rootID === aID)
+    await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
+    // Seeded closed: the L2 detail line is absent until the user opens it.
+    expect(setup.captureCharFrame()).not.toContain("40K input · 1K output")
+
+    // The user opens the section; the in-memory choice survives until the
+    // session changes (the preference never force-toggles open disclosure).
+    await clickRowChevron(setup, setup.captureCharFrame(), "Session")
+    await waitForFrameDriven(setup, (frame) => frame.includes("40K input"))
+    expect(setup.captureCharFrame()).toContain("40K input · 1K output")
+
+    // Switching sessions resets both sections back to the closed seed.
+    setSid(bID)
+    await waitFor(() => snapshot()?.rootID === bID)
+    await waitForFrameDriven(setup, (frame) => frame.includes("705K tokens"))
+    const frame = setup.captureCharFrame()
+    expect(frame).not.toContain("700K input · 5K output")
+    expect(frame).toContain(`${GLYPH.expand} Session`)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+})
+
+describe("master disclosure (transient; expanded default; collapsed = ▶ TokenMeter + one L1)", () => {
+  // Project L1 = `5K tokens · $0.03`, Session L1 = `41K tokens ·
+  // $0.01` — the same values the sibling describes pin.
+  const projectState: ProjectState = {
+    current: { id: "proj_master", worktree: "/wt" },
+    sessions: [
+      {
+        id: "pm1",
+        projectID: "proj_master",
+        cost: 0.01,
+        tokens: {
+          input: 1000,
+          output: 500,
+          reasoning: 200,
+          cache: { read: 100, write: 50 },
+        },
+      },
+      {
+        id: "pm2",
+        projectID: "proj_master",
+        cost: 0.02,
+        tokens: { input: 2000, output: 700, reasoning: 300 },
+      },
+    ],
+  }
+
+  const seedProjectUsage = () => {
+    upsertMessageUsage(
+      msg(
+        "pm1",
+        "pm1",
+        {
+          input: 1000,
+          output: 500,
+          reasoning: 200,
+          cache: { read: 100, write: 50 },
+        },
+        0.01,
+      ),
+    )
+    upsertMessageUsage(
+      msg("pm2", "pm2", { input: 2000, output: 700, reasoning: 300 }, 0.02),
+    )
+  }
+
+  const sessionState = (rootID: string): MutableApi => ({
+    sessions: {
+      [rootID]: [
+        msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+      ],
+    },
+    children: {},
+    metas: { [rootID]: { id: rootID, title: "Root" } },
+  })
+
+  const mountPanel = async (
+    rootID: string,
+    state: MutableApi,
+    project: ProjectState = {},
+    settingsV1?: Record<string, unknown>,
+  ) => {
+    purgeTreeCache()
+    const { slot, dispose, kvWrites } = await mountEntry(
+      state,
+      project,
+      true,
+      settingsV1,
+    )
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      { width: 60, height: 20 },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    if (project.current) await waitFor(() => projectSnapshot() !== null)
+    return { setup, dispose, kvWrites }
+  }
+
+  test("starts EXPANDED over the normal sections; the chevron click collapses to ▶ TokenMeter + exactly the Session L1 and no other rows", async () => {
+    const rootID = "ses_master_a"
+    const childID = "ses_master_a_child"
+    seedProjectUsage()
+    // One zero-usage delegated group so the expanded frame renders the
+    // Subagents section like the other sections (zero groups would hide it).
+    const { setup, dispose } = await mountPanel(
+      rootID,
+      {
+        sessions: {
+          [rootID]: [
+            msg(
+              "r1",
+              rootID,
+              { input: 40000, output: 1000, total: 42000 },
+              0.01,
+            ),
+          ],
+          [childID]: [],
+        },
+        children: { [rootID]: [{ id: childID, agent: "general" }] },
+        metas: {
+          [rootID]: { id: rootID, title: "Root" },
+          [childID]: { id: childID, agent: "general" },
+        },
+      },
+      projectState,
+    )
+    await waitFor(() => snapshot()?.groups.length === 1)
+    await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
+    // Expanded default: the master chevron is ▼ and all sections render.
+    const expanded = setup.captureCharFrame()
+    expect(expanded).toContain(`${GLYPH.collapse} TokenMeter`)
+    expect(expanded).toContain(`${GLYPH.expand} Project`)
+    expect(expanded).toContain(`${GLYPH.expand} Session`)
+    expect(expanded).toContain("Subagents")
+    // Master chevron click (leftmost cell) collapses.
+    await clickMasterChevron(setup, setup.captureCharFrame())
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`${GLYPH.expand} TokenMeter`),
+    )
+    const collapsed = setup.captureCharFrame()
+    // ▶ TokenMeter plus EXACTLY ONE row — the Session L1 (default source).
+    expect(collapsed).toContain(`${GLYPH.expand} TokenMeter`)
+    expect(countOccurrences(collapsed, "41K tokens · $0.01")).toBe(1)
+    const contentLines = collapsed
+      .split(/[\r\n]+/)
+      .filter((line) => line.trim().length > 0)
+    expect(contentLines).toHaveLength(2)
+    // No Project/Session/Subagents rows, no other source's L1.
+    expect(collapsed).not.toContain(`${GLYPH.expand} Project`)
+    expect(collapsed).not.toContain(`${GLYPH.expand} Session`)
+    expect(collapsed).not.toContain("Subagents")
+    expect(collapsed).not.toContain("5K tokens · $0.03")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("title-text click toggles both ways; the chevron click expands it back", async () => {
+    const rootID = "ses_master_b"
+    const childID = "ses_master_b_child"
+    seedProjectUsage()
+    const { setup, dispose } = await mountPanel(
+      rootID,
+      {
+        sessions: {
+          [rootID]: [
+            msg(
+              "r1",
+              rootID,
+              { input: 40000, output: 1000, total: 42000 },
+              0.01,
+            ),
+          ],
+          [childID]: [],
+        },
+        children: { [rootID]: [{ id: childID, agent: "general" }] },
+        metas: {
+          [rootID]: { id: rootID, title: "Root" },
+          [childID]: { id: childID, agent: "general" },
+        },
+      },
+      projectState,
+    )
+    await waitFor(() => snapshot()?.groups.length === 1)
+    await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
+    // Title-text click (column inside "TokenMeter"): collapse.
+    await clickMasterTitle(setup, setup.captureCharFrame())
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`${GLYPH.expand} TokenMeter`),
+    )
+    const collapsed = setup.captureCharFrame()
+    expect(countOccurrences(collapsed, "41K tokens · $0.01")).toBe(1)
+    expect(collapsed).not.toContain("Subagents")
+    // Title-text click again: the normal sections return.
+    await clickMasterTitle(setup, setup.captureCharFrame())
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`${GLYPH.collapse} TokenMeter`),
+    )
+    const restored = setup.captureCharFrame()
+    expect(restored).toContain(`${GLYPH.expand} Session`)
+    expect(restored).toContain("Subagents")
+    // The chevron click collapses again — both row parts toggle.
+    await clickMasterChevron(setup, setup.captureCharFrame())
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`${GLYPH.expand} TokenMeter`),
+    )
+    expect(
+      countOccurrences(setup.captureCharFrame(), "41K tokens · $0.01"),
+    ).toBe(1)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("collapsedSummary source switch: the project source shows exactly the Project L1", async () => {
+    const rootID = "ses_master_c"
+    seedProjectUsage()
+    const { setup, dispose } = await mountPanel(
+      rootID,
+      sessionState(rootID),
+      projectState,
+      {
+        collapsedSummary: "project",
+        cache: "combined",
+        numbers: "compact",
+      },
+    )
+    await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
+    await clickMasterChevron(setup, setup.captureCharFrame())
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`${GLYPH.expand} TokenMeter`),
+    )
+    const collapsed = setup.captureCharFrame()
+    expect(countOccurrences(collapsed, "5K tokens · $0.03")).toBe(1)
+    expect(collapsed).not.toContain("41K tokens · $0.01")
+    expect(collapsed).not.toContain(`${GLYPH.expand} Session`)
+    expect(collapsed).not.toContain("Subagents")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("empty source copy: No usage yet / No sessions, never the loading …", async () => {
+    // Session source with a zero-usage snapshot.
+    const rootID = "ses_master_d"
+    const childID = "ses_master_d_child"
+    const a = await mountPanel(rootID, {
+      sessions: { [rootID]: [], [childID]: [] },
+      children: { [rootID]: [{ id: childID, agent: "sdd-apply" }] },
+      metas: {
+        [rootID]: { id: rootID, title: "Root" },
+        [childID]: { id: childID, agent: "sdd-apply" },
+      },
+    })
+    await waitForFrameDriven(a.setup, (frame) => frame.includes("No usage yet"))
+    await clickMasterChevron(a.setup, a.setup.captureCharFrame())
+    await waitForFrameDriven(a.setup, (frame) =>
+      frame.includes(`${GLYPH.expand} TokenMeter`),
+    )
+    const collapsedSession = a.setup.captureCharFrame()
+    expect(collapsedSession).toContain("No usage yet")
+    expect(collapsedSession).not.toContain("…")
+    a.dispose()
+
+    // Project source with a zero-usage project snapshot.
+    const rootID2 = "ses_master_e"
+    const b = await mountPanel(
+      rootID2,
+      sessionState(rootID2),
+      {
+        current: { id: "proj_master", worktree: "/wt" },
+        sessions: [
+          {
+            id: "pm0",
+            projectID: "proj_master",
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0 },
+          },
+        ],
+      },
+      { collapsedSummary: "project", cache: "combined", numbers: "compact" },
+    )
+    await waitForFrameDriven(b.setup, (frame) => frame.includes("41K tokens"))
+    await clickMasterChevron(b.setup, b.setup.captureCharFrame())
+    await waitForFrameDriven(b.setup, (frame) =>
+      frame.includes(`${GLYPH.expand} TokenMeter`),
+    )
+    const collapsedProject = b.setup.captureCharFrame()
+    expect(collapsedProject).toContain("No sessions")
+    expect(collapsedProject).not.toContain("…")
+    b.dispose()
+  }, 20000)
+
+  test("transient: disclosure clicks never touch kv, and a session change resets master to expanded", async () => {
+    // Direct reactive-prop mount so the session change lands on the same
+    // mounted instance (host remounts per session switch; the remount
+    // always starts expanded, this covers the prop-change reset path).
+    const aID = "ses_master_f"
+    const bID = "ses_master_g"
+    const bChild = "ses_master_g_child"
+    purgeTreeCache()
+    const state: MutableApi = {
+      sessions: {
+        [aID]: [
+          msg("m1", aID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+        ],
+        [bID]: [
+          msg("m2", bID, { input: 700000, output: 5000, total: 720000 }, 0.02),
+        ],
+        // A zero-usage delegated group on the second session so the
+        // Subagents section renders after the switch (zero groups hide it).
+        [bChild]: [],
+      },
+      children: { [bID]: [{ id: bChild, agent: "general" }] },
+      metas: {
+        [aID]: { id: aID, title: "A" },
+        [bID]: { id: bID, title: "B" },
+        [bChild]: { id: bChild, agent: "general" },
+      },
+    }
+    const { api, dispose, kvWrites } = await mountEntry(state, {}, true, {
+      cache: "combined",
+      numbers: "compact",
+    })
+    const [sid, setSid] = createSignal(aID)
+    const setup = await testRender(
+      () =>
+        (
+          <UsagePanel
+            api={api}
+            sessionID={sid()}
+            subagentsPref={subagentsPref}
+            onToggleSubagents={() => cycleSubagents(api)}
+            theme={() => THEME.current}
+            width={38}
+          />
+        ) as never,
+      { width: 60, height: 20 },
+    )
+    await waitFor(() => snapshot()?.rootID === aID)
+    await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
+    // Collapse via the chevron, expand via the title text: zero kv writes.
+    await clickMasterChevron(setup, setup.captureCharFrame())
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`${GLYPH.expand} TokenMeter`),
+    )
+    expect(setup.captureCharFrame()).toContain("41K tokens · $0.01")
+    await clickMasterTitle(setup, setup.captureCharFrame())
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`${GLYPH.collapse} TokenMeter`),
+    )
+    expect(kvWrites).toHaveLength(0)
+    // Session change resets master to EXPANDED.
+    setSid(bID)
+    await waitFor(() => snapshot()?.rootID === bID)
+    await waitFor(() => snapshot()?.groups.length === 1)
+    await waitForFrameDriven(setup, (frame) => frame.includes("705K tokens"))
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain(`${GLYPH.collapse} TokenMeter`)
+    expect(frame).toContain(`${GLYPH.expand} Session`)
+    expect(frame).toContain("Subagents")
+    expect(kvWrites).toHaveLength(0)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+})
+
+describe("no in-panel settings screen (palette dialog replaces the screen seam)", () => {
+  const state = (rootID: string): MutableApi => ({
+    sessions: {
+      [rootID]: [
+        msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+      ],
+    },
+    children: {},
+    metas: { [rootID]: { id: rootID, title: "Root" } },
+  })
+
+  test("the title row carries no Settings/Back toggle; the metrics body is never replaced", async () => {
+    const rootID = "ses_no_screen_toggle"
+    purgeTreeCache()
+    const { slot, dispose } = await mountEntry(state(rootID))
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      {
+        width: 60,
+        height: 20,
+      },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
+    // The master row is exactly `▼ TokenMeter` — no trailing toggle text
+    // (spec: the panel title row MUST NOT contain a Settings/Back toggle).
+    const metrics = setup.captureCharFrame()
+    expect(metrics).toContain(`${GLYPH.collapse} TokenMeter`)
+    expect(metrics).toContain("41K tokens · $0.01")
+    expect(metrics).not.toContain("Settings")
+    expect(metrics).not.toContain("Back")
+
+    // Clicking the right edge of the master row (where the legacy Settings
+    // toggle rendered) never swaps the metric body for a settings screen:
+    // no preference rows, no Back, metrics still visible on the same mount.
+    const lines = metrics.split(/[\r\n]+/)
+    const titleIdx = lines.findIndex((line) => line.includes("TokenMeter"))
+    expect(titleIdx).toBeGreaterThanOrEqual(0)
+    await setup.mockMouse.click(lines[titleIdx].trimEnd().length - 1, titleIdx)
+    await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
+    const after = setup.captureCharFrame()
+    expect(after).toContain("41K tokens · $0.01")
+    expect(after).not.toContain("collapsedSummary")
+    expect(after).not.toContain("Settings")
+    expect(after).not.toContain("Back")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("collapsing the master renders exactly the summary — no settings rows anywhere", async () => {
+    const rootID = "ses_no_screen_master"
+    purgeTreeCache()
+    const { slot, dispose } = await mountEntry(state(rootID))
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      {
+        width: 60,
+        height: 20,
+      },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
+    await clickMasterChevron(setup, setup.captureCharFrame())
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`${GLYPH.expand} TokenMeter`),
+    )
+    const collapsed = setup.captureCharFrame()
+    expect(collapsed).toContain("41K tokens · $0.01")
+    expect(collapsed).not.toContain("Settings")
+    expect(collapsed).not.toContain("Back")
+    expect(collapsed).not.toContain("collapsedSummary")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+})
+
+describe("settings dialog (DialogSelect menu)", () => {
+  const state = (rootID: string): MutableApi => ({
+    sessions: {
+      [rootID]: [
+        msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+      ],
+    },
+    children: {},
+    metas: { [rootID]: { id: rootID, title: "Root" } },
+  })
+
+  /** Renders the i-th `dialog.replace` element in the headless renderer. */
+  const renderDialog = async (
+    stack: Array<{ render: () => unknown; onClose?: () => void }>,
+    index = 0,
+  ) => {
+    const render = stack[index]?.render
+    if (typeof render !== "function")
+      throw new Error("renderDialog: no dialog element")
+    return testRender(render as never, { width: 60, height: 20 })
+  }
+
+  test("opens a DialogSelect with one option per preference showing the current value", async () => {
+    const rootID = "ses_dialog_open"
+    purgeTreeCache()
+    dialogProps.length = 0
+    const { api, dialog, dispose } = await mountEntry(state(rootID), {}, false)
+    showSettingsDialog(api)
+    expect(dialog.stack).toHaveLength(1)
+    const setup = await renderDialog(dialog.stack)
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes("TokenMeter Settings"),
+    )
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("TokenMeter Settings")
+    expect(frame).toContain("Cache: combined")
+    expect(frame).toContain("Numbers: compact")
+    expect(frame).toContain("Summary: session")
+    expect(frame).toContain("Subagents: collapsed")
+    expect(frame).toContain("Shortcut: Ctrl+E")
+    dispose()
+  }, 20000)
+
+  test("selecting an option cycles its preference and the SAME dialog re-renders reactively with the new value", async () => {
+    const rootID = "ses_dialog_cycle"
+    purgeTreeCache()
+    dialogProps.length = 0
+    const { api, dialog, kvWrites, dispose } = await mountEntry(
+      state(rootID),
+      {},
+      false,
+    )
+    showSettingsDialog(api)
+    expect(dialog.replaces()).toBe(1)
+    const setup = await renderDialog(dialog.stack)
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes("Cache: combined"),
+    )
+
+    // Selecting Cache cycles combined -> separated. The dialog is NOT
+    // re-opened: the titles re-read the live settings signals, so the same
+    // stack entry re-renders reactively and the SAME mounted DialogSelect
+    // repaints with the fresh title — no second `replace`.
+    const first = dialogProps[0]
+    const cacheSelect = first?.onSelect
+    const cacheOption = first?.options[0]
+    if (cacheSelect && cacheOption) cacheSelect(cacheOption)
+    expect(settings().cache).toBe("separated")
+    expect(dialog.stack).toHaveLength(1)
+    expect(dialog.replaces()).toBe(1)
+    expect(kvWrites).toContain(SETTINGS_KV_KEY)
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes("Cache: separated"),
+    )
+    expect(setup.captureCharFrame()).not.toContain("Cache: combined")
+
+    // Summary cycles session -> project -> session across two selections on
+    // the SAME mounted dialog (same props record, same onSelect closure).
+    const summarySelect = dialogProps[0]?.onSelect
+    const summaryOption = dialogProps[0]?.options[2]
+    if (summarySelect && summaryOption) summarySelect(summaryOption)
+    expect(settings().collapsedSummary).toBe("project")
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes("Summary: project"),
+    )
+    summarySelect?.(summaryOption)
+    expect(settings().collapsedSummary).toBe("session")
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes("Summary: session"),
+    )
+    expect(kvWrites.filter((key) => key === SETTINGS_KV_KEY).length).toBe(3)
+    expect(dialog.replaces()).toBe(1)
+    dispose()
+  }, 20000)
+
+  test("REGRESSION: selecting an option keeps the SAME dialog stack entry and render identity — no replace, filter query preserved, titles reactive", async () => {
+    const rootID = "ses_dialog_identity"
+    purgeTreeCache()
+    dialogProps.length = 0
+    const { api, dialog, dispose } = await mountEntry(state(rootID), {}, false)
+    showSettingsDialog(api)
+    const setup = await renderDialog(dialog.stack)
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes("TokenMeter Settings"),
+    )
+    const renderBefore = dialog.stack[0]?.render
+    const onCloseBefore = dialog.stack[0]?.onClose
+    expect(dialog.replaces()).toBe(1)
+
+    // The user types a filter query into the host-owned input. The mock
+    // mirrors the host: the query lives INSIDE the DialogSelect instance
+    // (the installed API exposes only the outbound `onFilter`), so only
+    // recreating the dialog could reset it.
+    mockDialogSelectApiRef.current?.setFilter("cach")
+    await waitForFrameDriven(setup, (frame) => frame.includes("[filter: cach]"))
+
+    // Selecting an option cycles the preference WITHOUT calling replace
+    // again: exactly the same stack entry and render function, exactly one
+    // DialogSelect instance (one props record), and the typed query
+    // survives on the same instance.
+    const props0 = dialogProps[0]
+    const cacheOption = props0?.options[0]
+    props0?.onSelect?.(cacheOption!)
+    expect(settings().cache).toBe("separated")
+    expect(dialog.replaces()).toBe(1)
+    expect(dialog.stack).toHaveLength(1)
+    expect(dialog.stack[0]?.render).toBe(renderBefore)
+    expect(dialog.stack[0]?.onClose).toBe(onCloseBefore)
+    expect(dialogProps).toHaveLength(1)
+    // The SAME mounted instance repaints reactively with the cycled value
+    // AND keeps the filter query — no focus/search reset.
+    await waitForFrameDriven(
+      setup,
+      (frame) =>
+        frame.includes("Cache: separated") && frame.includes("[filter: cach]"),
+    )
+    expect(setup.captureCharFrame()).not.toContain("Cache: combined")
+    dispose()
+  }, 20000)
+
+  test("the Shortcut row shows the current binding and cycling it re-registers the layer on the SAME dialog", async () => {
+    const rootID = "ses_dialog_shortcut"
+    purgeTreeCache()
+    dialogProps.length = 0
+    const { api, dialog, layers, kvWrites, dispose } = await mountEntry(
+      state(rootID),
+      {},
+      false,
+    )
+    showSettingsDialog(api)
+    expect(dialog.stack).toHaveLength(1)
+    const setup = await renderDialog(dialog.stack)
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes("Shortcut: Ctrl+E"),
+    )
+    expect(setup.captureCharFrame()).toContain("Shortcut: Ctrl+E")
+
+    // The entry registered the default binding for the toggle layer.
+    const toggleLayer = () =>
+      layers.find((layer) => layer.commands?.[0]?.name === TOGGLE_COMMAND_NAME)
+    expect(toggleLayer()?.bindings?.[0]?.key).toBe("ctrl+e")
+
+    const select = dialogProps[0]?.onSelect
+    const shortcutOption = dialogProps[0]?.options[4]
+    expect(shortcutOption?.title).toBe("Shortcut: Ctrl+E")
+    select?.(shortcutOption!)
+    expect(toggleShortcut()).toBe("ctrl+shift+e")
+    expect(kvWrites).toContain(TOGGLE_SHORTCUT_KV_KEY)
+    // The SAME dialog re-renders reactively with the new label — no replace,
+    // focus preserved (the previous-fix contract).
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes("Shortcut: Ctrl+Shift+E"),
+    )
+    expect(dialog.replaces()).toBe(1)
+    // The layer was re-registered with the new binding; command preserved.
+    expect(toggleLayer()?.bindings?.[0]?.key).toBe("ctrl+shift+e")
+    expect(toggleLayer()?.commands?.[0]?.name).toBe(TOGGLE_COMMAND_NAME)
+
+    // Cycle through to Off: the binding disappears, the command stays.
+    select?.(shortcutOption!)
+    expect(toggleShortcut()).toBe("ctrl+m")
+    select?.(shortcutOption!)
+    expect(toggleShortcut()).toBe("off")
+    await waitForFrameDriven(setup, (frame) => frame.includes("Shortcut: Off"))
+    expect(toggleLayer()?.bindings).toEqual([])
+    expect(toggleLayer()?.commands?.[0]?.name).toBe(TOGGLE_COMMAND_NAME)
+    expect(dialog.replaces()).toBe(1)
+    dispose()
+  }, 20000)
+
+  test("cancelling closes the dialog without changing preferences", async () => {
+    const rootID = "ses_dialog_cancel"
+    purgeTreeCache()
+    dialogProps.length = 0
+    const { api, dialog, dispose } = await mountEntry(state(rootID), {}, false)
+    showSettingsDialog(api)
+    expect(dialog.clears()).toBe(0)
+
+    // The host fires the stack-level onClose on Escape/cancel; the module
+    // wires it to `api.ui.dialog.clear()`.
+    const onClose = dialog.stack[0]?.onClose
+    expect(onClose).toBeDefined()
+    onClose?.()
+    expect(dialog.clears()).toBe(1)
+    expect(dialog.stack).toHaveLength(0)
+    expect(settings().cache).toBe("combined")
+    expect(settings().numbers).toBe("compact")
+    expect(settings().collapsedSummary).toBe("session")
+    expect(subagentsPref()).toBe("collapsed")
+    dispose()
+  }, 20000)
+})
+
+describe("palette command (keymap.registerLayer seam)", () => {
+  const state = (rootID: string): MutableApi => ({
+    sessions: {
+      [rootID]: [
+        msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+      ],
+    },
+    children: {},
+    metas: { [rootID]: { id: rootID, title: "Root" } },
+  })
+
+  test("registers the Settings command in a TokenMeter-category palette layer; palette run opens the dialog, metrics body unchanged", async () => {
+    const rootID = "ses_palette_dialog"
+    purgeTreeCache()
+    dialogProps.length = 0
+    const { slot, layers, dialog, dispose } = await mountEntry(
+      state(rootID),
+      {},
+      false,
+    )
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      {
+        width: 60,
+        height: 20,
+      },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
+
+    // The entry registered exactly two keymap layers: the Settings command
+    // in the TokenMeter category (spec: tokenmeter-command-palette —
+    // `api.keymap.registerLayer`, namespace "palette", category "TokenMeter")
+    // and the toggle-sections layer with its default binding.
+    expect(layers).toHaveLength(2)
+    const command = layers[0]?.commands?.[0]
+    expect(command?.name).toBe("tokenmeter.settings")
+    expect(command?.namespace).toBe("palette")
+    expect(command?.category).toBe("TokenMeter")
+    expect(command?.title).toBe("TokenMeter: Settings")
+    expect(command?.run).toBeTypeOf("function")
+    if (typeof command?.run !== "function")
+      throw new Error("palette run missing")
+
+    const toggleLayer = layers[1]
+    expect(toggleLayer?.commands?.[0]?.name).toBe(TOGGLE_COMMAND_NAME)
+    expect(toggleLayer?.commands?.[0]?.namespace).toBe("palette")
+    expect(toggleLayer?.commands?.[0]?.category).toBe("TokenMeter")
+    expect(toggleLayer?.commands?.[0]?.title).toBe(
+      "TokenMeter: Expand/Collapse Sections",
+    )
+    expect(toggleLayer?.bindings).toEqual([
+      {
+        key: "ctrl+e",
+        cmd: TOGGLE_COMMAND_NAME,
+        event: "press",
+        preventDefault: true,
+      },
+    ])
+
+    // The host palette dispatches the command by name: run() opens the
+    // settings DialogSelect via api.ui.dialog.replace (spec: palette run
+    // opens the dialog) while the ALREADY-MOUNTED metric body stays on the
+    // frame — no in-panel settings screen ever replaces it.
+    command.run()
+    await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
+    expect(dialog.stack).toHaveLength(1)
+    const render = dialog.stack[0]?.render
+    if (typeof render !== "function")
+      throw new Error("palette dialog render missing")
+    const dialogSetup = await testRender(render as never, {
+      width: 60,
+      height: 20,
+    })
+    await waitForFrameDriven(dialogSetup, (frame) =>
+      frame.includes("TokenMeter Settings"),
+    )
+    const dialogFrame = dialogSetup.captureCharFrame()
+    expect(dialogFrame).toContain("Cache: combined")
+    expect(dialogFrame).toContain("Summary: session")
+    expect(dialogFrame).toContain("Subagents: collapsed")
+
+    // The sidebar metrics body never changed: same rows, no settings rows.
+    const metricsAfter = setup.captureCharFrame()
+    expect(metricsAfter).toContain("41K tokens · $0.01")
+    expect(metricsAfter).not.toContain("collapsedSummary")
+    expect(metricsAfter).not.toContain("Back")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("the layer disposers are wired to lifecycle.onDispose: dispose unregisters BOTH layers", async () => {
+    const rootID = "ses_palette_dispose"
+    purgeTreeCache()
+    const { slot, layers, dispose } = await mountEntry(state(rootID))
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      {
+        width: 60,
+        height: 20,
+      },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
+    expect(layers).toHaveLength(2)
+
+    // mountEntry.dispose() runs every lifecycle.onDispose handler; the
+    // returned registerLayer disposers must be among them, so BOTH the
+    // palette layer and the toggle layer disappear from the keymap when the
+    // plugin is disposed.
+    disposeReconcile()
+    dispose()
+    expect(layers).toHaveLength(0)
+  }, 20000)
+
+  test("running the toggle command expands all sections together and collapses them together (Subagents persists)", async () => {
+    const rootID = "ses_toggle_cmd"
+    const childID = "ses_toggle_cmd_child"
+    purgeTreeCache()
+    const state: MutableApi = {
+      sessions: {
+        [rootID]: [
+          msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+        ],
+        [childID]: [],
+      },
+      children: { [rootID]: [{ id: childID, agent: "general" }] },
+      metas: {
+        [rootID]: { id: rootID, title: "Root" },
+        [childID]: { id: childID, agent: "general" },
+      },
+    }
+    const project: ProjectState = {
+      current: { id: "proj_toggle", worktree: "/wt" },
+      sessions: [
+        {
+          id: "pt1",
+          projectID: "proj_toggle",
+          cost: 0.01,
+          tokens: { input: 1000, output: 500, reasoning: 200 },
+        },
+      ],
+    }
+    const { slot, layers, kvWrites, dispose } = await mountEntry(
+      state,
+      project,
+      false,
+    )
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      {
+        width: 60,
+        height: 20,
+      },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitFor(() => snapshot()!.groups.length === 1)
+    await waitFor(() => projectSnapshot() !== null)
+    await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
+
+    const toggleLayer = layers.find(
+      (layer) => layer.commands?.[0]?.name === TOGGLE_COMMAND_NAME,
+    )
+    const run = toggleLayer?.commands?.[0]?.run
+    if (typeof run !== "function") throw new Error("toggle run missing")
+
+    // All three sections start collapsed.
+    let frame = setup.captureCharFrame()
+    expect(frame).toContain(`${GLYPH.expand} Project`)
+    expect(frame).toContain(`${GLYPH.expand} Session`)
+    expect(frame).toContain(`${GLYPH.expand} Subagents`)
+
+    // Palette invocation expands ALL THREE together on the mounted panel.
+    run()
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`${GLYPH.collapse} Subagents`),
+    )
+    frame = setup.captureCharFrame()
+    expect(frame).toContain(`${GLYPH.collapse} Project`)
+    expect(frame).toContain(`${GLYPH.collapse} Session`)
+    expect(frame).toContain(`${GLYPH.collapse} Subagents`)
+    // The Subagents expansion is durable (cycleSubagents write).
+    expect(kvWrites.filter((key) => key === SUBAGENTS_KV_KEY)).toHaveLength(1)
+
+    // A second invocation collapses all three; the Subagents collapse
+    // persists too.
+    run()
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`${GLYPH.expand} Subagents`),
+    )
+    frame = setup.captureCharFrame()
+    expect(frame).toContain(`${GLYPH.expand} Project`)
+    expect(frame).toContain(`${GLYPH.expand} Session`)
+    expect(kvWrites.filter((key) => key === SUBAGENTS_KV_KEY)).toHaveLength(2)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+})
+
+describe("subagents scrollbox (global disclosure, per-agent compact rows, exclusive replace-on-expand, real scroll)", () => {
+  test("REGRESSION: zero subagent groups render NO Subagents heading, no scrollbox and no 0-count caption — zero vertical space", async () => {
+    // The session has usage but NO delegations: the snapshot has zero
+    // groups. The Subagents section must consume zero vertical space with
+    // both the collapsed pref (no `▶ Subagents (0 agents · 0 tasks)`
+    // caption) and the expanded pref (no heading + empty scrollbox).
+    const rootID = "ses_sub_empty_groups"
+    const noGroups: MutableApi = {
+      sessions: {
+        [rootID]: [
+          msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+        ],
+      },
+      children: {},
+      metas: { [rootID]: { id: rootID, title: "Root" } },
+    }
+    for (const expanded of [false, true]) {
+      purgeTreeCache()
+      const { slot, dispose } = await mountEntry(noGroups, {}, expanded)
+      const setup = await testRender(
+        () => slot({ theme: THEME }, { session_id: rootID }) as never,
+        { width: 60, height: 20 },
+      )
+      await waitFor(() => snapshot()?.rootID === rootID)
+      await waitFor(() => snapshot()!.groups.length === 0)
+      await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
+      const frame = setup.captureCharFrame()
+      // No heading, no caption, no agent rows, no scroll container.
+      expect(frame).not.toContain("Subagents")
+      expect(frame).not.toContain("agents ·")
+      expect(frame).not.toContain("(0 tasks)")
+      expect(frame).not.toContain("↳")
+      expect(findScrollbox(setup)).toBeNull()
+      // Project/Session sections are unaffected.
+      expect(frame).toContain(`${GLYPH.expand} Project`)
+      expect(frame).toContain(`${GLYPH.expand} Session`)
+      expect(frame).toContain("41K tokens · $0.01")
+      disposeReconcile()
+      dispose()
+    }
+  }, 20000)
+
+  test("REGRESSION: the Subagents section appears automatically once the first group exists", async () => {
+    const rootID = "ses_sub_appears"
+    const childID = "ses_sub_appears_child"
+    const state: MutableApi = {
+      sessions: {
+        [rootID]: [
+          msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+        ],
+        [childID]: [msg("c1", childID, { input: 2000, output: 100 }, 0.001)],
+      },
+      // First discovery sees NO children: the delegation is invisible.
+      children: {},
+      metas: {
+        [rootID]: { id: rootID, title: "Root" },
+        [childID]: { id: childID, agent: "sdd-apply" },
+      },
+    }
+    purgeTreeCache()
+    const { fire, slot, dispose } = await mountEntry(state, {}, false)
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      { width: 60, height: 20 },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
+    // Zero groups on the mounted panel: no Subagents anywhere.
+    expect(snapshot()!.groups.length).toBe(0)
+    expect(setup.captureCharFrame()).not.toContain("Subagents")
+
+    // The delegated session becomes visible: session.created with a
+    // parentID purges the tree cache and the debounced reconcile discovers
+    // the child, so the SAME mounted panel gains the Subagents section
+    // automatically — no remount.
+    state.children = { [rootID]: [{ id: childID, parentID: rootID }] }
+    fire("session.created", {
+      info: { id: childID, sessionID: childID, parentID: rootID },
+    })
+    await waitFor(() => snapshot()?.groups.length === 1)
+    await waitForFrameDriven(setup, (frame) => frame.includes("Subagents"))
+    const frame = setup.captureCharFrame()
+    // Collapsed pref: the section appears with the caption showing the real
+    // aggregate counts (agent rows only render once expanded).
+    expect(frame).toContain("▶ Subagents (1 agent · 1 task)")
+    expect(frame).not.toContain("↳ sdd-apply")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  const groupState = (
+    rootID: string,
+    groups: Array<{
+      id: string
+      agent: string
+      input: number
+      output: number
+      cost?: number
+      runs?: number
+    }>,
+    root?: { input: number; output: number; cost?: number },
+  ): MutableApi => {
+    const sessions: MutableApi["sessions"] = {
+      [rootID]: [
+        msg(
+          "r1",
+          rootID,
+          {
+            input: root?.input ?? 1000,
+            output: root?.output ?? 100,
+          },
+          root?.cost ?? 0.001,
+        ),
+      ],
+    }
+    const children: MutableApi["children"] = { [rootID]: [] }
+    const metas: MutableApi["metas"] = {
+      [rootID]: { id: rootID, title: "Root" },
+    }
+    for (const group of groups) {
+      for (let run = 0; run < (group.runs ?? 1); run++) {
+        const sid = `${group.id}_${run}`
+        sessions[sid] = [
+          msg(
+            `m_${group.id}_${run}`,
+            sid,
+            { input: group.input, output: group.output },
+            group.cost ?? 0,
+          ),
+        ]
+        children[rootID]!.push({ id: sid, agent: group.agent })
+        metas[sid] = { id: sid, agent: group.agent }
+      }
+    }
+    return { sessions, children, metas }
+  }
+
+  test("collapsed global row shows the aggregate counts and NO agent list", async () => {
+    const rootID = "ses_sub_collapsed"
+    purgeTreeCache()
+    const { slot, dispose } = await mountEntry(
+      groupState(rootID, [
+        { id: "ses_sb_build", agent: "build", input: 2000, output: 100 },
+        { id: "ses_sb_explore", agent: "explore", input: 2000, output: 100 },
+        { id: "ses_sb_general", agent: "general", input: 2000, output: 100 },
+        { id: "ses_sb_plan", agent: "plan", input: 2000, output: 100 },
+        { id: "ses_sb_test", agent: "test", input: 2000, output: 100 },
+        {
+          id: "ses_sb_write",
+          agent: "write",
+          input: 2000,
+          output: 100,
+          runs: 2,
+        },
+      ]),
+      {},
+      false,
+    )
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      { width: 60, height: 20 },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitFor(() => snapshot()?.groups.length === 6)
+    await waitForFrameDriven(setup, (frame) => frame.includes("Subagents"))
+    const collapsed = setup.captureCharFrame()
+    // One left-chevron row with aggregate counts — the exact panel frame.
+    expect(collapsed).toContain("▶ Subagents (6 agents · 7 tasks)")
+    // Collapsed renders NO agent list: no compact agent rows, no cue, no
+    // agent names anywhere below the header.
+    for (const name of ["build", "explore", "general", "plan", "test", "write"])
+      expect(collapsed).not.toContain(`↳ ${name} (`)
+    expect(collapsed).not.toContain("more — scroll")
+    expect(collapsed).not.toContain("(1 task)")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("clicking the global row expands to `▼ Subagents` with NO aggregate and the compact agent list", async () => {
+    const rootID = "ses_sub_expand"
+    purgeTreeCache()
+    const { slot, dispose } = await mountEntry(
+      groupState(rootID, [
+        { id: "ses_se_build", agent: "build", input: 2000, output: 100 },
+        { id: "ses_se_explore", agent: "explore", input: 2000, output: 100 },
+        { id: "ses_se_general", agent: "general", input: 2000, output: 100 },
+        { id: "ses_se_plan", agent: "plan", input: 2000, output: 100 },
+        { id: "ses_se_test", agent: "test", input: 2000, output: 100 },
+        {
+          id: "ses_se_write",
+          agent: "write",
+          input: 2000,
+          output: 100,
+          runs: 2,
+        },
+      ]),
+      {},
+      false,
+    )
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      { width: 60, height: 20 },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitFor(() => snapshot()?.groups.length === 6)
+    await waitForFrameDriven(setup, (frame) => frame.includes("Subagents"))
+    await clickSubagentsHeader(setup, setup.captureCharFrame())
+    await waitForFrameDriven(setup, (frame) => frame.includes("▼ Subagents"))
+    const frame = setup.captureCharFrame()
+    // Expanded header: `▼ Subagents` with NO agent/task counts — the list is
+    // the detail.
+    expect(frame).toContain("▼ Subagents")
+    expect(frame).not.toContain("agents ·")
+    expect(frame).not.toContain("(7 tasks)")
+    // The compact agent entries render (largest group first): two-line
+    // entries inside the scroll viewport.
+    expect(frame).toContain(`↳ write (2 tasks) ${GLYPH.expand}`)
+    expect(frame).toContain("4K tokens · $0.00")
+    expect(frame).toContain(`↳ build (1 task) ${GLYPH.expand}`)
+    expect(frame).toContain("2K tokens · $0.00")
+    expect(frame).not.toContain("more — scroll")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("compact agent two-line entry; clicking replaces it with the three-line detail — L1 exactly once", async () => {
+    const rootID = "ses_sub_general"
+    purgeTreeCache()
+    const { slot, dispose } = await mountEntry(
+      groupState(
+        rootID,
+        [
+          {
+            id: "ses_sg_general",
+            agent: "General",
+            input: 700000,
+            output: 40000,
+            cost: 0.022,
+            runs: 5,
+          },
+          { id: "ses_sg_explore", agent: "explore", input: 6000, output: 300 },
+        ],
+        // A distinct root usage keeps the Session L1 (`3.8M tokens`) from
+        // colliding with the General agent's spec-exact `3.7M tokens` L1.
+        { input: 100000, output: 10000 },
+      ),
+    )
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      { width: 60, height: 20 },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitFor(() => snapshot()?.groups.length === 2)
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`↳ General (5 tasks) ${GLYPH.expand}`),
+    )
+    const compact = setup.captureCharFrame()
+    // Compact entry: `↳`-indented header `↳ General (5 tasks) ▶` (closed
+    // trailing per-agent chevron) plus the second compact L1 line
+    // `3.7M tokens · $0.11`.
+    expect(compact).toContain(`↳ General (5 tasks) ${GLYPH.expand}`)
+    expect(compact).not.toContain("General (5 tasks) ▼")
+    expect(compact).toContain("3.7M tokens · $0.11")
+    // No group detail rows while closed.
+    expect(compact).not.toContain("3.5M input")
+    expect(compact).not.toContain("200K output")
+
+    // Clicking the compact entry replaces its compact lines with the
+    // three-line unbulleted detail: the `↳` header stays put and its
+    // TRAILING per-agent chevron flips `▶` → `▼`, and the L1 is the same
+    // spend line exactly once total — no duplicates. The whole entry keeps
+    // the modest two-column nested-list indent (the `↳` marker preserved).
+    await clickAgentRow(setup, compact, "General")
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes("3.5M input · 200K output"),
+    )
+    const open = setup.captureCharFrame()
+    expect(open).toContain(`↳ General (5 tasks) ${GLYPH.collapse}`)
+    expect(open).not.toContain(`↳ General (5 tasks) ${GLYPH.expand}`)
+    expect(countOccurrences(open, "3.7M tokens · $0.11")).toBe(1)
+    expect(open).toContain("3.5M input · 200K output")
+    expect(open).toContain("0 reason · 0 cache")
+    const agentRow = open
+      .split(/[\r\n]+/)
+      .find((line) => line.includes(`↳ General (5 tasks) ${GLYPH.collapse}`))
+    expect(agentRow).toBeDefined()
+    // The Subagents nested-list indent regression: the agent row starts at
+    // column 2 (two-column leading spacing before the `↳` marker).
+    expect([...(agentRow ?? "")].findIndex((ch) => ch !== " ")).toBe(2)
+    // The scrollbox content holds exactly the six rows of the two agents
+    // (General open = 4 rows, explore compact = 2 rows) — everything is in
+    // the container, nothing sliced away.
+    const scrollbox = findScrollbox(setup)
+    expect(scrollbox).not.toBeNull()
+    expect(scrollbox!.getChildren().length).toBe(6)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("exclusive accordion: opening one agent closes the other; clicking the open agent closes it", async () => {
+    const rootID = "ses_sub_exclusive"
+    purgeTreeCache()
+    const { slot, dispose } = await mountEntry(
+      groupState(rootID, [
+        { id: "ses_sx_explore", agent: "explore", input: 6000, output: 300 },
+        { id: "ses_sx_general", agent: "general", input: 4000, output: 200 },
+      ]),
+    )
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      { width: 60, height: 20 },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitFor(() => snapshot()?.groups.length === 2)
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`↳ explore (1 task) ${GLYPH.expand}`),
+    )
+    expect(setup.captureCharFrame()).not.toContain("6K input · 300 output")
+
+    // Open explore: its detail replaces the compact lines.
+    await clickAgentRow(setup, setup.captureCharFrame(), "explore")
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes("6K input · 300 output"),
+    )
+    // explore's open detail fills the 4-row viewport: general sits below the
+    // fold now, so the REAL scroll container is the only way down to it.
+    const scrollbox = findScrollbox(setup)
+    expect(scrollbox).not.toBeNull()
+    scrollbox!.scrollTo(scrollbox!.scrollHeight)
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`↳ general (1 task) ${GLYPH.expand}`),
+    )
+    // Open general: explore's detail closes (exclusive one-open accordion).
+    await clickAgentRow(setup, setup.captureCharFrame(), "general")
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes("4K input · 200 output"),
+    )
+    const swapped = setup.captureCharFrame()
+    expect(swapped).not.toContain("6K input · 300 output")
+    expect(swapped).toContain(`↳ general (1 task) ${GLYPH.collapse}`)
+
+    // Scroll back to the top; clicking the open agent again closes it: no
+    // detail rows remain and every compact L1 renders exactly once.
+    scrollbox!.scrollTo(0)
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`↳ explore (1 task) ${GLYPH.expand}`),
+    )
+    await clickAgentRow(setup, setup.captureCharFrame(), "general")
+    await waitForFrameDriven(
+      setup,
+      (frame) => !frame.includes("4K input · 200 output"),
+    )
+    const closed = setup.captureCharFrame()
+    expect(countOccurrences(closed, "6K tokens · $0.00")).toBe(1)
+    expect(countOccurrences(closed, "4K tokens · $0.00")).toBe(1)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("the open agent is transient: nothing written to kv, fresh mount starts closed, session change resets", async () => {
+    const rootID = "ses_sub_transient"
+    purgeTreeCache()
+    const first = await mountEntry(
+      groupState(rootID, [
+        { id: "ses_st_explore", agent: "explore", input: 6000, output: 300 },
+        { id: "ses_st_general", agent: "general", input: 4000, output: 200 },
+      ]),
+    )
+    const setup = await testRender(
+      () => first.slot({ theme: THEME }, { session_id: rootID }) as never,
+      { width: 60, height: 20 },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`↳ explore (1 task) ${GLYPH.expand}`),
+    )
+    await clickAgentRow(setup, setup.captureCharFrame(), "explore")
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes("6K input · 300 output"),
+    )
+    // Opening a group is transient: no durable write was issued.
+    expect(first.kvWrites).toEqual([])
+    disposeReconcile()
+    first.dispose()
+
+    // A fresh mount starts with no agent detail open.
+    purgeTreeCache()
+    const second = await mountEntry(
+      groupState(rootID, [
+        { id: "ses_st_explore", agent: "explore", input: 6000, output: 300 },
+        { id: "ses_st_general", agent: "general", input: 4000, output: 200 },
+      ]),
+    )
+    const setup2 = await testRender(
+      () => second.slot({ theme: THEME }, { session_id: rootID }) as never,
+      { width: 60, height: 20 },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitForFrameDriven(setup2, (frame) =>
+      frame.includes(`↳ explore (1 task) ${GLYPH.expand}`),
+    )
+    expect(setup2.captureCharFrame()).not.toContain("6K input · 300 output")
+    disposeReconcile()
+    second.dispose()
+
+    // A session change resets the open agent on the SAME mounted panel.
+    const aID = "ses_sub_sess_a"
+    const bID = "ses_sub_sess_b"
+    const a = groupState(aID, [
+      { id: "ses_sa_explore", agent: "explore", input: 6000, output: 300 },
+    ])
+    const b = groupState(bID, [
+      { id: "ses_sb2_explore", agent: "explore", input: 6000, output: 300 },
+    ])
+    const state: MutableApi = {
+      sessions: { ...a.sessions, ...b.sessions },
+      children: { ...a.children, ...b.children },
+      metas: {
+        ...a.metas,
+        ...b.metas,
+        [aID]: { id: aID, title: "A" },
+        [bID]: { id: bID, title: "B" },
+      },
+    }
+    purgeTreeCache()
+    const { api, dispose } = await mountEntry(state)
+    const [sid, setSid] = createSignal(aID)
+    const setup3 = await testRender(
+      () =>
+        (
+          <UsagePanel
+            api={api}
+            sessionID={sid()}
+            subagentsPref={subagentsPref}
+            onToggleSubagents={() => cycleSubagents(api)}
+            theme={() => THEME.current}
+            width={38}
+          />
+        ) as never,
+      { width: 60, height: 20 },
+    )
+    await waitFor(() => snapshot()?.rootID === aID)
+    await waitForFrameDriven(setup3, (frame) =>
+      frame.includes(`↳ explore (1 task) ${GLYPH.expand}`),
+    )
+    await clickAgentRow(setup3, setup3.captureCharFrame(), "explore")
+    await waitForFrameDriven(setup3, (frame) =>
+      frame.includes("6K input · 300 output"),
+    )
+    setSid(bID)
+    await waitFor(() => snapshot()?.rootID === bID)
+    await waitForFrameDriven(setup3, (frame) =>
+      frame.includes(`↳ explore (1 task) ${GLYPH.expand}`),
+    )
+    expect(setup3.captureCharFrame()).not.toContain("6K input · 300 output")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("all 8 agents render inside the real scrollbox, every one reachable by scrolling, no clipped cue", async () => {
+    const rootID = "ses_sub_eight"
+    purgeTreeCache()
+    const { slot, dispose } = await mountEntry(
+      groupState(rootID, [
+        { id: "ses_8_build", agent: "build", input: 10000, output: 100 },
+        { id: "ses_8_code", agent: "code", input: 9000, output: 100 },
+        { id: "ses_8_explore", agent: "explore", input: 8000, output: 100 },
+        { id: "ses_8_general", agent: "general", input: 7000, output: 100 },
+        { id: "ses_8_plan", agent: "plan", input: 6000, output: 100 },
+        { id: "ses_8_review", agent: "review", input: 5000, output: 100 },
+        { id: "ses_8_test", agent: "test", input: 4000, output: 100 },
+        { id: "ses_8_write", agent: "write", input: 3000, output: 100 },
+      ]),
+    )
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      { width: 60, height: 20 },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitFor(() => snapshot()?.groups.length === 8)
+    await waitForFrameDriven(setup, (frame) => frame.includes("▼ Subagents"))
+    const scrollbox = findScrollbox(setup)
+    expect(scrollbox).not.toBeNull()
+    // ALL agents are children of the scroll container — nothing sliced: 8
+    // agents × 2 compact rows = 16 rows in the content.
+    expect(scrollbox!.getChildren().length).toBe(16)
+    // The viewport is roughly two compact agents: taller content than the
+    // fixed viewport proves real scrolling is required.
+    expect(scrollbox!.scrollHeight).toBeGreaterThan(4)
+    const top = setup.captureCharFrame()
+    expect(top).toContain(`↳ build (1 task) ${GLYPH.expand}`)
+    expect(top).toContain(`↳ code (1 task) ${GLYPH.expand}`)
+    // Only the viewport renders; the rest of the list is scrolled for.
+    expect(top).not.toContain("review")
+    expect(top).not.toContain("write")
+    expect(top).not.toContain("more — scroll")
+    // Scrolling the real scroll container reaches the last agent.
+    scrollbox!.scrollTo(scrollbox!.scrollHeight)
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`↳ write (1 task) ${GLYPH.expand}`),
+    )
+    const bottom = setup.captureCharFrame()
+    expect(bottom).toContain("3K tokens · $0.00")
+    expect(bottom).not.toContain("more — scroll")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("one agent renders fully without any scroll interaction", async () => {
+    const rootID = "ses_sub_single"
+    purgeTreeCache()
+    const { slot, dispose } = await mountEntry(
+      groupState(rootID, [
+        { id: "ses_ss_general", agent: "general", input: 4000, output: 200 },
+      ]),
+    )
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      { width: 60, height: 20 },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitFor(() => snapshot()?.groups.length === 1)
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`↳ general (1 task) ${GLYPH.expand}`),
+    )
+    const frame = setup.captureCharFrame()
+    // Both compact lines of the single agent render; the content fits the
+    // viewport, so no scrolling is needed.
+    expect(frame).toContain(`↳ general (1 task) ${GLYPH.expand}`)
+    expect(frame).toContain("4K tokens · $0.00")
+    const scrollbox = findScrollbox(setup)
+    expect(scrollbox).not.toBeNull()
+    expect(scrollbox!.scrollHeight).toBeLessThanOrEqual(4)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("compact agent colors: ↳ indent+chevron white, name info cyan, tasks in the derived detail tone, primary line white with light-red spend", async () => {
+    const rootID = "ses_sub_colors"
+    purgeTreeCache()
+    const { slot, dispose } = await mountEntry(
+      groupState(rootID, [
+        { id: "ses_sc_explore", agent: "explore", input: 6000, output: 300 },
+        { id: "ses_sc_general", agent: "general", input: 4000, output: 200 },
+      ]),
+    )
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      { width: 60, height: 20 },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes(`↳ explore (1 task) ${GLYPH.expand}`),
+    )
+    const frame = setup.captureCharFrame()
+    const spans = setup.captureSpans().lines.flatMap((line) => line.spans)
+    const fgOf = (text: string): string[] =>
+      spans
+        .filter((span) => span.text.includes(text))
+        .map((span) => rgbToHex(span.fg))
+    const white = rgbToHex(RGBA.fromHex("#a8b4dc"))
+    const info = rgbToHex(RGBA.fromHex("#00aaff"))
+    const error = rgbToHex(RGBA.fromHex("#ff4500"))
+    const detail = rgbToHex(detailTone(() => THEME.current))
+    // The `↳` indent glyph and the TRAILING per-agent chevron ride
+    // theme().text; the agent name renders in the light-blue/cyan
+    // theme().info tone (NEVER primary blue, NEVER success green); the task
+    // count and parentheses render in the derived detail tone (dimmer than
+    // textMuted). The compact token/cost summary renders white with the
+    // `$amount` in the light-red error tone — no arbitrary hues appear on
+    // agent rows.
+    expect(fgOf("↳")).toContain(white)
+    expect(fgOf(GLYPH.expand)).toContain(white)
+    expect(fgOf("explore")).toContain(info)
+    // Both agent entries carry `(1 task)` — every occurrence in the detail
+    // tone (dimmer than textMuted).
+    expect(fgOf("(1 task)")).toEqual([detail, detail])
+    expect(fgOf("6K")).toContain(white)
+    expect(fgOf("$0.00")).toContain(error)
+    expect(frame).not.toContain("spent")
+    // The Subagents nested-list indent regression: every agent HEADER row
+    // starts at column 2 (two-column leading spacing before the `↳`
+    // marker) and every agent METRIC row starts at column 4 (aligned under
+    // the header's name, after the `  ↳ ` prefix).
+    const rows = frame.split(/[\r\n]+/).filter((line) => line.includes("↳"))
+    for (const row of rows) {
+      expect([...row].findIndex((ch) => ch !== " ")).toBe(2)
+    }
+    const metricRows = frame
+      .split(/[\r\n]+/)
+      .filter(
+        (line) =>
+          line.trim().startsWith("6K tokens") ||
+          line.trim().startsWith("4K tokens"),
+      )
+    for (const row of metricRows) {
+      expect([...row].findIndex((ch) => ch !== " ")).toBe(4)
+    }
     disposeReconcile()
     dispose()
   }, 20000)
