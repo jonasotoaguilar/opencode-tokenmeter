@@ -1,6 +1,6 @@
 {
   "name": "opencode-tokenmeter-tui",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "OpenCode TUI plugin: TokenMeter sidebar — live token usage, cost, and delegation tree for sessions",
   "type": "module",
   "main": "./dist/tui.js",
@@ -15,8 +15,16 @@
       "import": "./dist/tui.js"
     }
   },
-  "files": ["dist"],
-  "keywords": ["opencode", "opencode-plugin", "plugin", "tokenmeter", "tui"],
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "plugin",
+    "tokenmeter",
+    "tui"
+  ],
   "license": "MIT",
   "author": "jonasotoaguilar",
   "repository": {
