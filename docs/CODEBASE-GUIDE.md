@@ -18,7 +18,7 @@ opencode-tokenmeter is an event-driven TUI plugin: host events invalidate sessio
 
 ## Golden Rule
 
-Every file belongs to exactly one concern: the entry (`tokenmeter.tsx`) only wires events and the slot; pure helpers (`math`, `format`, `text`, `glyphs`, `types`) never touch I/O or state; `store` is the only in-memory state owner; `reconcile`/`tree`/`groups`/`project`/`db` are the only modules that call the client SDK, `api.kv` or the SQLite store. If a change crosses more than two of these layers, reconsider the design.
+Every file belongs to exactly one concern: the entry (`tokenmeter.tsx`) only wires events, the slot, and the palette layers; pure helpers (`math`, `format`, `text`, `glyphs`, `types`) never touch I/O or state; `store` owns the usage state, while `settings`/`sections`/`shortcut` own the preference, disclosure, and command state (the only kv writers besides the entry); `reconcile`/`tree`/`groups`/`project`/`db` are the only modules that call the client SDK or the SQLite store. If a change crosses more than two of these layers, reconsider the design.
 
 ## Guide Pages
 
@@ -30,7 +30,10 @@ Every file belongs to exactly one concern: the entry (`tokenmeter.tsx`) only wir
 | [src/tokenmeter/tree.ts](../src/tokenmeter/tree.ts) | Delegation tree and groups: tree discovery, agent resolution, group summaries | `src/tokenmeter/groups.ts` |
 | [src/tokenmeter/project.ts](../src/tokenmeter/project.ts) | Project section: live-list refresh with explicit limit and cap fail-closed, deleted aggregate, polling timer, error recovery | `src/tokenmeter/db.ts` |
 | [src/tokenmeter/db.ts](../src/tokenmeter/db.ts) | Plugin-owned SQLite store: deleted-session aggregate per project + tombstone admission | `bun:sqlite`, `src/tokenmeter/math.ts` |
-| [src/tokenmeter/panel/](../src/tokenmeter/panel/) | Rendering and layout: panel composition, metric rows, group rows, scrollbox | `index.tsx`, `group-rows.tsx`, `project-section.tsx` |
+| [src/tokenmeter/settings.ts](../src/tokenmeter/settings.ts) | Preferences model: three-field `settings.v1` + Subagents durable key, ready-gated writes | `api.kv`, `src/tokenmeter/sections.ts` |
+| [src/tokenmeter/sections.ts](../src/tokenmeter/sections.ts) | Transient Project/Session disclosure shared with the toggle command | `src/tokenmeter/shortcut.ts`, `src/tokenmeter/panel/index.tsx` |
+| [src/tokenmeter/shortcut.ts](../src/tokenmeter/shortcut.ts) | Toggle command + configurable shortcut: keymap layer, kv preference, live re-registration | `api.keymap`, `src/tokenmeter/settings.ts` |
+| [src/tokenmeter/panel/](../src/tokenmeter/panel/) | Rendering and layout: master disclosure, section headings, agent accordion, tones, settings dialog | `index.tsx`, `section.tsx`, `group-rows.tsx`, `settings-dialog.tsx`, `tone.ts`, `project-section.tsx` |
 | [src/tokenmeter/math.ts](../src/tokenmeter/math.ts) | Pure helpers: usage math, numeric formatting, line formatting, column math, glyphs, types | `numbers.ts`, `format.ts`, `text.ts`, `glyphs.ts`, `types.ts` |
 | [scripts/build.ts](../scripts/build.ts) | Build and artifact guard: bundled dist, reactive-binding assertion, dist test | `test/artifact.test.ts` |
 | [test/harness.test.ts](../test/harness.test.ts) | Test suites: harness (modules), render (panel), artifact (dist) | `test/render.test.tsx`, `test/artifact.test.ts` |
@@ -41,6 +44,7 @@ Every file belongs to exactly one concern: the entry (`tokenmeter.tsx`) only wir
 2. [ARCHITECTURE.md](../ARCHITECTURE.md) — component details, failure invariants, ADRs.
 3. [DESIGN.md](../DESIGN.md) — what the panel looks like and why.
 4. The entry (`src/tokenmeter.tsx`), then follow one event end-to-end into `reconcile.ts` → `store.ts` → `panel/index.tsx`.
+5. `src/tokenmeter/settings.ts` → `sections.ts` → `shortcut.ts` — how preferences, disclosure, and the toggle command/shortcut stay in sync.
 
 ## Existing References
 
