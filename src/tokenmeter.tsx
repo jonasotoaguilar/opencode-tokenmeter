@@ -7,10 +7,11 @@
  * `sidebar.expanded` Subagents key) once at startup, and registers the
  * append-mode sidebar_content slot that renders the TokenMeter panel. The
  * sidebar width comes from the slot props/context width chain (fallback 38,
- * clamped 24–52). The same registration also renders the compact
- * single-line UsageFooter into the host `app_bottom` slot — the active
- * route session's OWN usage only (never the delegation tree), tracked
- * reactively from api.route.current and pulsed by the reconcile snapshot.
+ * clamped 24–52). The same registration also replaces the host
+ * `session_prompt` row: it re-renders the native `api.ui.Prompt` and appends
+ * the compact single-line SessionPromptFooter directly below it — the active
+ * session's OWN usage only (never the delegation tree), tracked from the
+ * slot's `session_id` prop and pulsed by the reconcile snapshot.
  *
  * Lifecycle: the active session is tracked reactively by reading
  * api.route.current inside a Solid effect (the TUI exposes no session-select
@@ -57,7 +58,7 @@ import type { TuiPlugin } from "@opencode-ai/plugin/tui"
 import { createEffect, createRoot } from "solid-js"
 import { projectDbPath, recordDeletedSession } from "./tokenmeter/db"
 import { UsagePanel } from "./tokenmeter/panel"
-import { UsageFooter } from "./tokenmeter/panel/footer"
+import { SessionPromptFooter } from "./tokenmeter/panel/footer"
 import { showSettingsDialog } from "./tokenmeter/panel/settings-dialog"
 import {
   disposeProjectRefresh,
@@ -280,8 +281,17 @@ const tui: TuiPlugin = async (api) => {
             />
           )
         },
-        app_bottom(ctx) {
-          return <UsageFooter api={api} theme={() => ctx.theme.current} />
+        session_prompt(_ctx, props) {
+          return (
+            <SessionPromptFooter
+              api={api}
+              sessionID={props?.session_id}
+              visible={props?.visible}
+              disabled={props?.disabled}
+              onSubmit={props?.on_submit}
+              ref={props?.ref}
+            />
+          )
         },
       },
     })

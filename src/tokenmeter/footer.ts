@@ -1,6 +1,6 @@
 /**
  * Pure single-line formatter for the TokenMeter footer segment (host
- * `app_bottom` slot).
+ * `session_prompt` slot, rendered below the re-hosted native prompt).
  *
  * The footer shows the ACTIVE route session's OWN cumulative spend only —
  * never delegated descendants — so every value is read from the canonical
