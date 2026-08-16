@@ -67,7 +67,11 @@ export function UsageFooter(props) {
 
   return (
     <Show when={line()}>
-      {(text) => <text fg={theme().text}>{text()}</text>}
+      {(text) => (
+        <box flexDirection="row" justifyContent="flex-end" paddingRight={2}>
+          <text fg={theme().textMuted}>{text()}</text>
+        </box>
+      )}
     </Show>
   )
 }
