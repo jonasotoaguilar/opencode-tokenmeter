@@ -48,7 +48,7 @@ export type DialogSurface = {
     }
     DialogSelect: (props: {
       title: string
-      options: Array<{ title: string; value: string }>
+      options: Array<{ title: string; value: string; category?: string }>
       onSelect?: (option: { title: string; value: string }) => void
     }) => JSX.Element
   }
@@ -73,40 +73,60 @@ export function showSettingsDialog(api: DialogSurface): void {
       <api.ui.DialogSelect
         title="TokenMeter Settings"
         options={[
-          { title: `Cache: ${settings().cache}`, value: "cache" },
-          { title: `Numbers: ${settings().numbers}`, value: "numbers" },
+          {
+            title: `Cache: ${settings().cache}`,
+            value: "cache",
+            category: "Sidebar",
+          },
+          {
+            title: `Numbers: ${settings().numbers}`,
+            value: "numbers",
+            category: "Sidebar",
+          },
           {
             title: `Summary: ${settings().collapsedSummary}`,
             value: "collapsedSummary",
+            category: "Sidebar",
           },
-          { title: `Subagents: ${subagentsPref()}`, value: "subagents" },
+          {
+            title: `Subagents: ${subagentsPref()}`,
+            value: "subagents",
+            category: "Sidebar",
+          },
           {
             title: `Shortcut: ${toggleShortcutLabel()}`,
             value: "shortcut",
+            category: "Sidebar",
           },
           {
             title: `Footer: ${settings().footer.enabled ? "on" : "off"}`,
             value: "footer",
+            category: "Footer",
           },
           {
             title: `Footer input: ${settings().footer.input ? "on" : "off"}`,
             value: "footer.input",
+            category: "Footer",
           },
           {
             title: `Footer output: ${settings().footer.output ? "on" : "off"}`,
             value: "footer.output",
+            category: "Footer",
           },
           {
             title: `Footer reasoning: ${settings().footer.reasoning ? "on" : "off"}`,
             value: "footer.reasoning",
+            category: "Footer",
           },
           {
             title: `Footer cache: ${settings().footer.cache ? "on" : "off"}`,
             value: "footer.cache",
+            category: "Footer",
           },
           {
             title: `Footer total: ${settings().footer.total ? "on" : "off"}`,
             value: "footer.total",
+            category: "Footer",
           },
         ]}
         onSelect={(option) => {
