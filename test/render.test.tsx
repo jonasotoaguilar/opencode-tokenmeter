@@ -50,6 +50,9 @@ import {
   RECONCILE_DELAY,
 } from "../src/tokenmeter/reconcile"
 import {
+  cycleFooter,
+  cycleFooterMetric,
+  cycleNumbers,
   cycleSubagents,
   SETTINGS_KV_KEY,
   SUBAGENTS_KV_KEY,
@@ -61,7 +64,12 @@ import {
   TOGGLE_SHORTCUT_KV_KEY,
   toggleShortcut,
 } from "../src/tokenmeter/shortcut"
-import { snapshot, upsertMessageUsage, usageMap } from "../src/tokenmeter/store"
+import {
+  observedSessionUsage,
+  snapshot,
+  upsertMessageUsage,
+  usageMap,
+} from "../src/tokenmeter/store"
 import { purgeTreeCache } from "../src/tokenmeter/tree"
 import type {
   ProjectSessionLike,
@@ -395,6 +403,7 @@ async function mountEntry(
     params: {},
   })
   let slot: ((ctx: unknown, props: unknown) => unknown) | undefined
+  let footerSlot: ((ctx: unknown) => unknown) | undefined
   // Isolate the Project section: a previous test's debounced refresh must
   // never leak into this mount.
   setProjectSnapshot(null)
@@ -454,6 +463,7 @@ async function mountEntry(
     slots: {
       register: (registration: { slots: Record<string, unknown> }) => {
         slot = registration.slots.sidebar_content as typeof slot
+        footerSlot = registration.slots.app_bottom as typeof footerSlot
       },
     },
     // Signal-backed so the plugin's route-reactive effect actually tracks
@@ -510,6 +520,7 @@ async function mountEntry(
       replaces: () => dialogReplacesRef.value,
     },
     slot: slot as NonNullable<typeof slot>,
+    footerSlot: footerSlot as NonNullable<typeof footerSlot>,
     setRoute,
     dispose: () => {
       disposes.forEach((fn) => {
@@ -3915,6 +3926,204 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
     for (const row of metricRows) {
       expect([...row].findIndex((ch) => ch !== " ")).toBe(4)
     }
+    disposeReconcile()
+    dispose()
+  }, 20000)
+})
+
+describe("footer metrics (app_bottom slot: route session only, reactive, settings-driven)", () => {
+  /**
+   * Mounts the REAL footer slot (entry-registered `app_bottom`) in the
+   * headless renderer, exactly like the sidebar tests mount the
+   * sidebar_content slot. The frame only contains the footer line.
+   */
+  const mountFooter = async (
+    footerSlot: (ctx: unknown) => unknown,
+    width = 60,
+  ) =>
+    testRender(() => footerSlot({ theme: THEME }) as never, {
+      width,
+      height: 3,
+    })
+
+  test("shows the active route session's own usage with default metrics and renders nothing off-route", async () => {
+    const rootID = "ses_footer_route"
+    const state: MutableApi = {
+      sessions: {
+        [rootID]: [
+          msg("f1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+        ],
+      },
+      children: {},
+      metas: { [rootID]: { id: rootID, title: "Root" } },
+    }
+    purgeTreeCache()
+    const { footerSlot, setRoute, dispose } = await mountEntry(state)
+    setRoute({ name: "session", params: { sessionID: rootID } })
+    await waitFor(() => snapshot()?.rootID === rootID)
+    const setup = await mountFooter(footerSlot)
+    // Default metrics: input + output only, compact magnitudes, no total.
+    await setup.waitForFrame((frame) => frame.includes("in 40K · out 1K"))
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("in 40K · out 1K")
+    expect(frame).not.toContain("total")
+    // Leaving the session route hides the footer without any remount.
+    setRoute({ name: "home", params: {} })
+    await setup.waitForFrame((frame) => !frame.includes("in 40K"))
+    expect(setup.captureCharFrame().trim()).toBe("")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("excludes delegated descendants (root session only) and never drops after a smaller snapshot", async () => {
+    const rootID = "ses_footer_root"
+    const childID = "ses_footer_child"
+    const state: MutableApi = {
+      sessions: {
+        [rootID]: [
+          msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+        ],
+        [childID]: [
+          msg(
+            "c1",
+            childID,
+            { input: 500000, output: 50000, total: 550000 },
+            0.5,
+          ),
+        ],
+      },
+      children: { [rootID]: [{ id: childID, title: "Child" }] },
+      metas: {
+        [rootID]: { id: rootID, title: "Root" },
+        [childID]: { id: childID, title: "Child" },
+      },
+    }
+    purgeTreeCache()
+    const {
+      footerSlot,
+      fire,
+      setRoute,
+      state: mutable,
+      dispose,
+    } = await mountEntry(state)
+    setRoute({ name: "session", params: { sessionID: rootID } })
+    await waitFor(() => snapshot()?.rootID === rootID)
+    const setup = await mountFooter(footerSlot)
+    // The snapshot aggregates root + child (591K), but the footer must show
+    // the ROOT session's own usage only — the child's 500K never appears.
+    await waitFor(() => snapshot()?.totalTokens === 591000)
+    await setup.waitForFrame((frame) => frame.includes("in 40K · out 1K"))
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("in 40K · out 1K")
+    expect(frame).not.toContain("500K")
+    expect(frame).not.toContain("591K")
+
+    // Compaction: the root's authoritative messages are replaced by a
+    // smaller set. The store re-reads the fresh client messages (the map
+    // shrinks), but the per-field high-water keeps every footer value —
+    // a smaller later snapshot can never lower the line.
+    mutable.clientSessions = {
+      [rootID]: [
+        msg("r1", rootID, { input: 5000, output: 100, total: 5100 }, 0.001),
+      ],
+      [childID]: [
+        msg(
+          "c1",
+          childID,
+          { input: 500000, output: 50000, total: 550000 },
+          0.5,
+        ),
+      ],
+    }
+    fire("session.compacted", { sessionID: rootID })
+    // The smaller authoritative load lands: the fresh map holds the smaller
+    // values while observedSessionUsage still reports the high-water.
+    await waitFor(() => usageMap(rootID).get("r1")?.input === 5000)
+    expect(observedSessionUsage(rootID)?.input).toBe(40000)
+    expect(observedSessionUsage(rootID)?.output).toBe(1000)
+    // The published snapshot and the mounted footer both keep their values.
+    expect(snapshot()?.totalTokens).toBe(591000)
+    await setup.waitForFrame((frame) => frame.includes("in 40K · out 1K"))
+    expect(setup.captureCharFrame()).toContain("in 40K · out 1K")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("settings drive the footer: disabled hides it, independent metric toggles change the subset, precise mode applies", async () => {
+    const rootID = "ses_footer_settings"
+    const state: MutableApi = {
+      sessions: {
+        [rootID]: [
+          msg(
+            "f1",
+            rootID,
+            {
+              input: 40000,
+              output: 1000,
+              reasoning: 800,
+              total: 42900,
+              cache: { read: 2000, write: 100 },
+            },
+            0.01,
+          ),
+        ],
+      },
+      children: {},
+      metas: { [rootID]: { id: rootID, title: "Root" } },
+    }
+    purgeTreeCache()
+    // Persisted footer state: disabled, defaults otherwise.
+    const { footerSlot, api, setRoute, dispose } = await mountEntry(
+      state,
+      {},
+      true,
+      {
+        cache: "combined",
+        numbers: "compact",
+        collapsedSummary: "session",
+        footer: {
+          enabled: false,
+          input: true,
+          output: true,
+          reasoning: false,
+          cache: false,
+          total: false,
+        },
+      },
+    )
+    setRoute({ name: "session", params: { sessionID: rootID } })
+    await waitFor(() => snapshot()?.rootID === rootID)
+    // Wide enough for the full precise-mode line (66 columns).
+    const setup = await mountFooter(footerSlot, 80)
+    await setup.renderOnce()
+    // Footer disabled: nothing renders even with session usage.
+    expect(setup.captureCharFrame().trim()).toBe("")
+
+    // Enable the footer through the real settings writer (ready-gated, same
+    // kv the loadSettings read from): default subset appears reactively.
+    cycleFooter(api)
+    await setup.waitForFrame((frame) => frame.includes("in 40K · out 1K"))
+    // Independent toggles: reasoning, then total (total-first ordering),
+    // then the combined cache metric.
+    cycleFooterMetric(api, "reasoning")
+    await setup.waitForFrame((frame) =>
+      frame.includes("in 40K · out 1K · reason 800"),
+    )
+    cycleFooterMetric(api, "total")
+    await setup.waitForFrame((frame) =>
+      frame.includes("total 44K · in 40K · out 1K · reason 800"),
+    )
+    cycleFooterMetric(api, "cache")
+    await setup.waitForFrame((frame) =>
+      frame.includes("total 44K · in 40K · out 1K · reason 800 · cache 2K"),
+    )
+    // The numbers preference applies to the footer line like the sidebar.
+    cycleNumbers(api)
+    await setup.waitForFrame((frame) =>
+      frame.includes(
+        "total 43,900 · in 40,000 · out 1,000 · reason 800 · cache 2,100",
+      ),
+    )
     disposeReconcile()
     dispose()
   }, 20000)
