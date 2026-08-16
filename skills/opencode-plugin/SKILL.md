@@ -4,7 +4,7 @@ description: "Trigger: create OpenCode plugins, TUI plugins, sidebar UI, Solid r
 license: Apache-2.0
 metadata:
   author: jonosotoaguilar
-  version: "1.5"
+  version: "1.6"
 ---
 
 ## Activation Contract
@@ -18,6 +18,7 @@ Load when creating or modifying OpenCode plugins: TUI plugins, sidebar UI, Solid
 - **Modularity**: one purpose per function, DRY; extract proactively near 150 lines, SHOULD NOT exceed 200, MUST split over 300; never all code in one `index.ts` — `references/coding-ts.md`.
 - **TUI production boundary**: precompile `.tsx` with the OpenTUI Solid transform, load the compiled ESM artifact from `tui.json`, keep host runtimes external, inspect for reactive bindings and no eager JSX output — `references/tui-reactivity.md`.
 - **Installed-type verification**: verify exact SDK method signatures against INSTALLED `@opencode-ai/plugin/dist/tui.d.ts` and `@opencode-ai/sdk/dist/v2/gen/sdk.gen.d.ts`; no `api.client.experimental.*` client path (`experimental.*` are hook names only); pass `directory` from `api.state.path.directory` to `project.current`/`session.list` — `references/tui-api.md`.
+- **TUI slot surfaces (REQUIRED)**: classify the desired surface before choosing a slot: `session_prompt` (replace) is the supported pattern for a separate row directly below the native message input — re-render `api.ui.Prompt` and forward every host prop; `home_bottom` is the Home bottom row; `session_prompt_right` appends INSIDE the native status row (not a below-input row); `app_bottom` is normal layout flow below the active route, NOT attached to the prompt/statusline; `home_footer` is single-winner. Read the host slot spec and at least one reference plugin before coding — `references/tui-slot-surfaces.md`.
 - **Keymap/commands (REQUIRED)**: use the modern `api.keymap.registerLayer({ commands, bindings })` surface; `api.command` is deprecated (removed in v2) — never use it in new code. Verify against installed `@opentui/keymap/src/keymap.d.ts` + `types.d.ts`; release layer disposers in `api.lifecycle.onDispose`; open host DialogSelect via `api.ui.dialog.replace` ONCE — never re-replace on selection (host `replace` resets the stack, losing filter/focus); guard the close with an idempotent once-flag (`clear()` re-entrancy) — `references/commands.md`.
 - **Testing**: `references/testing.md`; TUI plugins also run the production artifact check — preload-backed render tests don't prove the `tui.json` loading boundary.
 - **Pre-publish gates**: `typecheck`, `test`, `audit --prod`, `pack --dry-run`, direct-dist testing — `references/build-and-release.md`.
@@ -30,9 +31,10 @@ Load when creating or modifying OpenCode plugins: TUI plugins, sidebar UI, Solid
 | --- | --- |
 | Toasts vs inline status | `references/toast-notifications.md` / `references/ui-feedback.md` |
 | TUI plugin | `references/tui-reactivity.md` + `references/tui-api.md` |
+| TUI slot surface selection | `references/tui-slot-surfaces.md` — classify first: `session_prompt` (below-input rows), `home_bottom` (Home), `session_prompt_right` (in-row only), `app_bottom` (route flow), `home_footer` (single-winner) |
 | npm publish | `references/build-and-release.md` + `publishing.md` + `update-notifications.md` |
-| Users updating an installed plugin | `references/updating-plugins.md` — update = remove the plugin's cache directory (`rm -rf ~/.cache/opencode/packages/<entry>`) and restart; opencode reinstalls latest. Never `postinstall` (opencode installs with `ignoreScripts: true`); `@latest` in a command never refreshes |
-| How the plugin host loads/installs plugins | `references/plugin-loading.md` — config entries, spec resolution, cache-first install, manifest targets, config patch, runtime load |
+| Users updating an installed plugin | `references/updating-plugins.md` — cache-first install; remove the plugin cache dir and restart; never `postinstall`; `@latest` never refreshes |
+| How the plugin host loads/installs plugins | `references/plugin-loading.md` — config entries, spec resolution, cache-first install, manifest targets |
 | Palette command, keybinding, or both | `references/commands.md` — `registerLayer`; `bindings: []` keeps the command palette-visible with no key; live re-register swaps bindings without restart |
 | Selection/settings picker UI | `references/commands.md` — host `DialogSelect` via `api.ui.dialog.replace` once; once-guarded close |
 | Not feasible as plugin | Inform user: OC core → `packages/opencode`; MCP tools → MCP config; automation → shell scripts |
@@ -63,6 +65,7 @@ Return: plugin files created (exact paths), hooks and tools used, feasibility ve
 - `references/examples.md` — examples, locations, structure (npm-dist keeps source in `src/`)
 - `references/toast-notifications.md`, `references/ui-feedback.md` — user feedback
 - `references/tui-reactivity.md`, `references/tui-api.md` — TUI boundary, SDK API
+- `references/tui-slot-surfaces.md` — slot decision table + `session_prompt` prompt-row pattern, host spec path
 - `references/commands.md` — modern keymap/commands API: `registerLayer`, command/binding shapes, live re-registration, `dispatchCommand`, lifecycle, DialogSelect
 - `references/testing.md` — testing procedure
 - `references/build-and-release.md` — packaging, gates, release
