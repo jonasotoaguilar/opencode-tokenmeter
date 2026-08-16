@@ -26,6 +26,8 @@
 import {
   cycleCache,
   cycleCollapsedSummary,
+  cycleFooter,
+  cycleFooterMetric,
   cycleNumbers,
   cycleSubagents,
   settings,
@@ -82,6 +84,30 @@ export function showSettingsDialog(api: DialogSurface): void {
             title: `Shortcut: ${toggleShortcutLabel()}`,
             value: "shortcut",
           },
+          {
+            title: `Footer: ${settings().footer.enabled ? "on" : "off"}`,
+            value: "footer",
+          },
+          {
+            title: `Footer input: ${settings().footer.input ? "on" : "off"}`,
+            value: "footer.input",
+          },
+          {
+            title: `Footer output: ${settings().footer.output ? "on" : "off"}`,
+            value: "footer.output",
+          },
+          {
+            title: `Footer reasoning: ${settings().footer.reasoning ? "on" : "off"}`,
+            value: "footer.reasoning",
+          },
+          {
+            title: `Footer cache: ${settings().footer.cache ? "on" : "off"}`,
+            value: "footer.cache",
+          },
+          {
+            title: `Footer total: ${settings().footer.total ? "on" : "off"}`,
+            value: "footer.total",
+          },
         ]}
         onSelect={(option) => {
           if (option.value === "cache") cycleCache(api)
@@ -90,6 +116,17 @@ export function showSettingsDialog(api: DialogSurface): void {
             cycleCollapsedSummary(api)
           else if (option.value === "subagents") cycleSubagents(api)
           else if (option.value === "shortcut") cycleToggleShortcut(api)
+          else if (option.value === "footer") cycleFooter(api)
+          else if (option.value === "footer.input")
+            cycleFooterMetric(api, "input")
+          else if (option.value === "footer.output")
+            cycleFooterMetric(api, "output")
+          else if (option.value === "footer.reasoning")
+            cycleFooterMetric(api, "reasoning")
+          else if (option.value === "footer.cache")
+            cycleFooterMetric(api, "cache")
+          else if (option.value === "footer.total")
+            cycleFooterMetric(api, "total")
           // Deliberately NO recursive showSettingsDialog here: the titles
           // re-read the live signals, so the host re-renders this same
           // stack entry reactively. Re-replacing would recreate the
