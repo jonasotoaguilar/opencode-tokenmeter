@@ -3,11 +3,14 @@
  * Entrypoint for the TokenMeter sidebar TUI plugin.
  *
  * Wires the session/message/part events into the usage store, loads the
- * plugin-owned settings (three-field `settings.v1` object plus the
+ * plugin-owned settings (the `settings.v1` object plus the
  * `sidebar.expanded` Subagents key) once at startup, and registers the
  * append-mode sidebar_content slot that renders the TokenMeter panel. The
  * sidebar width comes from the slot props/context width chain (fallback 38,
- * clamped 24–52).
+ * clamped 24–52). The same registration also renders the compact
+ * single-line UsageFooter into the host `app_bottom` slot — the active
+ * route session's OWN usage only (never the delegation tree), tracked
+ * reactively from api.route.current and pulsed by the reconcile snapshot.
  *
  * Lifecycle: the active session is tracked reactively by reading
  * api.route.current inside a Solid effect (the TUI exposes no session-select
@@ -54,6 +57,7 @@ import type { TuiPlugin } from "@opencode-ai/plugin/tui"
 import { createEffect, createRoot } from "solid-js"
 import { projectDbPath, recordDeletedSession } from "./tokenmeter/db"
 import { UsagePanel } from "./tokenmeter/panel"
+import { UsageFooter } from "./tokenmeter/panel/footer"
 import { showSettingsDialog } from "./tokenmeter/panel/settings-dialog"
 import {
   disposeProjectRefresh,
@@ -92,9 +96,10 @@ const id = "tokenmeter"
 
 const tui: TuiPlugin = async (api) => {
   createRoot((disposeRoot) => {
-    // Load the plugin-owned preferences once at startup: the three-field
-    // settings object and the Subagents durable key are sanitized into
-    // per-field defaults; the panel seeds its disclosure from the master.
+    // Load the plugin-owned preferences once at startup: the
+    // object-backed settings and the Subagents durable key are sanitized
+    // into per-field defaults; the panel seeds its disclosure from the
+    // master.
     loadSettings(api)
     // The toggle-sections shortcut preference loads before the toggle layer
     // registers, so the startup binding reflects the persisted choice.
@@ -274,6 +279,9 @@ const tui: TuiPlugin = async (api) => {
               width={width}
             />
           )
+        },
+        app_bottom(ctx) {
+          return <UsageFooter api={api} theme={() => ctx.theme.current} />
         },
       },
     })
