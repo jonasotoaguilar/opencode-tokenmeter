@@ -3989,8 +3989,21 @@ describe("footer metrics (app_bottom slot: route session only, reactive, setting
     // Default metrics: input + output only, compact magnitudes, no total.
     await setup.waitForFrame((frame) => frame.includes("in 40K · out 1K"))
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("in 40K · out 1K")
     expect(frame).not.toContain("total")
+    // Issue #24 layout contract: the line stays on the host `app_bottom`
+    // row (rendered directly below the native statusline/prompt row),
+    // right-aligned against the native prompt's effective paddingRight={2}
+    // with no added gap, and renders as an ordinary muted text line —
+    // no bold, no custom style.
+    const row = frame.split(/[\r\n]+/).find((line) => line.includes("in 40K"))
+    expect(row).toMatch(/^ +in 40K · out 1K {2}$/)
+    expect(row?.length).toBe(60)
+    const spans = setup.captureSpans().lines.flatMap((line) => line.spans)
+    const muted = rgbToHex(RGBA.fromHex("#a9b1d6"))
+    const fg = spans
+      .filter((span) => span.text.includes("in 40K"))
+      .map((span) => rgbToHex(span.fg))
+    expect(fg).toEqual([muted])
     // Leaving the session route hides the footer without any remount.
     setRoute({ name: "home", params: {} })
     await setup.waitForFrame((frame) => !frame.includes("in 40K"))
