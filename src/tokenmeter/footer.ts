@@ -1,6 +1,7 @@
 /**
- * Pure single-line formatter for the TokenMeter footer segment (host
- * `session_prompt` slot, rendered below the re-hosted native prompt).
+ * Pure single-line formatter for the TokenMeter prompt metric (host
+ * `session_prompt_right` slot, rendered inline at the right end of the
+ * native prompt's agent/model row).
  *
  * The footer shows the ACTIVE route session's OWN cumulative spend only —
  * never delegated descendants — so every value is read from the canonical
@@ -12,8 +13,9 @@
  *
  * Metric order is fixed (total first, then input, output, reasoning, cache)
  * so the line is stable across preference toggles; enabled metrics are
- * joined with the same ` · ` separator the sidebar uses, labeled
- * `total`/`in`/`out`/`reason`/`cache`. Values follow the `numbers`
+ * joined with the same ` · ` separator the sidebar uses, value-first with
+ * compact labels (`total`/`in`/`out`/`reason`/`cache`). Values follow the
+ * `numbers`
  * preference (compact magnitudes vs thousands-separated integers) through
  * the existing number seams. The line is column-aware: when it does not fit
  * `width` it truncates predictably with `…` (never wraps), so the host
@@ -49,10 +51,10 @@ const footerValue = (usage: SessionUsage, metric: FooterMetric): number =>
   usage[metric]
 
 /**
- * Builds the compact footer line from the enabled metrics: labeled values
- * joined by ` · ` in fixed order, truncated to `width` when the full line
- * does not fit (labels are never dropped — the single-line surface keeps
- * every enabled metric identifiable). Empty metric subset → `""`.
+ * Builds the compact footer line from the enabled metrics: value-first
+ * metric pairs joined by ` · ` in fixed order, truncated to `width` when the
+ * full line does not fit (labels are never dropped — the single-line surface
+ * keeps every enabled metric identifiable). Empty metric subset → `""`.
  */
 export function formatFooterLine(
   usage: SessionUsage,
@@ -62,7 +64,7 @@ export function formatFooterLine(
 ): string {
   const fmt = numbers === "precise" ? fmtPrecise : fmtCompact
   const parts = FOOTER_METRIC_ORDER.filter((metric) => footer[metric]).map(
-    (metric) => `${FOOTER_LABELS[metric]} ${fmt(footerValue(usage, metric))}`,
+    (metric) => `${fmt(footerValue(usage, metric))} ${FOOTER_LABELS[metric]}`,
   )
   if (parts.length === 0) return ""
   const line = parts.join(FOOTER_SEPARATOR)

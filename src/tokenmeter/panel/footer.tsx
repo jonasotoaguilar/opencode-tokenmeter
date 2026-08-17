@@ -1,14 +1,18 @@
 // @ts-nocheck
 /** @jsxImportSource @opentui/solid */
 /**
- * TokenMeter session-prompt segment — the host `session_prompt` slot render.
+ * TokenMeter inline prompt metric — the host `session_prompt_right` slot
+ * render.
  *
- * The host renders `session_prompt` with `replace`: this component IS the
- * native prompt row. It re-renders the host `api.ui.Prompt` faithfully
- * (forwarding every slot prop) and appends a compact single-line readout of
- * the CURRENT session's OWN token spend directly below it inside a zero-gap
- * vertical box, following the reference plugin pattern
- * (`slkiser/opencode-quota` `SessionPromptWithCompactStatus`).
+ * The host keeps its SINGLE native `api.ui.Prompt`: the `session_prompt`
+ * replace slot is deliberately NOT registered, so `replace` mode falls
+ * through to the host's own prompt — which already renders its own native
+ * usage/status row (`context · cost` in the prompt's bottom status row), so
+ * any plugin-side prompt re-render or appended status row would duplicate
+ * it. The host renders `session_prompt_right` INSIDE that one prompt, at the
+ * right end of its agent/model meta row (the native `right` prop), so this
+ * component is only a compact single-line readout of the CURRENT session's
+ * OWN token spend — never a second prompt, never a second status row.
  *
  * Accounting: the canonical root/current-session-only high-water read
  * (`store.observedSessionUsage`), NEVER the snapshot aggregates (those
@@ -21,13 +25,14 @@
  * Repaints are pulsed by the `snapshot` signal: reconcile publishes a fresh
  * snapshot whenever the active root has usage, and the memo re-reads
  * `observedSessionUsage` on that pulse. A disabled footer, or a session
- * without observed usage, renders the native prompt alone (the metric line
- * disappears). Home has no session_prompt render, so no Home metric is
- * invented: issue #24 measures the active session only.
+ * without observed usage, renders nothing (the host prompt stays intact).
+ * Home has no session_prompt_right render, so no Home metric is invented:
+ * issue #24 measures the active session only.
  *
- * Width: the prompt row spans the whole terminal, so the terminal width
- * (reactive `useTerminalDimensions`) is the line budget; the pure formatter
- * truncates with `…` so the line never wraps or overflows the host row.
+ * Width: the metric shares the native prompt's agent/model row, which spans
+ * the terminal width, so the reactive terminal width is the truncation
+ * ceiling; the pure formatter truncates with `…` so the line never wraps or
+ * overflows the host row.
  */
 
 import { useTerminalDimensions } from "@opentui/solid"
@@ -36,7 +41,7 @@ import { formatFooterLine } from "../footer"
 import { settings } from "../settings"
 import { observedSessionUsage, snapshot } from "../store"
 
-export function SessionPromptFooter(props) {
+export function SessionPromptRight(props) {
   const theme = () => props.api.theme.current
 
   // Root-session-only high-water usage of the slot's current session. The
@@ -50,7 +55,8 @@ export function SessionPromptFooter(props) {
     return observedSessionUsage(sid)
   })
 
-  // Line budget: the session_prompt row spans the terminal width.
+  // Truncation ceiling: the metric sits at the right end of the native
+  // prompt's agent/model row, which spans the terminal width.
   const dimensions = useTerminalDimensions()
 
   const line = createMemo(() => {
@@ -66,23 +72,12 @@ export function SessionPromptFooter(props) {
   })
 
   return (
-    <box gap={0}>
-      <props.api.ui.Prompt
-        sessionID={props.sessionID}
-        visible={props.visible}
-        disabled={props.disabled}
-        onSubmit={props.onSubmit}
-        ref={props.ref}
-      />
-      <Show when={line()}>
-        {(text) => (
-          <box flexDirection="row" justifyContent="flex-end">
-            <text fg={theme().textMuted} wrapMode="none">
-              {text()}
-            </text>
-          </box>
-        )}
-      </Show>
-    </box>
+    <Show when={line()}>
+      {(text) => (
+        <text fg={theme().textMuted} wrapMode="none">
+          {text()}
+        </text>
+      )}
+    </Show>
   )
 }
