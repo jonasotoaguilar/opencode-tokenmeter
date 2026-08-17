@@ -1,15 +1,15 @@
 /**
- * Plugin-owned settings model for the TokenMeter sidebar.
+ * Plugin-owned settings model for the TokenMeter sidebar and footer.
  *
  * Mirrors `project.ts`: a small store-like module owning signals plus
  * persistence, with no render logic. One versioned kv object
- * (`tokenmeter.settings.v1`) holds exactly the three object-backed
- * preferences — `cache`, `numbers`, `collapsedSummary` — written as a whole
- * three-field object on every change. The fourth user-facing preference,
- * `subagents`, lives in the pre-existing `tokenmeter.sidebar.expanded` key
- * (its durable source of truth) and is never duplicated inside
- * `settings.v1`. The unshipped legacy view field is gone; the sanitizer
- * ignores any stale value a pre-change build may have stored.
+ * (`tokenmeter.settings.v1`) holds the object-backed preferences — `cache`,
+ * `numbers`, `collapsedSummary` and the `footer` boolean set — written as a
+ * whole object on every change. The `subagents` preference lives in the
+ * pre-existing `tokenmeter.sidebar.expanded` key (its durable source of
+ * truth) and is never duplicated inside `settings.v1`. The unshipped legacy
+ * view field is gone; the sanitizer ignores any stale value a pre-change
+ * build may have stored.
  *
  * Durable writes are gated on `api.kv.ready`: when the kv store is not
  * ready the in-memory value still updates for the session, no write is
@@ -23,13 +23,32 @@ export type NumbersPref = "compact" | "precise"
 export type CollapsedSummaryPref = "session" | "project"
 export type SubagentsPref = "collapsed" | "expanded"
 
+/** One independently toggleable footer metric. */
+export type FooterMetric = "input" | "output" | "reasoning" | "cache" | "total"
+
+/**
+ * Footer preference set: the master `enabled` toggle plus one boolean per
+ * metric, so any subset can be shown. `cache` is the single combined
+ * `cache.read + cache.write` metric; `total` is the canonical cumulative
+ * spend `input + output + reasoning + cache.read + cache.write`.
+ */
+export type FooterSettings = {
+  enabled: boolean
+  input: boolean
+  output: boolean
+  reasoning: boolean
+  cache: boolean
+  total: boolean
+}
+
 export type Settings = {
   cache: CachePref
   numbers: NumbersPref
   collapsedSummary: CollapsedSummaryPref
+  footer: FooterSettings
 }
 
-/** Versioned single-key kv object for the three object-backed preferences. */
+/** Versioned single-key kv object for the object-backed preferences. */
 export const SETTINGS_KV_KEY = "tokenmeter.settings.v1"
 
 /**
@@ -38,10 +57,20 @@ export const SETTINGS_KV_KEY = "tokenmeter.settings.v1"
  */
 export const SUBAGENTS_KV_KEY = "tokenmeter.sidebar.expanded"
 
+export const DEFAULT_FOOTER: FooterSettings = {
+  enabled: true,
+  input: true,
+  output: true,
+  reasoning: false,
+  cache: false,
+  total: false,
+}
+
 export const DEFAULT_SETTINGS: Settings = {
   cache: "combined",
   numbers: "compact",
   collapsedSummary: "session",
+  footer: { ...DEFAULT_FOOTER },
 }
 
 /** The kv surface settings needs; a structural subset of the plugin TuiKV. */
@@ -55,6 +84,7 @@ export type SettingsApi = {
 
 const [settings, setSettings] = createSignal<Settings>({
   ...DEFAULT_SETTINGS,
+  footer: { ...DEFAULT_FOOTER },
 })
 
 /** Subagents durable state: `true` (expanded) or `false` (collapsed). */
@@ -77,6 +107,32 @@ const isNumbersPref = (v: unknown): v is NumbersPref =>
   v === "compact" || v === "precise"
 const isCollapsedSummaryPref = (v: unknown): v is CollapsedSummaryPref =>
   v === "session" || v === "project"
+const isBoolean = (v: unknown): v is boolean => typeof v === "boolean"
+
+/**
+ * Resolves an unknown stored value to a valid FooterSettings object: a
+ * missing or non-object value yields all defaults; within an object, unknown
+ * values (including booleans stored as strings) fall back per field while
+ * valid overrides are honored. Never throws and never produces NaN.
+ */
+function sanitizeFooter(raw: unknown): FooterSettings {
+  if (typeof raw !== "object" || raw === null) return { ...DEFAULT_FOOTER }
+  const candidate = raw as Record<string, unknown>
+  return {
+    enabled: isBoolean(candidate.enabled)
+      ? candidate.enabled
+      : DEFAULT_FOOTER.enabled,
+    input: isBoolean(candidate.input) ? candidate.input : DEFAULT_FOOTER.input,
+    output: isBoolean(candidate.output)
+      ? candidate.output
+      : DEFAULT_FOOTER.output,
+    reasoning: isBoolean(candidate.reasoning)
+      ? candidate.reasoning
+      : DEFAULT_FOOTER.reasoning,
+    cache: isBoolean(candidate.cache) ? candidate.cache : DEFAULT_FOOTER.cache,
+    total: isBoolean(candidate.total) ? candidate.total : DEFAULT_FOOTER.total,
+  }
+}
 
 /**
  * Resolves an unknown stored value to a valid Settings object: a missing or
@@ -98,6 +154,7 @@ function sanitizeSettings(raw: unknown): Settings {
     collapsedSummary: isCollapsedSummaryPref(candidate.collapsedSummary)
       ? candidate.collapsedSummary
       : DEFAULT_SETTINGS.collapsedSummary,
+    footer: sanitizeFooter(candidate.footer),
   }
 }
 
@@ -108,8 +165,9 @@ export function subagentsPref(): SubagentsPref {
 
 /**
  * Loads and sanitizes both durable sources once at startup: the
- * three-field `settings.v1` object and the `sidebar.expanded` boolean.
- * Absent or malformed values resolve to their defaults.
+ * `settings.v1` object (enums plus the footer boolean set) and the
+ * `sidebar.expanded` boolean. Absent or malformed values resolve to their
+ * defaults.
  */
 export function loadSettings(api: SettingsApi): void {
   setSettings(sanitizeSettings(api.kv.get<unknown>(SETTINGS_KV_KEY, null)))
@@ -118,9 +176,9 @@ export function loadSettings(api: SettingsApi): void {
 }
 
 /**
- * Writes the full three-field settings object, gated on `api.kv.ready`. A
- * dropped write leaves the in-memory value intact but reports
- * `persisted() === false`; a successful write reports `true`.
+ * Writes the full settings object, gated on `api.kv.ready`. A dropped write
+ * leaves the in-memory value intact but reports `persisted() === false`; a
+ * successful write reports `true`.
  */
 function writeObject(api: SettingsApi): void {
   if (!api.kv.ready) {
@@ -172,4 +230,21 @@ export function cycleSubagents(api: SettingsApi): void {
   const next = !subagentsExpanded()
   setSubagentsExpanded(next)
   writeSubagents(api, next)
+}
+
+/** Toggles the footer master switch; the metric flags stay as they are. */
+export function cycleFooter(api: SettingsApi): void {
+  const footer = { ...settings().footer, enabled: !settings().footer.enabled }
+  setSettings({ ...settings(), footer })
+  writeObject(api)
+}
+
+/** Toggles ONE footer metric independently of every other flag. */
+export function cycleFooterMetric(
+  api: SettingsApi,
+  metric: FooterMetric,
+): void {
+  const footer = { ...settings().footer, [metric]: !settings().footer[metric] }
+  setSettings({ ...settings(), footer })
+  writeObject(api)
 }

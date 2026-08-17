@@ -317,9 +317,11 @@ type ScrollBoxHandle = {
  * renders the title + one row per option so frames are assertable, and
  * records the props so tests can drive the REAL `onSelect` wiring. The
  * production module builds the options from the live settings signals; the
- * mock only presents them.
+ * mock only presents them. Options carrying `category` are grouped under a
+ * native category header row (the installed `TuiDialogSelectOption`
+ * contract: the host DialogSelect renders grouped category subsections).
  */
-type DialogOption = { title: string; value: string }
+type DialogOption = { title: string; value: string; category?: string }
 type DialogSelectMockProps = {
   title: string
   options: DialogOption[]
@@ -343,9 +345,17 @@ function MockDialogSelect(props: DialogSelectMockProps) {
   return (
     <box flexDirection="column">
       <text>{props.title}</text>
-      {props.options.map((opt) => (
-        <text>{opt.title}</text>
-      ))}
+      {props.options.map((opt, index) => {
+        const prev = props.options[index - 1]
+        return (
+          <>
+            {prev?.category !== opt.category && opt.category ? (
+              <text>{opt.category}</text>
+            ) : null}
+            <text>{opt.title}</text>
+          </>
+        )
+      })}
       {filter() ? <text>{`[filter: ${filter()}]`}</text> : null}
     </box>
   )
@@ -2945,6 +2955,20 @@ describe("settings dialog (DialogSelect menu)", () => {
     expect(frame).toContain("Summary: session")
     expect(frame).toContain("Subagents: collapsed")
     expect(frame).toContain("Shortcut: Ctrl+E")
+    // The single Settings command's options are grouped into the native
+    // category subsections `Sidebar` and `Footer` (installed
+    // `TuiDialogSelectOption.category`), each header rendered once before
+    // its contiguous run of options.
+    expect(frame).toContain("Sidebar")
+    expect(frame).toContain("Footer")
+    const options = dialogProps[0]?.options ?? []
+    expect(options).toHaveLength(11)
+    expect(options.slice(0, 5).every((opt) => opt.category === "Sidebar")).toBe(
+      true,
+    )
+    expect(options.slice(5).every((opt) => opt.category === "Footer")).toBe(
+      true,
+    )
     dispose()
   }, 20000)
 

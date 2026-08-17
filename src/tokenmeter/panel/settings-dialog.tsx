@@ -26,6 +26,8 @@
 import {
   cycleCache,
   cycleCollapsedSummary,
+  cycleFooter,
+  cycleFooterMetric,
   cycleNumbers,
   cycleSubagents,
   settings,
@@ -46,7 +48,7 @@ export type DialogSurface = {
     }
     DialogSelect: (props: {
       title: string
-      options: Array<{ title: string; value: string }>
+      options: Array<{ title: string; value: string; category?: string }>
       onSelect?: (option: { title: string; value: string }) => void
     }) => JSX.Element
   }
@@ -71,16 +73,60 @@ export function showSettingsDialog(api: DialogSurface): void {
       <api.ui.DialogSelect
         title="TokenMeter Settings"
         options={[
-          { title: `Cache: ${settings().cache}`, value: "cache" },
-          { title: `Numbers: ${settings().numbers}`, value: "numbers" },
+          {
+            title: `Cache: ${settings().cache}`,
+            value: "cache",
+            category: "Sidebar",
+          },
+          {
+            title: `Numbers: ${settings().numbers}`,
+            value: "numbers",
+            category: "Sidebar",
+          },
           {
             title: `Summary: ${settings().collapsedSummary}`,
             value: "collapsedSummary",
+            category: "Sidebar",
           },
-          { title: `Subagents: ${subagentsPref()}`, value: "subagents" },
+          {
+            title: `Subagents: ${subagentsPref()}`,
+            value: "subagents",
+            category: "Sidebar",
+          },
           {
             title: `Shortcut: ${toggleShortcutLabel()}`,
             value: "shortcut",
+            category: "Sidebar",
+          },
+          {
+            title: `Footer: ${settings().footer.enabled ? "on" : "off"}`,
+            value: "footer",
+            category: "Footer",
+          },
+          {
+            title: `Footer input: ${settings().footer.input ? "on" : "off"}`,
+            value: "footer.input",
+            category: "Footer",
+          },
+          {
+            title: `Footer output: ${settings().footer.output ? "on" : "off"}`,
+            value: "footer.output",
+            category: "Footer",
+          },
+          {
+            title: `Footer reasoning: ${settings().footer.reasoning ? "on" : "off"}`,
+            value: "footer.reasoning",
+            category: "Footer",
+          },
+          {
+            title: `Footer cache: ${settings().footer.cache ? "on" : "off"}`,
+            value: "footer.cache",
+            category: "Footer",
+          },
+          {
+            title: `Footer total: ${settings().footer.total ? "on" : "off"}`,
+            value: "footer.total",
+            category: "Footer",
           },
         ]}
         onSelect={(option) => {
@@ -90,6 +136,17 @@ export function showSettingsDialog(api: DialogSurface): void {
             cycleCollapsedSummary(api)
           else if (option.value === "subagents") cycleSubagents(api)
           else if (option.value === "shortcut") cycleToggleShortcut(api)
+          else if (option.value === "footer") cycleFooter(api)
+          else if (option.value === "footer.input")
+            cycleFooterMetric(api, "input")
+          else if (option.value === "footer.output")
+            cycleFooterMetric(api, "output")
+          else if (option.value === "footer.reasoning")
+            cycleFooterMetric(api, "reasoning")
+          else if (option.value === "footer.cache")
+            cycleFooterMetric(api, "cache")
+          else if (option.value === "footer.total")
+            cycleFooterMetric(api, "total")
           // Deliberately NO recursive showSettingsDialog here: the titles
           // re-read the live signals, so the host re-renders this same
           // stack entry reactively. Re-replacing would recreate the

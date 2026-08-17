@@ -2,16 +2,18 @@
  * Unit suite for the plugin-owned settings model (src/tokenmeter/settings.ts).
  *
  * Covers the tokenmeter-settings spec:
- *  - defaults apply when nothing is persisted (combined/compact/session/collapsed)
+ *  - defaults apply when nothing is persisted (combined/compact/session,
+ *    footer on with input+output enabled and reasoning/cache/total disabled)
  *  - malformed or missing values resolve to per-field safe defaults; valid
  *    overrides are honored; no throw, no NaN; the stale legacy view field
  *    is ignored
- *  - `settings.v1` holds exactly the three object fields `cache`/`numbers`/
- *    `collapsedSummary`, never `subagents` or the legacy view field
- *  - cycling object preferences writes the whole three-field object exactly
- *    once per change when `api.kv.ready`; cycling Subagents writes only
- *    `tokenmeter.sidebar.expanded`; when not ready the value updates in
- *    memory only and persistence is not claimed (`persisted() === false`)
+ *  - `settings.v1` holds exactly the object fields `cache`/`numbers`/
+ *    `collapsedSummary`/`footer`, never `subagents` or the legacy view field
+ *  - cycling object preferences writes the whole object exactly once per
+ *    change when `api.kv.ready`; footer flags toggle independently; cycling
+ *    Subagents writes only `tokenmeter.sidebar.expanded`; when not ready the
+ *    value updates in memory only and persistence is not claimed
+ *    (`persisted() === false`)
  *
  * The kv store is faked (map-backed) so every write is observable: each
  * `kv.set` call is recorded with key and value, and a fresh `loadSettings`
@@ -22,8 +24,11 @@ import type { SettingsApi } from "../src/tokenmeter/settings"
 import {
   cycleCache,
   cycleCollapsedSummary,
+  cycleFooter,
+  cycleFooterMetric,
   cycleNumbers,
   cycleSubagents,
+  DEFAULT_FOOTER,
   loadSettings,
   persisted,
   SETTINGS_KV_KEY,
@@ -60,6 +65,7 @@ const DEFAULTS = {
   cache: "combined",
   numbers: "compact",
   collapsedSummary: "session",
+  footer: { ...DEFAULT_FOOTER },
 } as const
 
 describe("settings defaults and sanitization", () => {
@@ -71,6 +77,7 @@ describe("settings defaults and sanitization", () => {
     expect(Object.keys(settings()).sort()).toEqual([
       "cache",
       "collapsedSummary",
+      "footer",
       "numbers",
     ])
     expect(persisted()).toBe(true)
@@ -100,11 +107,7 @@ describe("settings defaults and sanitization", () => {
       }),
     )
     loadSettings(api)
-    expect(settings()).toEqual({
-      cache: "combined",
-      numbers: "precise",
-      collapsedSummary: "session",
-    })
+    expect(settings()).toEqual({ ...DEFAULTS, numbers: "precise" })
     expect(settings().numbers).not.toBeNaN()
   })
 
@@ -122,11 +125,7 @@ describe("settings defaults and sanitization", () => {
       }),
     )
     loadSettings(api)
-    expect(settings()).toEqual({
-      cache: "separated",
-      numbers: "compact",
-      collapsedSummary: "session",
-    })
+    expect(settings()).toEqual({ ...DEFAULTS, cache: "separated" })
     expect(Object.keys(settings())).not.toContain("legacyView")
   })
 
@@ -141,8 +140,8 @@ describe("settings defaults and sanitization", () => {
     )
     loadSettings(api)
     expect(settings()).toEqual({
+      ...DEFAULTS,
       cache: "separated",
-      numbers: "compact",
       collapsedSummary: "project",
     })
   })
@@ -169,14 +168,7 @@ describe("settings cycling and kv persistence", () => {
     cycleCache(api)
     expect(settings().cache).toBe("separated")
     expect(fake.sets).toEqual([
-      {
-        key: SETTINGS_KV_KEY,
-        value: {
-          cache: "separated",
-          numbers: "compact",
-          collapsedSummary: "session",
-        },
-      },
+      { key: SETTINGS_KV_KEY, value: { ...DEFAULTS, cache: "separated" } },
     ])
 
     cycleCache(api)
@@ -184,15 +176,11 @@ describe("settings cycling and kv persistence", () => {
     expect(fake.sets).toHaveLength(2)
     expect(fake.sets[1]).toEqual({
       key: SETTINGS_KV_KEY,
-      value: {
-        cache: "combined",
-        numbers: "compact",
-        collapsedSummary: "session",
-      },
+      value: { ...DEFAULTS },
     })
   })
 
-  test("each object write carries the full three-field object including earlier changes", () => {
+  test("each object write carries the full object including earlier changes", () => {
     const fake = makeKv()
     const api = apiOf(fake)
     loadSettings(api)
@@ -201,11 +189,7 @@ describe("settings cycling and kv persistence", () => {
     cycleNumbers(api)
     expect(fake.sets[1]).toEqual({
       key: SETTINGS_KV_KEY,
-      value: {
-        cache: "combined",
-        numbers: "precise",
-        collapsedSummary: "project",
-      },
+      value: { ...DEFAULTS, numbers: "precise", collapsedSummary: "project" },
     })
   })
 
@@ -265,6 +249,136 @@ describe("settings cycling and kv persistence", () => {
 
     cycleSubagents(api)
     expect(subagentsPref()).toBe("expanded")
+    expect(persisted()).toBe(false)
+    expect(fake.sets).toEqual([])
+  })
+})
+
+describe("footer settings (defaults, sanitization, independent toggles)", () => {
+  test("defaults: footer enabled with input+output on and the rest off", () => {
+    const api = apiOf(makeKv())
+    loadSettings(api)
+    expect(settings().footer).toEqual({
+      enabled: true,
+      input: true,
+      output: true,
+      reasoning: false,
+      cache: false,
+      total: false,
+    })
+  })
+
+  test("a missing or non-object footer value resolves to all footer defaults", () => {
+    const api = apiOf(makeKv({ [SETTINGS_KV_KEY]: { cache: "separated" } }))
+    loadSettings(api)
+    expect(settings().footer).toEqual(DEFAULT_FOOTER)
+
+    const api2 = apiOf(makeKv({ [SETTINGS_KV_KEY]: { footer: "yes" } }))
+    loadSettings(api2)
+    expect(settings().footer).toEqual(DEFAULT_FOOTER)
+  })
+
+  test("sanitizes each footer flag per field and honors valid overrides", () => {
+    const api = apiOf(
+      makeKv({
+        [SETTINGS_KV_KEY]: {
+          footer: {
+            enabled: false,
+            input: "yes",
+            output: false,
+            reasoning: true,
+            cache: 1,
+            total: false,
+          },
+        },
+      }),
+    )
+    loadSettings(api)
+    expect(settings().footer).toEqual({
+      enabled: false,
+      input: true, // malformed input falls back to the default
+      output: false,
+      reasoning: true,
+      cache: false, // malformed cache falls back to the default
+      total: false,
+    })
+  })
+
+  test("cycleFooter toggles the master switch and persists the whole object", () => {
+    const fake = makeKv()
+    const api = apiOf(fake)
+    loadSettings(api)
+
+    cycleFooter(api)
+    expect(settings().footer.enabled).toBe(false)
+    expect(settings().footer.input).toBe(true)
+    expect(fake.sets).toEqual([
+      {
+        key: SETTINGS_KV_KEY,
+        value: {
+          cache: "combined",
+          numbers: "compact",
+          collapsedSummary: "session",
+          footer: { ...DEFAULT_FOOTER, enabled: false },
+        },
+      },
+    ])
+
+    cycleFooter(api)
+    expect(settings().footer.enabled).toBe(true)
+    expect(persisted()).toBe(true)
+
+    loadSettings(api)
+    expect(settings().footer.enabled).toBe(true)
+  })
+
+  test("cycleFooterMetric toggles ONE metric independently, leaving the rest intact", () => {
+    const fake = makeKv()
+    const api = apiOf(fake)
+    loadSettings(api)
+
+    cycleFooterMetric(api, "reasoning")
+    expect(settings().footer.reasoning).toBe(true)
+    expect(settings().footer.input).toBe(true)
+    expect(settings().footer.total).toBe(false)
+    expect(fake.sets).toHaveLength(1)
+    expect(fake.sets[0].value).toEqual({
+      cache: "combined",
+      numbers: "compact",
+      collapsedSummary: "session",
+      footer: { ...DEFAULT_FOOTER, reasoning: true },
+    })
+
+    cycleFooterMetric(api, "input")
+    expect(settings().footer.input).toBe(false)
+    expect(settings().footer.reasoning).toBe(true)
+    expect(fake.sets).toHaveLength(2)
+
+    // Any subset is reachable: total alone.
+    cycleFooterMetric(api, "total")
+    cycleFooterMetric(api, "output")
+    expect(settings().footer).toEqual({
+      enabled: true,
+      input: false,
+      output: false,
+      reasoning: true,
+      cache: false,
+      total: true,
+    })
+
+    loadSettings(api)
+    expect(settings().footer.total).toBe(true)
+  })
+
+  test("footer cycles are ready-gated like the other preferences", () => {
+    const fake = makeKv({}, false)
+    const api = apiOf(fake)
+    loadSettings(api)
+
+    cycleFooter(api)
+    cycleFooterMetric(api, "cache")
+    expect(settings().footer.enabled).toBe(false)
+    expect(settings().footer.cache).toBe(true)
     expect(persisted()).toBe(false)
     expect(fake.sets).toEqual([])
   })
