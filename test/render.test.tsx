@@ -369,6 +369,26 @@ function MockDialogSelect(props: DialogSelectMockProps) {
   )
 }
 
+/**
+ * Host `api.ui.Prompt` stand-in (installed `TuiPromptProps`): the
+ * `session_prompt` slot renders with `replace`, so the production component
+ * must re-render the native prompt AND forward the host props. The mock
+ * records every prop it receives and renders a marker row so frames prove
+ * the prompt row renders directly above the TokenMeter line with no gap.
+ */
+type PromptMockProps = {
+  sessionID?: string
+  visible?: boolean
+  disabled?: boolean
+  onSubmit?: () => void
+  ref?: (ref: unknown) => void
+}
+const promptProps: Array<PromptMockProps> = []
+function MockPrompt(props: PromptMockProps) {
+  promptProps.push(props)
+  return <text>{`[prompt:${props.sessionID ?? ""}]`}</text>
+}
+
 async function mountEntry(
   state: MutableApi,
   project: ProjectState = {},
@@ -413,7 +433,10 @@ async function mountEntry(
     params: {},
   })
   let slot: ((ctx: unknown, props: unknown) => unknown) | undefined
-  let footerSlot: ((ctx: unknown) => unknown) | undefined
+  let footerSlot: ((ctx: unknown, props: unknown) => unknown) | undefined
+  // The full registration record so tests can assert WHICH slots the entry
+  // registers (the old `app_bottom` placement must be gone for this metric).
+  let slotRegistration: { slots: Record<string, unknown> } | undefined
   // Isolate the Project section: a previous test's debounced refresh must
   // never leak into this mount.
   setProjectSnapshot(null)
@@ -463,6 +486,10 @@ async function mountEntry(
         },
       },
       DialogSelect: MockDialogSelect,
+      Prompt: MockPrompt,
+    },
+    theme: {
+      current: THEME.current,
     },
     lifecycle: {
       onDispose: (fn: () => void) => {
@@ -472,8 +499,9 @@ async function mountEntry(
     },
     slots: {
       register: (registration: { slots: Record<string, unknown> }) => {
+        slotRegistration = registration
         slot = registration.slots.sidebar_content as typeof slot
-        footerSlot = registration.slots.app_bottom as typeof footerSlot
+        footerSlot = registration.slots.session_prompt as typeof footerSlot
       },
     },
     // Signal-backed so the plugin's route-reactive effect actually tracks
@@ -531,6 +559,7 @@ async function mountEntry(
     },
     slot: slot as NonNullable<typeof slot>,
     footerSlot: footerSlot as NonNullable<typeof footerSlot>,
+    slotRegistration,
     setRoute,
     dispose: () => {
       disposes.forEach((fn) => {
@@ -3955,22 +3984,38 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
   }, 20000)
 })
 
-describe("footer metrics (app_bottom slot: route session only, reactive, settings-driven)", () => {
+describe("footer metrics (session_prompt slot: current session only, reactive, settings-driven)", () => {
   /**
-   * Mounts the REAL footer slot (entry-registered `app_bottom`) in the
+   * Mounts the REAL footer slot (entry-registered `session_prompt`) in the
    * headless renderer, exactly like the sidebar tests mount the
-   * sidebar_content slot. The frame only contains the footer line.
+   * sidebar_content slot. The host calls this slot with `replace` and passes
+   * the visible session's id plus the prompt-row props; the frame contains
+   * the re-rendered native prompt row followed by the metric line.
    */
   const mountFooter = async (
-    footerSlot: (ctx: unknown) => unknown,
+    footerSlot: (ctx: unknown, props: unknown) => unknown,
+    sessionID: string,
     width = 60,
   ) =>
-    testRender(() => footerSlot({ theme: THEME }) as never, {
-      width,
-      height: 3,
-    })
+    testRender(
+      () =>
+        footerSlot(
+          { theme: THEME },
+          {
+            session_id: sessionID,
+            visible: true,
+            disabled: false,
+            on_submit: () => {},
+            ref: () => {},
+          },
+        ) as never,
+      {
+        width,
+        height: 3,
+      },
+    )
 
-  test("shows the active route session's own usage with default metrics and renders nothing off-route", async () => {
+  test("replaces the native prompt row: forwards host props and renders the metric line directly below with no gap", async () => {
     const rootID = "ses_footer_route"
     const state: MutableApi = {
       sessions: {
@@ -3982,21 +4027,36 @@ describe("footer metrics (app_bottom slot: route session only, reactive, setting
       metas: { [rootID]: { id: rootID, title: "Root" } },
     }
     purgeTreeCache()
-    const { footerSlot, setRoute, dispose } = await mountEntry(state)
+    const { footerSlot, slotRegistration, setRoute, dispose } =
+      await mountEntry(state)
+    // Issue #24 placement fix: the metric registers on `session_prompt`, and
+    // the old `app_bottom` registration is gone.
+    expect(slotRegistration?.slots.app_bottom).toBeUndefined()
+    expect(typeof slotRegistration?.slots.session_prompt).toBe("function")
+    // Activate the session through the real route effect so the reconcile
+    // fills the store; the footer then derives usage from the slot's
+    // session_id prop (no route guessing inside the component).
     setRoute({ name: "session", params: { sessionID: rootID } })
     await waitFor(() => snapshot()?.rootID === rootID)
-    const setup = await mountFooter(footerSlot)
+    const setup = await mountFooter(footerSlot, rootID)
     // Default metrics: input + output only, compact magnitudes, no total.
     await setup.waitForFrame((frame) => frame.includes("in 40K · out 1K"))
     const frame = setup.captureCharFrame()
     expect(frame).not.toContain("total")
-    // Issue #24 layout contract: the line stays on the host `app_bottom`
-    // row (rendered directly below the native statusline/prompt row),
-    // right-aligned against the native prompt's effective paddingRight={2}
-    // with no added gap, and renders as an ordinary muted text line —
-    // no bold, no custom style.
-    const row = frame.split(/[\r\n]+/).find((line) => line.includes("in 40K"))
-    expect(row).toMatch(/^ +in 40K · out 1K {2}$/)
+    // The native prompt row renders FIRST and the metric line lands directly
+    // below it (no gap, no blank row): the wrapper is a zero-gap vertical box
+    // with the host Prompt on top, following the reference plugin pattern.
+    const lines = frame.split(/[\r\n]+/)
+    const promptRow = lines.findIndex((line) =>
+      line.includes(`[prompt:${rootID}]`),
+    )
+    const footerRow = lines.findIndex((line) => line.includes("in 40K"))
+    expect(promptRow).toBeGreaterThanOrEqual(0)
+    expect(footerRow).toBe(promptRow + 1)
+    // Right-aligned against the prompt row width with no padding, as an
+    // ordinary muted text line — no bold, no custom style.
+    const row = lines[footerRow]
+    expect(row).toMatch(/^ +in 40K · out 1K$/)
     expect(row?.length).toBe(60)
     const spans = setup.captureSpans().lines.flatMap((line) => line.spans)
     const muted = rgbToHex(RGBA.fromHex("#a9b1d6"))
@@ -4004,10 +4064,22 @@ describe("footer metrics (app_bottom slot: route session only, reactive, setting
       .filter((span) => span.text.includes("in 40K"))
       .map((span) => rgbToHex(span.fg))
     expect(fg).toEqual([muted])
-    // Leaving the session route hides the footer without any remount.
-    setRoute({ name: "home", params: {} })
-    await setup.waitForFrame((frame) => !frame.includes("in 40K"))
-    expect(setup.captureCharFrame().trim()).toBe("")
+    // Every host slot prop is forwarded to the native Prompt.
+    const forwarded = promptProps.at(-1)
+    expect(forwarded?.sessionID).toBe(rootID)
+    expect(forwarded?.visible).toBe(true)
+    expect(forwarded?.disabled).toBe(false)
+    expect(typeof forwarded?.onSubmit).toBe("function")
+    expect(typeof forwarded?.ref).toBe("function")
+    // A session without observed usage renders the native prompt alone — no
+    // metric line — and Home never mounts this slot (issue #24 measures the
+    // active session only; no Home metric is invented).
+    const empty = await mountFooter(footerSlot, "ses_footer_empty")
+    await empty.renderOnce()
+    const emptyFrame = empty.captureCharFrame()
+    expect(emptyFrame).toContain("[prompt:ses_footer_empty]")
+    expect(emptyFrame).not.toContain("in ")
+    expect(emptyFrame).not.toContain("out ")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -4045,7 +4117,7 @@ describe("footer metrics (app_bottom slot: route session only, reactive, setting
     } = await mountEntry(state)
     setRoute({ name: "session", params: { sessionID: rootID } })
     await waitFor(() => snapshot()?.rootID === rootID)
-    const setup = await mountFooter(footerSlot)
+    const setup = await mountFooter(footerSlot, rootID)
     // The snapshot aggregates root + child (591K), but the footer must show
     // the ROOT session's own usage only — the child's 500K never appears.
     await waitFor(() => snapshot()?.totalTokens === 591000)
@@ -4086,7 +4158,7 @@ describe("footer metrics (app_bottom slot: route session only, reactive, setting
     dispose()
   }, 20000)
 
-  test("settings drive the footer: disabled hides it, independent metric toggles change the subset, precise mode applies", async () => {
+  test("settings drive the footer: disabled hides the line, independent metric toggles change the subset, precise mode applies", async () => {
     const rootID = "ses_footer_settings"
     const state: MutableApi = {
       sessions: {
@@ -4131,10 +4203,14 @@ describe("footer metrics (app_bottom slot: route session only, reactive, setting
     setRoute({ name: "session", params: { sessionID: rootID } })
     await waitFor(() => snapshot()?.rootID === rootID)
     // Wide enough for the full precise-mode line (66 columns).
-    const setup = await mountFooter(footerSlot, 80)
+    const setup = await mountFooter(footerSlot, rootID, 80)
     await setup.renderOnce()
-    // Footer disabled: nothing renders even with session usage.
-    expect(setup.captureCharFrame().trim()).toBe("")
+    // Footer disabled: the native prompt row still renders (the slot
+    // REPLACES the prompt — returning nothing would remove it), but the
+    // metric line is gone.
+    const disabledFrame = setup.captureCharFrame()
+    expect(disabledFrame).toContain(`[prompt:${rootID}]`)
+    expect(disabledFrame).not.toContain("in 40K")
 
     // Enable the footer through the real settings writer (ready-gated, same
     // kv the loadSettings read from): default subset appears reactively.
