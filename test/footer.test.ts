@@ -2,7 +2,7 @@
  * Unit suite for the pure footer line formatter (src/tokenmeter/footer.ts).
  *
  * Covers issue #24's footer contract:
- *  - default subset renders exactly `in <input> · out <output>`
+ *  - default subset renders exactly `<input> in · <output> out`
  *  - independent metric selection: every subset renders in fixed order
  *    (total first, then in/out/reason/cache) and an empty subset is `""`
  *  - cache is the single combined metric (read + write summed upstream)
@@ -44,12 +44,12 @@ describe("formatFooterLine metric selection", () => {
       "compact",
       80,
     )
-    expect(line).toBe("in 40K · out 1K")
+    expect(line).toBe("40K in · 1K out")
   })
 
   test("all metrics render in fixed order: total first, then in/out/reason/cache", () => {
     const line = formatFooterLine(USAGE, FOOTER, "compact", 80)
-    expect(line).toBe("total 44K · in 40K · out 1K · reason 800 · cache 2K")
+    expect(line).toBe("44K total · 40K in · 1K out · 800 reason · 2K cache")
   })
 
   test("each metric renders alone when it is the only one enabled", () => {
@@ -68,11 +68,11 @@ describe("formatFooterLine metric selection", () => {
         "compact",
         80,
       )
-    expect(alone("total")).toBe("total 44K")
-    expect(alone("input")).toBe("in 40K")
-    expect(alone("output")).toBe("out 1K")
-    expect(alone("reasoning")).toBe("reason 800")
-    expect(alone("cache")).toBe("cache 2K")
+    expect(alone("total")).toBe("44K total")
+    expect(alone("input")).toBe("40K in")
+    expect(alone("output")).toBe("1K out")
+    expect(alone("reasoning")).toBe("800 reason")
+    expect(alone("cache")).toBe("2K cache")
   })
 
   test("an empty metric subset renders the empty string", () => {
@@ -104,12 +104,12 @@ describe("formatFooterLine metric selection", () => {
         reasoning: false,
         cache: false,
       }),
-    ).toBe("total 44K")
+    ).toBe("44K total")
     expect(withSubset({ reasoning: true, cache: true, total: false })).toBe(
-      "in 40K · out 1K · reason 800 · cache 2K",
+      "40K in · 1K out · 800 reason · 2K cache",
     )
     expect(withSubset({ output: false, cache: false })).toBe(
-      "total 44K · in 40K · reason 800",
+      "44K total · 40K in · 800 reason",
     )
   })
 })
@@ -129,7 +129,7 @@ describe("formatFooterLine values and number modes", () => {
       80,
     )
     // cache = cacheRead + cacheWrite = 2000 + 100 = 2100 -> 2K
-    expect(line).toBe("cache 2K")
+    expect(line).toBe("2K cache")
   })
 
   test("total is the canonical cumulative spend input+output+reasoning+cache.read+cache.write", () => {
@@ -146,13 +146,13 @@ describe("formatFooterLine values and number modes", () => {
       "compact",
       80,
     )
-    expect(line).toBe("total 44K")
+    expect(line).toBe("44K total")
   })
 
   test("precise numbers mode renders thousands-separated integers", () => {
     const line = formatFooterLine(USAGE, FOOTER, "precise", 80)
     expect(line).toBe(
-      "total 43,900 · in 40,000 · out 1,000 · reason 800 · cache 2,100",
+      "43,900 total · 40,000 in · 1,000 out · 800 reason · 2,100 cache",
     )
   })
 
@@ -163,21 +163,21 @@ describe("formatFooterLine values and number modes", () => {
       "compact",
       80,
     )
-    expect(line).toBe("total 44K · in 40K · out 1K · reason 800 · cache 2K")
+    expect(line).toBe("44K total · 40K in · 1K out · 800 reason · 2K cache")
   })
 })
 
 describe("formatFooterLine width safety", () => {
   test("returns the full line when it fits", () => {
     expect(formatFooterLine(USAGE, FOOTER, "compact", 100)).toBe(
-      "total 44K · in 40K · out 1K · reason 800 · cache 2K",
+      "44K total · 40K in · 1K out · 800 reason · 2K cache",
     )
   })
 
   test("truncates predictably with an ellipsis when the line overflows", () => {
     const line = formatFooterLine(USAGE, FOOTER, "compact", 20)
     expect(line.length).toBeLessThan(
-      "total 44K · in 40K · out 1K · reason 800 · cache 2K".length,
+      "44K total · 40K in · 1K out · 800 reason · 2K cache".length,
     )
     expect(line.endsWith("…")).toBe(true)
   })

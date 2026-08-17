@@ -370,11 +370,13 @@ function MockDialogSelect(props: DialogSelectMockProps) {
 }
 
 /**
- * Host `api.ui.Prompt` stand-in (installed `TuiPromptProps`): the
- * `session_prompt` slot renders with `replace`, so the production component
- * must re-render the native prompt AND forward the host props. The mock
- * records every prop it receives and renders a marker row so frames prove
- * the prompt row renders directly above the TokenMeter line with no gap.
+ * Host `api.ui.Prompt` stand-in (installed `TuiPromptProps`): like the real
+ * host prompt, it renders its `right` extension inline on the same row (the
+ * native prompt's agent/model meta row — prompt/index.tsx `right` prop) and
+ * the host passes the `session_prompt_right` slot there. The mock records
+ * every prop it receives so frames prove the host composition keeps exactly
+ * ONE native prompt with the TokenMeter metric inline — never a second
+ * prompt row, never a second standalone usage/status row.
  */
 type PromptMockProps = {
   sessionID?: string
@@ -382,11 +384,17 @@ type PromptMockProps = {
   disabled?: boolean
   onSubmit?: () => void
   ref?: (ref: unknown) => void
+  right?: unknown
 }
 const promptProps: Array<PromptMockProps> = []
 function MockPrompt(props: PromptMockProps) {
   promptProps.push(props)
-  return <text>{`[prompt:${props.sessionID ?? ""}]`}</text>
+  return (
+    <box flexDirection="row" gap={1}>
+      <text>{`[prompt:${props.sessionID ?? ""}]`}</text>
+      {props.right as never}
+    </box>
+  )
 }
 
 async function mountEntry(
@@ -433,9 +441,12 @@ async function mountEntry(
     params: {},
   })
   let slot: ((ctx: unknown, props: unknown) => unknown) | undefined
-  let footerSlot: ((ctx: unknown, props: unknown) => unknown) | undefined
+  let rightSlot: ((ctx: unknown, props: unknown) => unknown) | undefined
   // The full registration record so tests can assert WHICH slots the entry
-  // registers (the old `app_bottom` placement must be gone for this metric).
+  // registers: the `session_prompt_right` metric is present, while
+  // `app_bottom` AND the `session_prompt` replacement are gone (the host
+  // keeps its single native prompt, which already renders its own status
+  // row).
   let slotRegistration: { slots: Record<string, unknown> } | undefined
   // Isolate the Project section: a previous test's debounced refresh must
   // never leak into this mount.
@@ -501,7 +512,7 @@ async function mountEntry(
       register: (registration: { slots: Record<string, unknown> }) => {
         slotRegistration = registration
         slot = registration.slots.sidebar_content as typeof slot
-        footerSlot = registration.slots.session_prompt as typeof footerSlot
+        rightSlot = registration.slots.session_prompt_right as typeof rightSlot
       },
     },
     // Signal-backed so the plugin's route-reactive effect actually tracks
@@ -558,7 +569,7 @@ async function mountEntry(
       replaces: () => dialogReplacesRef.value,
     },
     slot: slot as NonNullable<typeof slot>,
-    footerSlot: footerSlot as NonNullable<typeof footerSlot>,
+    rightSlot: rightSlot as NonNullable<typeof rightSlot>,
     slotRegistration,
     setRoute,
     dispose: () => {
@@ -3984,38 +3995,73 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
   }, 20000)
 })
 
-describe("footer metrics (session_prompt slot: current session only, reactive, settings-driven)", () => {
+describe("footer metrics (session_prompt_right slot: inline in the host's single native prompt, current session only, reactive, settings-driven)", () => {
   /**
-   * Mounts the REAL footer slot (entry-registered `session_prompt`) in the
-   * headless renderer, exactly like the sidebar tests mount the
-   * sidebar_content slot. The host calls this slot with `replace` and passes
-   * the visible session's id plus the prompt-row props; the frame contains
-   * the re-rendered native prompt row followed by the metric line.
+   * Mounts the REAL right slot (entry-registered `session_prompt_right`) in
+   * the headless renderer, exactly like the sidebar tests mount the
+   * sidebar_content slot. The host renders this slot INSIDE its single
+   * native prompt (prompt/index.tsx `right` prop, agent/model meta row) and
+   * passes exactly `{ session_id }` (installed `TuiHostSlotMap`).
    */
   const mountFooter = async (
-    footerSlot: (ctx: unknown, props: unknown) => unknown,
+    rightSlot: (ctx: unknown, props: unknown) => unknown,
     sessionID: string,
     width = 60,
   ) =>
     testRender(
-      () =>
-        footerSlot(
-          { theme: THEME },
-          {
-            session_id: sessionID,
-            visible: true,
-            disabled: false,
-            on_submit: () => {},
-            ref: () => {},
-          },
-        ) as never,
+      () => rightSlot({ theme: THEME }, { session_id: sessionID }) as never,
       {
         width,
         height: 3,
       },
     )
 
-  test("replaces the native prompt row: forwards host props and renders the metric line directly below with no gap", async () => {
+  /**
+   * The real host composition: ONE native `api.ui.Prompt` whose `right` prop
+   * hosts the `session_prompt_right` slot. The host renders
+   * `<pluginRuntime.Slot name="session_prompt_right" .../>` there, so the
+   * test mounts the slot as a lazy component (`RightSlotComp`) whose element
+   * is built ONCE inside the render — when the renderer context is present —
+   * and passed as a STATIC prop value. An inline JSX prop would compile to a
+   * reactive getter that the headless renderer's frame loop can re-evaluate
+   * asynchronously outside any Solid owner, re-invoking the slot without the
+   * renderer context ("No renderer found"); a static element is re-inserted
+   * idempotently instead. The metric must land inline in that same row —
+   * exactly one prompt marker, exactly one metric, no separate extra row —
+   * proving the host keeps a single native prompt (whose own bottom status
+   * row already shows native usage) with no plugin-side duplicate.
+   */
+  const mountComposition = async (
+    rightSlot: (ctx: unknown, props: unknown) => unknown,
+    sessionID: string,
+    width = 60,
+  ) => {
+    const RightSlotComp = (props: { session_id: string }) =>
+      rightSlot({ theme: THEME }, { session_id: props.session_id }) as never
+    return testRender(
+      () => {
+        // Built inside the render (renderer context present), passed as a
+        // plain prop value — never re-invoked by the renderer loop.
+        const rightEl = (<RightSlotComp session_id={sessionID} />) as never
+        return (
+          <MockPrompt
+            sessionID={sessionID}
+            visible={true}
+            disabled={false}
+            onSubmit={() => {}}
+            ref={() => {}}
+            right={rightEl}
+          />
+        ) as never
+      },
+      {
+        width,
+        height: 3,
+      },
+    )
+  }
+
+  test("keeps the host's single native prompt: the session_prompt_right metric renders inline, no second prompt or status row", async () => {
     const rootID = "ses_footer_route"
     const state: MutableApi = {
       sessions: {
@@ -4027,59 +4073,65 @@ describe("footer metrics (session_prompt slot: current session only, reactive, s
       metas: { [rootID]: { id: rootID, title: "Root" } },
     }
     purgeTreeCache()
-    const { footerSlot, slotRegistration, setRoute, dispose } =
+    const { rightSlot, slotRegistration, setRoute, dispose } =
       await mountEntry(state)
-    // Issue #24 placement fix: the metric registers on `session_prompt`, and
-    // the old `app_bottom` registration is gone.
+    // Issue #24 real contract: no `app_bottom` and NO `session_prompt`
+    // replacement (the host keeps its single native prompt — which already
+    // renders its own native usage/status row — so a plugin-side prompt
+    // re-render or appended status row would duplicate it); the metric
+    // registers on `session_prompt_right` instead.
     expect(slotRegistration?.slots.app_bottom).toBeUndefined()
-    expect(typeof slotRegistration?.slots.session_prompt).toBe("function")
+    expect(slotRegistration?.slots.session_prompt).toBeUndefined()
+    expect(typeof slotRegistration?.slots.session_prompt_right).toBe("function")
     // Activate the session through the real route effect so the reconcile
-    // fills the store; the footer then derives usage from the slot's
+    // fills the store; the metric then derives usage from the slot's
     // session_id prop (no route guessing inside the component).
     setRoute({ name: "session", params: { sessionID: rootID } })
     await waitFor(() => snapshot()?.rootID === rootID)
-    const setup = await mountFooter(footerSlot, rootID)
+    // The host composition: ONE native prompt whose `right` prop hosts the
+    // session_prompt_right slot — the metric must land inline in that same
+    // row, never as a second row below.
+    const setup = await mountComposition(rightSlot, rootID)
     // Default metrics: input + output only, compact magnitudes, no total.
-    await setup.waitForFrame((frame) => frame.includes("in 40K · out 1K"))
+    await setup.waitForFrame((frame) => frame.includes("40K in · 1K out"))
     const frame = setup.captureCharFrame()
     expect(frame).not.toContain("total")
-    // The native prompt row renders FIRST and the metric line lands directly
-    // below it (no gap, no blank row): the wrapper is a zero-gap vertical box
-    // with the host Prompt on top, following the reference plugin pattern.
-    const lines = frame.split(/[\r\n]+/)
-    const promptRow = lines.findIndex((line) =>
-      line.includes(`[prompt:${rootID}]`),
-    )
-    const footerRow = lines.findIndex((line) => line.includes("in 40K"))
-    expect(promptRow).toBeGreaterThanOrEqual(0)
-    expect(footerRow).toBe(promptRow + 1)
-    // Right-aligned against the prompt row width with no padding, as an
-    // ordinary muted text line — no bold, no custom style.
-    const row = lines[footerRow]
-    expect(row).toMatch(/^ +in 40K · out 1K$/)
-    expect(row?.length).toBe(60)
+    // Exactly one native prompt and exactly one inline metric — no duplicate
+    // prompt, no second standalone usage/status row.
+    expect(countOccurrences(frame, "[prompt:")).toBe(1)
+    expect(countOccurrences(frame, "40K in")).toBe(1)
+    // The metric renders inline on the SAME row as the prompt marker: the
+    // composition is a single non-empty row, not a prompt row plus an extra
+    // appended row.
+    const lines = frame
+      .split(/[\r\n]+/)
+      .filter((line) => line.trim().length > 0)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain(`[prompt:${rootID}]`)
+    expect(lines[0]).toContain("40K in · 1K out")
+    // Muted, native-theme text — an ordinary inline segment, no bold, no
+    // custom style.
     const spans = setup.captureSpans().lines.flatMap((line) => line.spans)
     const muted = rgbToHex(RGBA.fromHex("#a9b1d6"))
     const fg = spans
-      .filter((span) => span.text.includes("in 40K"))
+      .filter((span) => span.text.includes("40K in"))
       .map((span) => rgbToHex(span.fg))
     expect(fg).toEqual([muted])
-    // Every host slot prop is forwarded to the native Prompt.
+    // The single native prompt received the session id and the right
+    // extension (the registered slot content).
     const forwarded = promptProps.at(-1)
     expect(forwarded?.sessionID).toBe(rootID)
-    expect(forwarded?.visible).toBe(true)
-    expect(forwarded?.disabled).toBe(false)
-    expect(typeof forwarded?.onSubmit).toBe("function")
-    expect(typeof forwarded?.ref).toBe("function")
-    // A session without observed usage renders the native prompt alone — no
-    // metric line — and Home never mounts this slot (issue #24 measures the
-    // active session only; no Home metric is invented).
-    const empty = await mountFooter(footerSlot, "ses_footer_empty")
+    expect(forwarded?.right).toBeDefined()
+    // A session without observed usage renders the metric-less native prompt
+    // alone — the slot emits nothing — and Home never mounts this slot
+    // (issue #24 measures the active session only; no Home metric is
+    // invented).
+    const empty = await mountComposition(rightSlot, "ses_footer_empty")
     await empty.renderOnce()
     const emptyFrame = empty.captureCharFrame()
     expect(emptyFrame).toContain("[prompt:ses_footer_empty]")
-    expect(emptyFrame).not.toContain("in ")
-    expect(emptyFrame).not.toContain("out ")
+    expect(emptyFrame).not.toContain("40K in")
+    expect(emptyFrame).not.toContain("1K out")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -4109,7 +4161,7 @@ describe("footer metrics (session_prompt slot: current session only, reactive, s
     }
     purgeTreeCache()
     const {
-      footerSlot,
+      rightSlot,
       fire,
       setRoute,
       state: mutable,
@@ -4117,13 +4169,13 @@ describe("footer metrics (session_prompt slot: current session only, reactive, s
     } = await mountEntry(state)
     setRoute({ name: "session", params: { sessionID: rootID } })
     await waitFor(() => snapshot()?.rootID === rootID)
-    const setup = await mountFooter(footerSlot, rootID)
+    const setup = await mountFooter(rightSlot, rootID)
     // The snapshot aggregates root + child (591K), but the footer must show
     // the ROOT session's own usage only — the child's 500K never appears.
     await waitFor(() => snapshot()?.totalTokens === 591000)
-    await setup.waitForFrame((frame) => frame.includes("in 40K · out 1K"))
+    await setup.waitForFrame((frame) => frame.includes("40K in · 1K out"))
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("in 40K · out 1K")
+    expect(frame).toContain("40K in · 1K out")
     expect(frame).not.toContain("500K")
     expect(frame).not.toContain("591K")
 
@@ -4152,8 +4204,8 @@ describe("footer metrics (session_prompt slot: current session only, reactive, s
     expect(observedSessionUsage(rootID)?.output).toBe(1000)
     // The published snapshot and the mounted footer both keep their values.
     expect(snapshot()?.totalTokens).toBe(591000)
-    await setup.waitForFrame((frame) => frame.includes("in 40K · out 1K"))
-    expect(setup.captureCharFrame()).toContain("in 40K · out 1K")
+    await setup.waitForFrame((frame) => frame.includes("40K in · 1K out"))
+    expect(setup.captureCharFrame()).toContain("40K in · 1K out")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -4182,7 +4234,7 @@ describe("footer metrics (session_prompt slot: current session only, reactive, s
     }
     purgeTreeCache()
     // Persisted footer state: disabled, defaults otherwise.
-    const { footerSlot, api, setRoute, dispose } = await mountEntry(
+    const { rightSlot, api, setRoute, dispose } = await mountEntry(
       state,
       {},
       true,
@@ -4203,38 +4255,36 @@ describe("footer metrics (session_prompt slot: current session only, reactive, s
     setRoute({ name: "session", params: { sessionID: rootID } })
     await waitFor(() => snapshot()?.rootID === rootID)
     // Wide enough for the full precise-mode line (66 columns).
-    const setup = await mountFooter(footerSlot, rootID, 80)
+    const setup = await mountFooter(rightSlot, rootID, 80)
     await setup.renderOnce()
-    // Footer disabled: the native prompt row still renders (the slot
-    // REPLACES the prompt — returning nothing would remove it), but the
-    // metric line is gone.
+    // Footer disabled: the slot emits nothing — the host's own native prompt
+    // keeps rendering its own status row, the metric is simply absent.
     const disabledFrame = setup.captureCharFrame()
-    expect(disabledFrame).toContain(`[prompt:${rootID}]`)
-    expect(disabledFrame).not.toContain("in 40K")
+    expect(disabledFrame).not.toContain("40K in")
 
     // Enable the footer through the real settings writer (ready-gated, same
     // kv the loadSettings read from): default subset appears reactively.
     cycleFooter(api)
-    await setup.waitForFrame((frame) => frame.includes("in 40K · out 1K"))
+    await setup.waitForFrame((frame) => frame.includes("40K in · 1K out"))
     // Independent toggles: reasoning, then total (total-first ordering),
     // then the combined cache metric.
     cycleFooterMetric(api, "reasoning")
     await setup.waitForFrame((frame) =>
-      frame.includes("in 40K · out 1K · reason 800"),
+      frame.includes("40K in · 1K out · 800 reason"),
     )
     cycleFooterMetric(api, "total")
     await setup.waitForFrame((frame) =>
-      frame.includes("total 44K · in 40K · out 1K · reason 800"),
+      frame.includes("44K total · 40K in · 1K out · 800 reason"),
     )
     cycleFooterMetric(api, "cache")
     await setup.waitForFrame((frame) =>
-      frame.includes("total 44K · in 40K · out 1K · reason 800 · cache 2K"),
+      frame.includes("44K total · 40K in · 1K out · 800 reason · 2K cache"),
     )
     // The numbers preference applies to the footer line like the sidebar.
     cycleNumbers(api)
     await setup.waitForFrame((frame) =>
       frame.includes(
-        "total 43,900 · in 40,000 · out 1,000 · reason 800 · cache 2,100",
+        "43,900 total · 40,000 in · 1,000 out · 800 reason · 2,100 cache",
       ),
     )
     disposeReconcile()
