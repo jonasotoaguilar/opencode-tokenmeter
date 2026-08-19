@@ -2160,10 +2160,14 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
     expect(panelSrc).toMatch(
       /setOpenGroupIndex\(\s*openGroupIndex\(\) === index\(\) \? null : index\(\),?\s*\)/,
     )
-    // The expanded agent list is a REAL scroll container: a `<scrollbox>`
-    // sized for roughly two compact agents that holds ALL groups through
-    // the `For` — no slice, no clipped cue, no hidden count.
-    expect(panelSrc).toContain("<scrollbox width={inner()} height={4} scrollY>")
+    // The expanded agent list is a REAL scroll container that holds ALL
+    // groups through the `For` — no slice, no clipped cue, no hidden count.
+    // Viewport caps at 4 rows (two collapsed agents) and shrinks for fewer
+    // rows: height = min(actual visible rows, 4) so a single collapsed group
+    // occupies 2 rows, not 4 with blank space (#25).
+    expect(panelSrc).toContain("<scrollbox")
+    expect(panelSrc).toContain("height={subagentsHeight()}")
+    expect(panelSrc).toContain("scrollY")
     expect(panelSrc).toContain("<For each={snap().groups}>")
     expect(panelSrc).not.toContain("slice(")
     expect(panelSrc).not.toContain("MAX_VISIBLE_GROUPS")

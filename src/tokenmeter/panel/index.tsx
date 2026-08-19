@@ -152,6 +152,24 @@ export function UsagePanel(props) {
   const chevron = () =>
     props.subagentsPref() === "expanded" ? GLYPH.collapse : GLYPH.expand
 
+  // Dynamic viewport: min(actual visible rows, 4) — collapsed row = 2,
+  // expanded compact = 4 (header + 3 detail), expanded precise = 6 (header + 5).
+  // Single collapsed group occupies 2 rows, not 4; overflow caps at 4 with scroll.
+  const subagentsHeight = () => {
+    const snapVal = view()
+    if (!snapVal) return 4
+    const groups = snapVal.groups
+    if (groups.length === 0) return 0
+    const open = openGroupIndex()
+    const numbers = settings().numbers
+    let total = 0
+    for (let i = 0; i < groups.length; i++) {
+      if (i === open) total += numbers === "precise" ? 6 : 4
+      else total += 2
+    }
+    return Math.min(total, 4)
+  }
+
   return (
     <box flexDirection="column">
       <box flexDirection="row">
@@ -224,7 +242,11 @@ export function UsagePanel(props) {
                     </Show>
                   </box>
                   <Show when={props.subagentsPref() === "expanded"}>
-                    <scrollbox width={inner()} height={4} scrollY>
+                    <scrollbox
+                      width={inner()}
+                      height={subagentsHeight()}
+                      scrollY
+                    >
                       <For each={snap().groups}>
                         {(group, index) => (
                           <GroupRows

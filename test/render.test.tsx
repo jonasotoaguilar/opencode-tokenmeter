@@ -3929,6 +3929,64 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
     dispose()
   }, 20000)
 
+  test("REGRESSION #25: viewport height is min(actual rows, 4) — single collapsed group is 2 rows, not 4 with blank space", async () => {
+    // Fixed height={4} reserved 2 blank rows for a single collapsed group.
+    // The viewport must shrink to the actual content: 1 collapsed = 2 rows,
+    // 2 collapsed = 4 rows, 3+ collapsed = 4 capped with scroll.
+    // Expanded compact is 4 rows (header + 3 detail), precise is 6.
+    const assertHeight = async (
+      groups: Array<{
+        id: string
+        agent: string
+        input: number
+        output: number
+      }>,
+      expectedViewport: number,
+      expectedScrollHeight: number,
+    ) => {
+      const rootID = `ses_h_${Math.random().toString(36).slice(2, 8)}`
+      purgeTreeCache()
+      const { slot, dispose } = await mountEntry(groupState(rootID, groups))
+      const setup = await testRender(
+        () => slot({ theme: THEME }, { session_id: rootID }) as never,
+        { width: 60, height: 20 },
+      )
+      await waitFor(() => snapshot()?.rootID === rootID)
+      await waitFor(() => snapshot()?.groups.length === groups.length)
+      await waitForFrameDriven(setup, (frame) => frame.includes("↳"))
+      const sb: any = findScrollbox(setup)
+      expect(sb).not.toBeNull()
+      // Raw ScrollBoxRenderable exposes viewport/content for height evidence.
+      expect(sb.viewport.height).toBe(expectedViewport)
+      expect(sb.scrollHeight).toBe(expectedScrollHeight)
+      expect(sb.height).toBe(expectedViewport)
+      disposeReconcile()
+      dispose()
+    }
+    await assertHeight(
+      [{ id: "a1", agent: "a", input: 4000, output: 200 }],
+      2,
+      2,
+    )
+    await assertHeight(
+      [
+        { id: "b1", agent: "a", input: 4000, output: 200 },
+        { id: "b2", agent: "b", input: 4000, output: 200 },
+      ],
+      4,
+      4,
+    )
+    await assertHeight(
+      [
+        { id: "c1", agent: "a", input: 4000, output: 200 },
+        { id: "c2", agent: "b", input: 4000, output: 200 },
+        { id: "c3", agent: "c", input: 4000, output: 200 },
+      ],
+      4,
+      6,
+    )
+  }, 20000)
+
   test("compact agent colors: ↳ indent+chevron white, name info cyan, tasks in the derived detail tone, primary line white with light-red spend", async () => {
     const rootID = "ses_sub_colors"
     purgeTreeCache()
