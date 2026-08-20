@@ -66,6 +66,7 @@ const DEFAULTS = {
   numbers: "compact",
   collapsedSummary: "session",
   footer: { ...DEFAULT_FOOTER },
+  milestones: true,
 } as const
 
 describe("settings defaults and sanitization", () => {
@@ -78,6 +79,7 @@ describe("settings defaults and sanitization", () => {
       "cache",
       "collapsedSummary",
       "footer",
+      "milestones",
       "numbers",
     ])
     expect(persisted()).toBe(true)
@@ -320,6 +322,7 @@ describe("footer settings (defaults, sanitization, independent toggles)", () => 
           numbers: "compact",
           collapsedSummary: "session",
           footer: { ...DEFAULT_FOOTER, enabled: false },
+          milestones: true,
         },
       },
     ])
@@ -347,6 +350,7 @@ describe("footer settings (defaults, sanitization, independent toggles)", () => 
       numbers: "compact",
       collapsedSummary: "session",
       footer: { ...DEFAULT_FOOTER, reasoning: true },
+      milestones: true,
     })
 
     cycleFooterMetric(api, "input")

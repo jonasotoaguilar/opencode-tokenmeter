@@ -3007,17 +3007,21 @@ describe("settings dialog (DialogSelect menu)", () => {
     expect(frame).toContain("Subagents: collapsed")
     expect(frame).toContain("Shortcut: Ctrl+E")
     // The single Settings command's options are grouped into the native
-    // category subsections `Sidebar` and `Footer` (installed
+    // category subsections `Sidebar`, `Project` and `Footer` (installed
     // `TuiDialogSelectOption.category`), each header rendered once before
     // its contiguous run of options.
     expect(frame).toContain("Sidebar")
+    expect(frame).toContain("Project")
     expect(frame).toContain("Footer")
     const options = dialogProps[0]?.options ?? []
-    expect(options).toHaveLength(11)
+    expect(options).toHaveLength(12)
     expect(options.slice(0, 5).every((opt) => opt.category === "Sidebar")).toBe(
       true,
     )
-    expect(options.slice(5).every((opt) => opt.category === "Footer")).toBe(
+    expect(options.slice(5, 6).every((opt) => opt.category === "Project")).toBe(
+      true,
+    )
+    expect(options.slice(6).every((opt) => opt.category === "Footer")).toBe(
       true,
     )
     dispose()
