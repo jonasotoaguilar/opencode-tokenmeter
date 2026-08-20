@@ -152,14 +152,17 @@ export function UsagePanel(props) {
   const chevron = () =>
     props.subagentsPref() === "expanded" ? GLYPH.collapse : GLYPH.expand
 
-  // Dynamic viewport: min(actual visible rows, 4) — collapsed row = 2,
-  // expanded compact = 4 (header + 3 detail), expanded precise = 6 (header + 5).
-  // Single collapsed group occupies 2 rows, not 4; overflow caps at 4 with scroll.
-  const subagentsHeight = () => {
+  // Single shared layout derivation for viewport height and scroll
+  // overflow: `overflow = totalRows > 4`, `height = min(totalRows, 4)`.
+  // One collapsed group is 2 rows, expanded compact is 4 (header + 3
+  // detail), expanded precise is 6 (header + 5). The single memo is the
+  // only row-count truth: both the height binding and the scroll gate read
+  // it, preventing a hidden duplicate geometry.
+  const subagentsLayout = createMemo(() => {
     const snapVal = view()
-    if (!snapVal) return 4
+    if (!snapVal) return { height: 4, overflow: false }
     const groups = snapVal.groups
-    if (groups.length === 0) return 0
+    if (groups.length === 0) return { height: 0, overflow: false }
     const open = openGroupIndex()
     const numbers = settings().numbers
     let total = 0
@@ -167,8 +170,8 @@ export function UsagePanel(props) {
       if (i === open) total += numbers === "precise" ? 6 : 4
       else total += 2
     }
-    return Math.min(total, 4)
-  }
+    return { height: Math.min(total, 4), overflow: total > 4 }
+  })
 
   return (
     <box flexDirection="column">
@@ -244,8 +247,11 @@ export function UsagePanel(props) {
                   <Show when={props.subagentsPref() === "expanded"}>
                     <scrollbox
                       width={inner()}
-                      height={subagentsHeight()}
-                      scrollY
+                      height={subagentsLayout().height}
+                      scrollY={subagentsLayout().overflow}
+                      verticalScrollbarOptions={{
+                        visible: subagentsLayout().overflow,
+                      }}
                     >
                       <For each={snap().groups}>
                         {(group, index) => (

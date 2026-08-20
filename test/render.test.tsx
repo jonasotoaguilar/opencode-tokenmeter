@@ -3987,6 +3987,61 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
     )
   }, 20000)
 
+  test("REGRESSION #33: scrollbar never visible for totalRows<=4 — overflow-gated", async () => {
+    const gateWait = async (n: number, s: any, scroll: boolean) => {
+      const t = Date.now()
+      while (Date.now() - t < 3000) {
+        const b: any = findScrollbox(s)
+        if (b) expect(b.verticalScrollBar.visible).toBe(scroll)
+        if (snapshot()?.groups.length === n) return
+        await (s as any).renderer.loop()
+        await new Promise((r) => setTimeout(r, 5))
+      }
+      throw new Error("gateWait timeout")
+    }
+    const check = async (groups: any[], scroll: boolean) => {
+      const id = `ses33_${Math.random().toString(36).slice(2, 6)}`
+      purgeTreeCache()
+      const { slot, dispose } = await mountEntry(groupState(id, groups))
+      const setup: any = await testRender(
+        () => slot({ theme: THEME }, { session_id: id }) as never,
+        { width: 60, height: 20 },
+      )
+      await waitFor(() => snapshot()?.rootID === id)
+      await gateWait(groups.length, setup, scroll)
+      await setup.renderOnce()
+      let sb: any = findScrollbox(setup)
+      expect(sb).not.toBeNull()
+      expect(sb.verticalScrollBar.visible).toBe(scroll)
+      await (setup as any).renderer.loop()
+      sb = findScrollbox(setup)
+      expect(sb).not.toBeNull()
+      expect(sb.verticalScrollBar.visible).toBe(scroll)
+      await waitForFrameDriven(setup, (f) => f.includes("↳"))
+      sb = findScrollbox(setup)
+      expect(sb).not.toBeNull()
+      expect(sb.verticalScrollBar.visible).toBe(scroll)
+      disposeReconcile()
+      dispose()
+    }
+    await check([{ id: "g1", agent: "a", input: 4000, output: 200 }], false)
+    await check(
+      [
+        { id: "g1", agent: "a", input: 4000, output: 200 },
+        { id: "g2", agent: "b", input: 4000, output: 200 },
+      ],
+      false,
+    )
+    await check(
+      [
+        { id: "g1", agent: "a", input: 4000, output: 200 },
+        { id: "g2", agent: "b", input: 4000, output: 200 },
+        { id: "g3", agent: "c", input: 4000, output: 200 },
+      ],
+      true,
+    )
+  }, 20000)
+
   test("compact agent colors: ↳ indent+chevron white, name info cyan, tasks in the derived detail tone, primary line white with light-red spend", async () => {
     const rootID = "ses_sub_colors"
     purgeTreeCache()
