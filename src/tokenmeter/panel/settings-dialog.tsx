@@ -28,6 +28,7 @@ import {
   cycleCollapsedSummary,
   cycleFooter,
   cycleFooterMetric,
+  cycleMilestones,
   cycleNumbers,
   cycleSubagents,
   settings,
@@ -99,6 +100,11 @@ export function showSettingsDialog(api: DialogSurface): void {
             category: "Sidebar",
           },
           {
+            title: `Milestones: ${settings().milestones ? "on" : "off"}`,
+            value: "milestones",
+            category: "Project",
+          },
+          {
             title: `Footer: ${settings().footer.enabled ? "on" : "off"}`,
             value: "footer",
             category: "Footer",
@@ -147,6 +153,7 @@ export function showSettingsDialog(api: DialogSurface): void {
             cycleFooterMetric(api, "cache")
           else if (option.value === "footer.total")
             cycleFooterMetric(api, "total")
+          else if (option.value === "milestones") cycleMilestones(api)
           // Deliberately NO recursive showSettingsDialog here: the titles
           // re-read the live signals, so the host re-renders this same
           // stack entry reactively. Re-replacing would recreate the

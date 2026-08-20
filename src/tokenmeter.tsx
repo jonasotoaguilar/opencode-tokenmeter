@@ -61,11 +61,13 @@
 import type { TuiPlugin } from "@opencode-ai/plugin/tui"
 import { createEffect, createRoot } from "solid-js"
 import { projectDbPath, recordDeletedSession } from "./tokenmeter/db"
+import { handleProjectMilestone } from "./tokenmeter/milestone"
 import { UsagePanel } from "./tokenmeter/panel"
 import { SessionPromptRight } from "./tokenmeter/panel/footer"
 import { showSettingsDialog } from "./tokenmeter/panel/settings-dialog"
 import {
   disposeProjectRefresh,
+  projectSnapshot,
   scheduleProjectRefresh,
   startProjectPolling,
 } from "./tokenmeter/project"
@@ -251,6 +253,15 @@ const tui: TuiPlugin = async (api) => {
         activateRoot(api, sessionID)
         scheduleProjectRefresh(api, RECONCILE_DELAY)
       }
+    })
+    // Project milestone watcher: consumes the authoritative Project snapshot
+    // (live list + deleted SQLite aggregate) as the single source of truth.
+    // Emits at most one toast for the highest newly reached order-of-magnitude
+    // milestone (1M, 10M …). Baselines silently on startup so history does not
+    // burst, isolates per project, and deduplicates across polls/refreshes.
+    createEffect(() => {
+      const snap = projectSnapshot()
+      if (snap) handleProjectMilestone(api, snap)
     })
     // Single bounded polling timer (~2 s) for Project freshness across
     // sibling OpenCode processes working in the same project. Started once

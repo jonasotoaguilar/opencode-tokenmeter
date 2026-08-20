@@ -46,6 +46,7 @@ export type Settings = {
   numbers: NumbersPref
   collapsedSummary: CollapsedSummaryPref
   footer: FooterSettings
+  milestones: boolean
 }
 
 /** Versioned single-key kv object for the object-backed preferences. */
@@ -71,6 +72,7 @@ export const DEFAULT_SETTINGS: Settings = {
   numbers: "compact",
   collapsedSummary: "session",
   footer: { ...DEFAULT_FOOTER },
+  milestones: true,
 }
 
 /** The kv surface settings needs; a structural subset of the plugin TuiKV. */
@@ -155,6 +157,9 @@ function sanitizeSettings(raw: unknown): Settings {
       ? candidate.collapsedSummary
       : DEFAULT_SETTINGS.collapsedSummary,
     footer: sanitizeFooter(candidate.footer),
+    milestones: isBoolean(candidate.milestones)
+      ? candidate.milestones
+      : DEFAULT_SETTINGS.milestones,
   }
 }
 
@@ -246,5 +251,11 @@ export function cycleFooterMetric(
 ): void {
   const footer = { ...settings().footer, [metric]: !settings().footer[metric] }
   setSettings({ ...settings(), footer })
+  writeObject(api)
+}
+
+/** Toggles Project milestone toasts on/off. */
+export function cycleMilestones(api: SettingsApi): void {
+  setSettings({ ...settings(), milestones: !settings().milestones })
   writeObject(api)
 }
