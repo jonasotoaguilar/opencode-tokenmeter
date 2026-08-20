@@ -90,6 +90,13 @@ The sidebar renders plain Unicode disclosure glyphs (`▶`/`▼`/`↳`) — no N
 
 Project and Session use the same metric contract; expanded agent groups repeat it per agent under `↳ name (N tasks) ▶` (closed) / `↳ name (N tasks) ▼` (open), with the per-agent chevron trailing the header.
 
+**Sidebar states** — collapsed shows only the master summary; expanded reveals Project, Session, and per-agent delegation groups.
+
+<p>
+<img src="docs/assets/sidebar/sidebar_collapse.png" alt="TokenMeter sidebar collapsed — master row summary only" width="380">
+<img src="docs/assets/sidebar/sidebar_expand.png" alt="TokenMeter sidebar expanded — Project, Session, and Subagents with per-agent groups" width="380">
+</p>
+
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full event → invalidation → reconcile flow.
 
 ---

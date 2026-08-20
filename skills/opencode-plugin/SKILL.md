@@ -9,46 +9,42 @@ metadata:
 
 ## Activation Contract
 
-Load when creating or modifying OpenCode plugins: TUI plugins, sidebar UI, Solid reactivity, plugin SDK, custom tools, hooks, auth, keymaps/commands, or tool interception. Re-read this file during plugin development.
+Load when creating or modifying OpenCode plugins: TUI plugins, sidebar UI, Solid reactivity, plugin SDK, custom tools, hooks, auth, keymaps/commands, tool interception. Re-read this file during plugin development.
 
 ## Hard Rules
 
-- **Verify SDK reference (REQUIRED pre-step)**: regenerate the API reference before creating any plugin: `bun run scripts/extract-plugin-api.ts` (relative to this skill's base directory); pass `--workspace /path/to/opencode` outside an opencode checkout. Writes `references/hooks.md`, `events.md`, `tool-helper.md`.
-- **Validate feasibility (REQUIRED)**: check the concept against `references/feasibility.md`; if not feasible, inform the user and suggest the alternative — never build a workaround silently.
-- **Modularity**: one purpose per function, DRY; extract proactively near 150 lines, SHOULD NOT exceed 200, MUST split over 300; never all code in one `index.ts` — `references/coding-ts.md`.
-- **TUI production boundary**: precompile `.tsx` with the OpenTUI Solid transform, load the compiled ESM artifact from `tui.json`, keep host runtimes external, inspect for reactive bindings and no eager JSX output — `references/tui-reactivity.md`.
-- **Installed-type verification**: verify exact SDK method signatures against INSTALLED `@opencode-ai/plugin/dist/tui.d.ts` and `@opencode-ai/sdk/dist/v2/gen/sdk.gen.d.ts`; no `api.client.experimental.*` client path (`experimental.*` are hook names only); pass `directory` from `api.state.path.directory` to `project.current`/`session.list` — `references/tui-api.md`.
-- **TUI slot surfaces (REQUIRED)**: classify the desired surface before choosing a slot: `session_prompt` (replace) is the supported pattern for a separate row directly below the native message input — re-render `api.ui.Prompt` and forward every host prop; `home_bottom` is the Home bottom row; `session_prompt_right` appends INSIDE the native status row (not a below-input row); `app_bottom` is normal layout flow below the active route, NOT attached to the prompt/statusline; `home_footer` is single-winner. Read the host slot spec and at least one reference plugin before coding — `references/tui-slot-surfaces.md`.
-- **Keymap/commands (REQUIRED)**: use the modern `api.keymap.registerLayer({ commands, bindings })` surface; `api.command` is deprecated (removed in v2) — never use it in new code. Verify against installed `@opentui/keymap/src/keymap.d.ts` + `types.d.ts`; release layer disposers in `api.lifecycle.onDispose`; open host DialogSelect via `api.ui.dialog.replace` ONCE — never re-replace on selection (host `replace` resets the stack, losing filter/focus); guard the close with an idempotent once-flag (`clear()` re-entrancy) — `references/commands.md`.
-- **Testing**: `references/testing.md`; TUI plugins also run the production artifact check — preload-backed render tests don't prove the `tui.json` loading boundary.
-- **Pre-publish gates**: `typecheck`, `test`, `audit --prod`, `pack --dry-run`, direct-dist testing — `references/build-and-release.md`.
-- **Runtime dependency packaging**: every module the compiled artifact imports at runtime MUST be declared in `dependencies` of the published package — consumers install only `dependencies`, never `devDependencies` (a TUI bundle importing `@opentui/solid`/`solid-js` that ships them only as devDeps fails to load after install). Check the bundle's bare imports before publishing — `references/publishing.md`.
-- **Entrypoint contract**: ship only the artifact pair(s) your kind needs — `tui.*` (implements `TuiPlugin`, `exports["./tui"]`, registers in `tui.json`); `index.*` (implements `Plugin`, `exports["."]`/`"./runtime"`, registers in `opencode.json`); dual = both pairs, two configs. Never ship `index.*` in a TUI-only package — `references/publishing.md`.
+- **Verify SDK reference (REQUIRED)**: `bun run scripts/extract-plugin-api.ts` from this skill's base dir (`--workspace /path/to/opencode` outside a checkout) — writes `hooks.md`, `events.md`, `tool-helper.md`.
+- **Validate feasibility (REQUIRED)**: check `feasibility.md`; if not feasible, inform the user and suggest the alternative — never a silent workaround.
+- **Modularity**: one purpose per function, DRY; split near 150 lines, SHOULD NOT exceed 200, MUST split over 300; never all code in one `index.ts` — `coding-ts.md`.
+- **TUI production boundary**: precompile `.tsx` (OpenTUI Solid transform), load the ESM artifact from `tui.json`, host runtimes external, no eager JSX — `tui-reactivity.md`.
+- **Installed-type verification**: verify against INSTALLED `@opencode-ai/plugin/dist/tui.d.ts` + `@opencode-ai/sdk/dist/v2/gen/sdk.gen.d.ts`; never `api.client.experimental.*` (hook names only); pass `api.state.path.directory` to `project.current`/`session.list` — `tui-api.md`.
+- **TUI slot surfaces (REQUIRED)**: classify the surface BEFORE choosing the slot — `session_prompt` (replace) = row below the native input, re-render `api.ui.Prompt` forwarding host props; `home_bottom` = Home row; `session_prompt_right` = INSIDE the status row (not below-input); `app_bottom` = route flow, NOT prompt/statusline; `home_footer` = single-winner. Read the host spec + one reference plugin first — `tui-slot-surfaces.md`.
+- **Keymap/commands (REQUIRED)**: `api.keymap.registerLayer({ commands, bindings })`; `api.command` deprecated (removed in v2) — never. Verify installed `@opentui/keymap` d.ts; dispose layers via `api.lifecycle.onDispose`; `api.ui.dialog.replace` ONCE + once-guarded close — `commands.md`.
+- **Testing**: `testing.md`; TUI plugins also run the production artifact check.
+- **Pre-publish gates**: `typecheck`, `test`, `audit --prod`, `pack --dry-run`, direct-dist — `build-and-release.md`.
+- **Runtime dependency packaging**: every runtime import of the compiled artifact MUST be in `dependencies` — consumers never install `devDependencies`; check bare imports — `publishing.md`.
+- **Entrypoint contract**: ship only the pair(s) your kind needs — `tui.*` (`TuiPlugin`, `exports["./tui"]`, `tui.json`); `index.*` (`Plugin`, `exports["."]`/`"./runtime"`, `opencode.json`); dual = both. Never `index.*` in a TUI-only package — `publishing.md`.
 
 ## Decision Gates
 
-| Situation | Action |
-| --- | --- |
-| Toasts vs inline status | `references/toast-notifications.md` / `references/ui-feedback.md` |
-| TUI plugin | `references/tui-reactivity.md` + `references/tui-api.md` |
-| TUI slot surface selection | `references/tui-slot-surfaces.md` — classify first: `session_prompt` (below-input rows), `home_bottom` (Home), `session_prompt_right` (in-row only), `app_bottom` (route flow), `home_footer` (single-winner) |
-| npm publish | `references/build-and-release.md` + `publishing.md` + `update-notifications.md` |
-| Users updating an installed plugin | `references/updating-plugins.md` — cache-first install; remove the plugin cache dir and restart; never `postinstall`; `@latest` never refreshes |
-| How the plugin host loads/installs plugins | `references/plugin-loading.md` — config entries, spec resolution, cache-first install, manifest targets |
-| Palette command, keybinding, or both | `references/commands.md` — `registerLayer`; `bindings: []` keeps the command palette-visible with no key; live re-register swaps bindings without restart |
-| Selection/settings picker UI | `references/commands.md` — host `DialogSelect` via `api.ui.dialog.replace` once; once-guarded close |
-| Not feasible as plugin | Inform user: OC core → `packages/opencode`; MCP tools → MCP config; automation → shell scripts |
+- Toasts vs inline status → `toast-notifications.md` / `ui-feedback.md`
+- TUI plugin → `tui-reactivity.md` + `tui-api.md`
+- TUI slot surface → `tui-slot-surfaces.md` — classify surface first
+- npm publish → `build-and-release.md` + `publishing.md` + `update-notifications.md`
+- Updating installed plugins → `updating-plugins.md` — never `postinstall`
+- Host plugin loading → `plugin-loading.md`
+- Palette command, keybinding, or both → `commands.md` — `registerLayer`; `bindings: []` = palette-only
+- Selection/settings picker UI → `commands.md` — `replace` once; once-guarded close
+- Not feasible as plugin → inform user: core → `packages/opencode`; MCP → MCP config; scripts
 
 ## Execution Steps
 
 1. Verify SDK reference: run the extract script.
 2. Validate feasibility; if not feasible, inform the user and stop.
-3. Design: `references/hooks.md`, `hook-patterns.md`, `coding-ts.md`.
-4. Implement modularly: `hook-patterns.md`, `tool-helper.md`, `events.md`, `commands.md`, `examples.md`.
-5. Add UI feedback if needed (toasts vs inline).
-6. Test: test folder with the entry's config (`opencode.json` for server/runtime plugins → `opencode run hi`; `tui.json` for TUI plugins) → interactive `opencode`; recommend tests by hook type.
-7. Build and package (npm only): single-file tsup bundling, packaging-boundary decision, tarball inspection via `pack --dry-run` — `build-and-release.md`.
-8. Release and share (npm only): versioning/release — semantic-release optional; default is tag-driven `scripts/release-*` (preflight → publish → verify, `vX.Y.Z` tag as authorization): `build-and-release.md`, `publishing.md`, `update-notifications.md`. Update path for users: `opencode plugin <name>@<version> --force` (cache-first install, no auto-update — `updating-plugins.md`).
+3. Design + implement: `hooks.md`, `hook-patterns.md`, `coding-ts.md`, `tool-helper.md`, `events.md`, `commands.md`, `examples.md`.
+4. Add UI feedback if needed (toasts vs inline).
+5. Test: entry config (`opencode.json` → `opencode run hi`; `tui.json` → interactive); tests by hook type.
+6. Build/package/release (npm only): tsup bundling, packaging boundary, `pack --dry-run`, tag-driven `scripts/release-*` (preflight → publish → verify, `vX.Y.Z` tag = authorization; semantic-release optional) — `build-and-release.md`, `publishing.md`, `update-notifications.md`. User update: `opencode plugin <name>@<version> --force` — `updating-plugins.md`.
 
 ## Output Contract
 
@@ -56,20 +52,12 @@ Return: plugin files created (exact paths), hooks and tools used, feasibility ve
 
 ## References
 
-- `references/hooks.md` — hook signatures (auto-generated)
-- `references/events.md` — event types (auto-generated)
-- `references/tool-helper.md` — Zod tool schemas (auto-generated)
+- Auto-generated: `references/hooks.md`, `events.md`, `tool-helper.md`
 - `references/feasibility.md` — feasibility + alternatives
-- `references/hook-patterns.md` — hook patterns + common mistakes
-- `references/coding-ts.md` — code architecture principles
-- `references/examples.md` — examples, locations, structure (npm-dist keeps source in `src/`)
-- `references/toast-notifications.md`, `references/ui-feedback.md` — user feedback
-- `references/tui-reactivity.md`, `references/tui-api.md` — TUI boundary, SDK API
-- `references/tui-slot-surfaces.md` — slot decision table + `session_prompt` prompt-row pattern, host spec path
-- `references/commands.md` — modern keymap/commands API: `registerLayer`, command/binding shapes, live re-registration, `dispatchCommand`, lifecycle, DialogSelect
+- `references/hook-patterns.md`, `coding-ts.md`, `examples.md` — patterns, architecture, examples
+- `references/toast-notifications.md`, `ui-feedback.md` — user feedback
+- `references/tui-reactivity.md`, `tui-api.md`, `tui-slot-surfaces.md` — TUI boundary, SDK API, slot surfaces
+- `references/commands.md` — keymap/commands, DialogSelect
 - `references/testing.md` — testing procedure
-- `references/build-and-release.md` — packaging, gates, release
-- `references/publishing.md` — npm publishing checklist
-- `references/update-notifications.md` — version toast pattern
-- `references/updating-plugins.md` — why plugins go stale (cache-first install), official two-command update flow
-- `references/plugin-loading.md` — how the host loads plugins: config entries, resolution, cache-first install, manifest targets
+- `references/build-and-release.md`, `publishing.md`, `update-notifications.md` — packaging, gates, release
+- `references/updating-plugins.md`, `plugin-loading.md` — updates, host load cycle
