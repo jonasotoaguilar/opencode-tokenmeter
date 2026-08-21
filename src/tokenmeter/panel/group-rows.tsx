@@ -29,11 +29,8 @@
  * `onToggle` flips it.
  */
 import { For, Show } from "solid-js"
-import {
-  formatAgentLine,
-  formatCompactSummary,
-  formatDetailLines,
-} from "../format"
+import { formatAgentLine } from "../format"
+import { formatCompactSummary, formatDetailLines } from "../format-detail"
 import { settings } from "../settings"
 import { detailTone, segmentTone } from "./tone"
 

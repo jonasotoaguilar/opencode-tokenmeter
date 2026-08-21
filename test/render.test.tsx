@@ -77,6 +77,21 @@ import type {
   UsageMessage,
 } from "../src/tokenmeter/types"
 
+function must<T>(value: T | null | undefined, message?: string): T {
+  if (value == null) throw new Error(message ?? "Unexpected nullish value")
+  return value
+}
+
+/**
+ * Test-only structural boundary for the private CliRenderer loop.
+ * The loop is private in @opentui/core; the test renderer's own harness
+ * bypasses it the same way. One documented unknown→minimal cast covers the
+ * genuine private runtime boundary without `any`.
+ */
+function rendererLoop(renderer: unknown): Promise<void> | void {
+  return (renderer as unknown as { loop(): Promise<void> | void }).loop()
+}
+
 const THEME = {
   current: {
     // Deliberately PINK accent: the main-text/muted metric tones must NOT
@@ -156,10 +171,7 @@ async function waitForFrameDriven(
 ): Promise<string> {
   const start = Date.now()
   while (Date.now() - start < timeout) {
-    // The test renderer's loop is private in @opentui/core; its own test
-    // harness bypasses it the same way (test-renderer.d.ts).
-    // @ts-expect-error - test-only access to the private loop
-    await setup.renderer.loop()
+    await rendererLoop(setup.renderer)
     const frame = setup.captureCharFrame()
     if (predicate(frame)) return frame
     await sleep(30)
@@ -318,6 +330,9 @@ type ScrollBoxHandle = {
   getChildren: () => { constructor: { name: string } }[]
   scrollHeight: number
   scrollTo: (position: number) => void
+  viewport: { height: number }
+  height: number
+  verticalScrollBar: { visible: boolean }
 }
 
 /**
@@ -818,7 +833,7 @@ describe("render-level live refresh", () => {
     // then a tool part invalidates the session. The next reconcile must
     // bypass the stale mirror and replace the map from the client so the
     // SAME mounted panel repaints with the new total, no remount.
-    state.clientSessions![rootID] = fresh
+    must(state.clientSessions)[rootID] = fresh
     fire("message.updated", { info: fresh[1] })
     fire("message.part.updated", {
       part: {
@@ -1011,7 +1026,7 @@ describe("render-level live refresh", () => {
     ]
     fire("message.updated", { info: state.sessions[childID][0] })
     await sleep(RECONCILE_DELAY + 100)
-    expect(snapshot()!.delegations).toBe(0)
+    expect(must(snapshot()).delegations).toBe(0)
     expect(snapshot()?.totalTokens).toBe(41000)
     const stuck = setup.captureCharFrame()
     expect(stuck).toContain("41K tokens · $0.01")
@@ -1023,7 +1038,7 @@ describe("render-level live refresh", () => {
     // delegation — no remount, no further event needed.
     await waitFor(
       () =>
-        snapshot()!.delegations === 1 &&
+        must(snapshot()).delegations === 1 &&
         snapshot()?.totalTokens === 41000 + 10500,
       6000,
     )
@@ -1118,17 +1133,17 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
     // The Project detail is collapsed by default (compact): expand it so the
     // labeled metric lines can be pinned below.
     await clickRowChevron(setup, setup.captureCharFrame(), "Project")
-    await waitForFrameDriven(setup, (frame) => frame.includes("3K input"))
+    await waitForFrameDriven(setup, (frame) => frame.includes("3K in"))
     const frame = setup.captureCharFrame()
     expect(frame).toContain("Project")
     expect(frame.indexOf("Project")).toBeLessThan(frame.indexOf("Session"))
     // Project detail: L1 exactly once — Σ input + raw output + raw reasoning
     // + Σ cache.read + Σ cache.write when observed (ps1: 1850, ps2: 3000) ·
     // two-decimal spend; then the two labeled metric lines (real output =
-    // raw output + raw reasoning; combined cache 150).
+    // raw output + raw reasoning; combined cache 150) — percentage mode shows 3%.
     expect(frame).toContain("5K tokens · $0.03")
-    expect(frame).toContain("3K input · 2K output")
-    expect(frame).toContain("500 reason · 150 cache")
+    expect(frame).toContain("3K in · 2K out")
+    expect(frame).toContain("500 reason · 3% cache")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -1249,7 +1264,7 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
     // the SQLite deleted aggregate BEFORE the refresh and passes projectID
     // "proj_x" as the hint; the server drops ps1 from the live list.
     project.fail = true
-    project.sessions = [project.sessions![1]!]
+    project.sessions = [must(must(project.sessions)[1])]
     fire("session.deleted", { info: { id: "ps1", projectID: "proj_x" } })
     await sleep(RECONCILE_DELAY + 200)
     // Same total as before the delete (ps1 deleted aggregate + ps2 live), NO
@@ -1414,11 +1429,11 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
     await clickRowChevron(setup, setup.captureCharFrame(), "Session")
     await waitForFrameDriven(
       setup,
-      (frame) => frame.includes("103K tokens") && frame.includes("100K input"),
+      (frame) => frame.includes("103K tokens") && frame.includes("100K in"),
     )
     const after = setup.captureCharFrame()
     expect(after).toContain("103K tokens · $0.03")
-    expect(after).toContain("100K input")
+    expect(after).toContain("100K in")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -1845,16 +1860,16 @@ describe("progressive disclosure (compact default, independent detail, empty vs 
     // Project detail appears: L1 (exactly once, replacing the compact
     // summary) plus the two labeled metric lines, while Session stays
     // collapsed.
-    await waitForFrameDriven(setup, (frame) => frame.includes("3K input"))
+    await waitForFrameDriven(setup, (frame) => frame.includes("3K in"))
     const frame = setup.captureCharFrame()
     expect(countOccurrences(frame, "5K tokens · $0.03")).toBe(1)
-    expect(frame).toContain("3K input · 2K output")
-    expect(frame).toContain("500 reason · 150 cache")
+    expect(frame).toContain("3K in · 2K out")
+    expect(frame).toContain("500 reason · 3% cache")
     expect(frame).not.toContain("\uEDE8")
     expect(frame).not.toContain("\u{F0238}")
     // Session detail must NOT render: its labeled lines are absent and its
     // header keeps the collapsed left chevron.
-    expect(frame).not.toContain("41K input")
+    expect(frame).not.toContain("41K in")
     expect(frame).toContain(`${GLYPH.expand} Session`)
     expect(frame).toContain(`${GLYPH.collapse} Project`)
     disposeReconcile()
@@ -1902,13 +1917,13 @@ describe("progressive disclosure (compact default, independent detail, empty vs 
     await waitFor(() => projectSnapshot() !== null)
     await waitForFrameDriven(setup, (frame) => frame.includes("5K tokens"))
     await clickRowChevron(setup, setup.captureCharFrame(), "Project")
-    await waitForFrameDriven(setup, (frame) => frame.includes("3K input"))
+    await waitForFrameDriven(setup, (frame) => frame.includes("3K in"))
     const frame = setup.captureCharFrame()
     // Exactly three labeled lines (compact mode), each value+label exactly
     // once; the reasoning label reads `reason` and no `spent` word appears.
     expect(countOccurrences(frame, "5K tokens · $0.03")).toBe(1)
-    expect(countOccurrences(frame, "3K input · 2K output")).toBe(1)
-    expect(countOccurrences(frame, "500 reason · 150 cache")).toBe(1)
+    expect(countOccurrences(frame, "3K in · 2K out")).toBe(1)
+    expect(countOccurrences(frame, "500 reason · 3% cache")).toBe(1)
     // The compact summary is gone (replaced by L1): no coins/fire icons.
     expect(frame).not.toContain("\uEDE8")
     expect(frame).not.toContain("\u{F0238}")
@@ -1937,7 +1952,7 @@ describe("progressive disclosure (compact default, independent detail, empty vs 
     expect(fgOf("3K")).toEqual([detail])
     expect(fgOf("2K")).toEqual([detail])
     expect(fgOf("500")).toEqual([detail])
-    expect(fgOf("150")).toEqual([detail])
+    expect(fgOf("3%")).toEqual([detail])
     // The three section TITLES (Project, Session, Subagents) render in the
     // semantic yellow theme().warning — the complete title text, with no
     // `●` marker glyph anywhere.
@@ -1954,8 +1969,8 @@ describe("progressive disclosure (compact default, independent detail, empty vs 
     const detailRows = frameLines.filter(
       (line) =>
         line.includes("tokens · $0.03") ||
-        line.includes("input · 2K output") ||
-        line.includes("reason · 150 cache"),
+        line.includes("in · 2K out") ||
+        line.includes("reason · 3% cache"),
     )
     expect(detailRows).toHaveLength(3)
     for (const line of detailRows) {
@@ -2009,11 +2024,11 @@ describe("progressive disclosure (compact default, independent detail, empty vs 
     await waitFor(() => snapshot()?.rootID === rootID)
     await waitForFrameDriven(setup, (frame) => frame.includes("30K"))
     await clickRowChevron(setup, setup.captureCharFrame(), "Session")
-    await waitForFrameDriven(setup, (frame) => frame.includes(" · 15 output"))
+    await waitForFrameDriven(setup, (frame) => frame.includes(" · 15 out"))
     const frame = setup.captureCharFrame()
     // The real output (output + reasoning) renders exactly once in L2.
-    expect(countOccurrences(frame, " · 15 output")).toBe(1)
-    expect(frame).not.toContain(" · 10 output")
+    expect(countOccurrences(frame, " · 15 out")).toBe(1)
+    expect(frame).not.toContain(" · 10 out")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -2041,8 +2056,10 @@ describe("progressive disclosure (compact default, independent detail, empty vs 
       metas: { [rootID]: { id: rootID, title: "Root" } },
     }
     purgeTreeCache()
-    // Default settings: cache is combined — one summed cache value.
-    const combined = await mountEntry(state)
+    const combined = await mountEntry(state, {}, true, {
+      cache: "combined",
+      numbers: "compact",
+    })
     const setupCombined = await testRender(
       () => combined.slot({ theme: THEME }, { session_id: rootID }) as never,
       {
@@ -2061,7 +2078,7 @@ describe("progressive disclosure (compact default, independent detail, empty vs 
       frame.includes("45M cache"),
     )
     const combinedFrame = setupCombined.captureCharFrame()
-    expect(combinedFrame).toContain("1K input · 100 output")
+    expect(combinedFrame).toContain("1K in · 100 out")
     expect(combinedFrame).toContain("0 reason · 45M cache")
     expect(combinedFrame).not.toContain("R45M|W10K")
     disposeReconcile()
@@ -2091,7 +2108,7 @@ describe("progressive disclosure (compact default, independent detail, empty vs 
       frame.includes("R45M|W10K"),
     )
     const separatedFrame = setupSeparated.captureCharFrame()
-    expect(separatedFrame).toContain("1K input · 100 output")
+    expect(separatedFrame).toContain("1K in · 100 out")
     expect(separatedFrame).toContain("0 reason · R45M|W10K")
     expect(separatedFrame).not.toContain("45M cache")
     disposeReconcile()
@@ -2178,20 +2195,20 @@ describe("progressive disclosure (compact default, independent detail, empty vs 
     // Open: the THREE elastic lines (compact mode) render — the ladder
     // drops labels and elides/truncates values, but NO line is ever
     // omitted: the reason/cache line renders with BOTH values at 22
-    // columns (the trailing label drops first).
-    await waitForFrameDriven(setup, (frame) => frame.includes("30K input · 1M"))
+    // columns (the trailing label drops first) — percentage mode shows 98%.
+    await waitForFrameDriven(setup, (frame) => frame.includes("30K in · 1M"))
     const frame = setup.captureCharFrame()
     expect(frame).toContain("46M tokens · $0.01")
-    expect(frame).toContain("30K input · 1M")
-    expect(frame).toContain("1000K reason · 45M")
+    expect(frame).toContain("30K in · 1M")
+    expect(frame).toContain("1000K reason · 98%")
     expect(frame).not.toContain("(detail clipped)")
     const detail = frame
       .split(/[\r\n]+/)
       .filter(
         (line) =>
           line.includes("46M tokens · $0.01") ||
-          line.includes("30K input · 1M") ||
-          line.includes("1000K reason · 45M"),
+          line.includes("30K in · 1M") ||
+          line.includes("1000K reason · 98%"),
       )
     expect(detail).toHaveLength(3)
     for (const line of detail) {
@@ -2258,8 +2275,8 @@ describe("progressive disclosure (compact default, independent detail, empty vs 
       .filter(
         (line) =>
           line.includes("45,013,510 · $…") ||
-          line.includes("3,000 input") ||
-          line.includes("510 output") ||
+          line.includes("3,000 in") ||
+          line.includes("510 out") ||
           line.includes("500 reason") ||
           line.includes("45,010,000 cache"),
       )
@@ -2271,8 +2288,8 @@ describe("progressive disclosure (compact default, independent detail, empty vs 
       expect([...line].findIndex((ch) => ch !== " ")).toBe(2)
     }
     expect(detail[0]).toContain("45,013,510")
-    expect(detail[1]).toContain("3,000 input")
-    expect(detail[2]).toContain("510 output")
+    expect(detail[1]).toContain("3,000 in")
+    expect(detail[2]).toContain("510 out")
     expect(detail[3]).toContain("500 reason")
     expect(detail[4]).toContain("45,010,000 cache")
     expect(frame).not.toContain("(detail clipped)")
@@ -2371,34 +2388,32 @@ describe("progressive disclosure (compact default, independent detail, empty vs 
     // click is followed by a repaint wait so the next row lookup uses a
     // fresh frame (expanding Project shifts Session down).
     await clickRowChevron(setup, setup.captureCharFrame(), "Project")
-    await waitForFrameDriven(setup, (frame) => frame.includes("522,000 input"))
+    await waitForFrameDriven(setup, (frame) => frame.includes("522,000 in"))
     await clickRowChevron(setup, setup.captureCharFrame(), "Session")
-    await waitForFrameDriven(setup, (frame) =>
-      frame.includes("1,044,000 input"),
-    )
+    await waitForFrameDriven(setup, (frame) => frame.includes("1,044,000 in"))
     const frame = setup.captureCharFrame()
     // Project five rows (the agent's compact summary still shows its own
     // `19,758,000 · $…` L1).
     expect(countOccurrences(frame, "19,758,000 · $…")).toBe(2)
-    expect(countOccurrences(frame, "522,000 input")).toBe(1)
-    expect(countOccurrences(frame, "336,000 output")).toBe(1)
+    expect(countOccurrences(frame, "522,000 in")).toBe(1)
+    expect(countOccurrences(frame, "336,000 out")).toBe(1)
     expect(countOccurrences(frame, "140,000 reason")).toBe(1)
     expect(countOccurrences(frame, "18,900,000 cache")).toBe(1)
     // Session five rows (root + child: every value doubled).
     expect(countOccurrences(frame, "39,516,000 · $…")).toBe(1)
-    expect(countOccurrences(frame, "1,044,000 input")).toBe(1)
-    expect(countOccurrences(frame, "672,000 output")).toBe(1)
+    expect(countOccurrences(frame, "1,044,000 in")).toBe(1)
+    expect(countOccurrences(frame, "672,000 out")).toBe(1)
     expect(countOccurrences(frame, "280,000 reason")).toBe(1)
     expect(countOccurrences(frame, "37,800,000 cache")).toBe(1)
     // Every section detail row starts at column 2 and never overflows 22.
     for (const line of frame.split(/[\r\n]+/)) {
       if (
-        line.includes("522,000 input") ||
-        line.includes("336,000 output") ||
+        line.includes("522,000 in") ||
+        line.includes("336,000 out") ||
         line.includes("140,000 reason") ||
         line.includes("18,900,000 cache") ||
-        line.includes("1,044,000 input") ||
-        line.includes("672,000 output") ||
+        line.includes("1,044,000 in") ||
+        line.includes("672,000 out") ||
         line.includes("280,000 reason") ||
         line.includes("37,800,000 cache")
       ) {
@@ -2418,23 +2433,23 @@ describe("progressive disclosure (compact default, independent detail, empty vs 
     expect(agentFrame).toContain(`↳ plan (1 task) ${GLYPH.collapse}`)
     const scrollbox = findScrollbox(setup)
     expect(scrollbox).not.toBeNull()
-    expect(scrollbox!.getChildren().length).toBe(6)
+    expect(must(scrollbox).getChildren().length).toBe(6)
     // Top of the viewport: the header plus the first rows; the agent's L1
     // keeps the total and the `$…` spend marker at 17 columns.
     expect(agentFrame).toContain("19,758,000 · $…")
-    expect(agentFrame).toContain("522,000 input")
+    expect(agentFrame).toContain("522,000 in")
     // Scroll to the bottom: the last precise rows are visible too — all
     // five values render inside the scroll container. At the 15-column
     // agent floor the cache row degrades to its bare value (the label
     // drops before any value), so the agent's rows now double the section
     // counts.
-    scrollbox!.scrollTo(scrollbox!.scrollHeight)
+    must(scrollbox).scrollTo(must(scrollbox).scrollHeight)
     await waitForFrameDriven(
       setup,
       (frame) => countOccurrences(frame, "18,900,000") === 2,
     )
     const bottom = setup.captureCharFrame()
-    expect(countOccurrences(bottom, "336,000 output")).toBe(2)
+    expect(countOccurrences(bottom, "336,000 out")).toBe(2)
     expect(countOccurrences(bottom, "140,000 reason")).toBe(2)
     expect(countOccurrences(bottom, "18,900,000")).toBe(2)
     disposeReconcile()
@@ -2476,7 +2491,7 @@ describe("progressive disclosure (compact default, independent detail, empty vs 
     // detail, expand chevron left — the stale seed changed nothing.
     const frame = setup.captureCharFrame()
     expect(countOccurrences(frame, "41K tokens · $0.01")).toBe(1)
-    expect(frame).not.toContain("40K input · 1K output")
+    expect(frame).not.toContain("40K in · 1K out")
     expect(frame).toContain(`${GLYPH.expand} Session`)
     disposeReconcile()
     dispose()
@@ -2527,20 +2542,20 @@ describe("progressive disclosure (compact default, independent detail, empty vs 
     await waitFor(() => snapshot()?.rootID === aID)
     await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
     // Seeded closed: the L2 detail line is absent until the user opens it.
-    expect(setup.captureCharFrame()).not.toContain("40K input · 1K output")
+    expect(setup.captureCharFrame()).not.toContain("40K in · 1K out")
 
     // The user opens the section; the in-memory choice survives until the
     // session changes (the preference never force-toggles open disclosure).
     await clickRowChevron(setup, setup.captureCharFrame(), "Session")
-    await waitForFrameDriven(setup, (frame) => frame.includes("40K input"))
-    expect(setup.captureCharFrame()).toContain("40K input · 1K output")
+    await waitForFrameDriven(setup, (frame) => frame.includes("40K in"))
+    expect(setup.captureCharFrame()).toContain("40K in · 1K out")
 
     // Switching sessions resets both sections back to the closed seed.
     setSid(bID)
     await waitFor(() => snapshot()?.rootID === bID)
     await waitForFrameDriven(setup, (frame) => frame.includes("705K tokens"))
     const frame = setup.captureCharFrame()
-    expect(frame).not.toContain("700K input · 5K output")
+    expect(frame).not.toContain("700K in · 5K out")
     expect(frame).toContain(`${GLYPH.expand} Session`)
     disposeReconcile()
     dispose()
@@ -2978,6 +2993,7 @@ describe("settings dialog (DialogSelect menu)", () => {
   })
 
   /** Renders the i-th `dialog.replace` element in the headless renderer. */
+  /** Renders the i-th `dialog.replace` element in the headless renderer. */
   const renderDialog = async (
     stack: Array<{ render: () => unknown; onClose?: () => void }>,
     index = 0,
@@ -3001,7 +3017,7 @@ describe("settings dialog (DialogSelect menu)", () => {
     )
     const frame = setup.captureCharFrame()
     expect(frame).toContain("TokenMeter Settings")
-    expect(frame).toContain("Cache: combined")
+    expect(frame).toContain("Cache: percentage")
     expect(frame).toContain("Numbers: compact")
     expect(frame).toContain("Summary: session")
     expect(frame).toContain("Subagents: collapsed")
@@ -3040,10 +3056,10 @@ describe("settings dialog (DialogSelect menu)", () => {
     expect(dialog.replaces()).toBe(1)
     const setup = await renderDialog(dialog.stack)
     await waitForFrameDriven(setup, (frame) =>
-      frame.includes("Cache: combined"),
+      frame.includes("Cache: percentage"),
     )
 
-    // Selecting Cache cycles combined -> separated. The dialog is NOT
+    // Selecting Cache cycles percentage -> combined. The dialog is NOT
     // re-opened: the titles re-read the live settings signals, so the same
     // stack entry re-renders reactively and the SAME mounted DialogSelect
     // repaints with the fresh title — no second `replace`.
@@ -3051,14 +3067,14 @@ describe("settings dialog (DialogSelect menu)", () => {
     const cacheSelect = first?.onSelect
     const cacheOption = first?.options[0]
     if (cacheSelect && cacheOption) cacheSelect(cacheOption)
-    expect(settings().cache).toBe("separated")
+    expect(settings().cache).toBe("combined")
     expect(dialog.stack).toHaveLength(1)
     expect(dialog.replaces()).toBe(1)
     expect(kvWrites).toContain(SETTINGS_KV_KEY)
     await waitForFrameDriven(setup, (frame) =>
-      frame.includes("Cache: separated"),
+      frame.includes("Cache: combined"),
     )
-    expect(setup.captureCharFrame()).not.toContain("Cache: combined")
+    expect(setup.captureCharFrame()).not.toContain("Cache: percentage")
 
     // Summary cycles session -> project -> session across two selections on
     // the SAME mounted dialog (same props record, same onSelect closure).
@@ -3106,8 +3122,8 @@ describe("settings dialog (DialogSelect menu)", () => {
     // survives on the same instance.
     const props0 = dialogProps[0]
     const cacheOption = props0?.options[0]
-    props0?.onSelect?.(cacheOption!)
-    expect(settings().cache).toBe("separated")
+    props0?.onSelect?.(must(cacheOption))
+    expect(settings().cache).toBe("combined")
     expect(dialog.replaces()).toBe(1)
     expect(dialog.stack).toHaveLength(1)
     expect(dialog.stack[0]?.render).toBe(renderBefore)
@@ -3118,9 +3134,9 @@ describe("settings dialog (DialogSelect menu)", () => {
     await waitForFrameDriven(
       setup,
       (frame) =>
-        frame.includes("Cache: separated") && frame.includes("[filter: cach]"),
+        frame.includes("Cache: combined") && frame.includes("[filter: cach]"),
     )
-    expect(setup.captureCharFrame()).not.toContain("Cache: combined")
+    expect(setup.captureCharFrame()).not.toContain("Cache: percentage")
     dispose()
   }, 20000)
 
@@ -3149,7 +3165,7 @@ describe("settings dialog (DialogSelect menu)", () => {
     const select = dialogProps[0]?.onSelect
     const shortcutOption = dialogProps[0]?.options[4]
     expect(shortcutOption?.title).toBe("Shortcut: Ctrl+E")
-    select?.(shortcutOption!)
+    select?.(must(shortcutOption))
     expect(toggleShortcut()).toBe("ctrl+shift+e")
     expect(kvWrites).toContain(TOGGLE_SHORTCUT_KV_KEY)
     // The SAME dialog re-renders reactively with the new label — no replace,
@@ -3163,9 +3179,9 @@ describe("settings dialog (DialogSelect menu)", () => {
     expect(toggleLayer()?.commands?.[0]?.name).toBe(TOGGLE_COMMAND_NAME)
 
     // Cycle through to Off: the binding disappears, the command stays.
-    select?.(shortcutOption!)
+    select?.(must(shortcutOption))
     expect(toggleShortcut()).toBe("ctrl+m")
-    select?.(shortcutOption!)
+    select?.(must(shortcutOption))
     expect(toggleShortcut()).toBe("off")
     await waitForFrameDriven(setup, (frame) => frame.includes("Shortcut: Off"))
     expect(toggleLayer()?.bindings).toEqual([])
@@ -3189,7 +3205,7 @@ describe("settings dialog (DialogSelect menu)", () => {
     onClose?.()
     expect(dialog.clears()).toBe(1)
     expect(dialog.stack).toHaveLength(0)
-    expect(settings().cache).toBe("combined")
+    expect(settings().cache).toBe("percentage")
     expect(settings().numbers).toBe("compact")
     expect(settings().collapsedSummary).toBe("session")
     expect(subagentsPref()).toBe("collapsed")
@@ -3275,7 +3291,7 @@ describe("palette command (keymap.registerLayer seam)", () => {
       frame.includes("TokenMeter Settings"),
     )
     const dialogFrame = dialogSetup.captureCharFrame()
-    expect(dialogFrame).toContain("Cache: combined")
+    expect(dialogFrame).toContain("Cache: percentage")
     expect(dialogFrame).toContain("Summary: session")
     expect(dialogFrame).toContain("Subagents: collapsed")
 
@@ -3353,7 +3369,7 @@ describe("palette command (keymap.registerLayer seam)", () => {
       },
     )
     await waitFor(() => snapshot()?.rootID === rootID)
-    await waitFor(() => snapshot()!.groups.length === 1)
+    await waitFor(() => must(snapshot()).groups.length === 1)
     await waitFor(() => projectSnapshot() !== null)
     await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
 
@@ -3420,7 +3436,7 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
         { width: 60, height: 20 },
       )
       await waitFor(() => snapshot()?.rootID === rootID)
-      await waitFor(() => snapshot()!.groups.length === 0)
+      await waitFor(() => must(snapshot()).groups.length === 0)
       await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
       const frame = setup.captureCharFrame()
       // No heading, no caption, no agent rows, no scroll container.
@@ -3464,7 +3480,7 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
     await waitFor(() => snapshot()?.rootID === rootID)
     await waitForFrameDriven(setup, (frame) => frame.includes("41K tokens"))
     // Zero groups on the mounted panel: no Subagents anywhere.
-    expect(snapshot()!.groups.length).toBe(0)
+    expect(must(snapshot()).groups.length).toBe(0)
     expect(setup.captureCharFrame()).not.toContain("Subagents")
 
     // The delegated session becomes visible: session.created with a
@@ -3526,7 +3542,7 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
             group.cost ?? 0,
           ),
         ]
-        children[rootID]!.push({ id: sid, agent: group.agent })
+        must(children[rootID]).push({ id: sid, agent: group.agent })
         metas[sid] = { id: sid, agent: group.agent }
       }
     }
@@ -3660,8 +3676,8 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
     expect(compact).not.toContain("General (5 tasks) ▼")
     expect(compact).toContain("3.7M tokens · $0.11")
     // No group detail rows while closed.
-    expect(compact).not.toContain("3.5M input")
-    expect(compact).not.toContain("200K output")
+    expect(compact).not.toContain("3.5M in")
+    expect(compact).not.toContain("200K out")
 
     // Clicking the compact entry replaces its compact lines with the
     // three-line unbulleted detail: the `↳` header stays put and its
@@ -3670,14 +3686,14 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
     // the modest two-column nested-list indent (the `↳` marker preserved).
     await clickAgentRow(setup, compact, "General")
     await waitForFrameDriven(setup, (frame) =>
-      frame.includes("3.5M input · 200K output"),
+      frame.includes("3.5M in · 200K out"),
     )
     const open = setup.captureCharFrame()
     expect(open).toContain(`↳ General (5 tasks) ${GLYPH.collapse}`)
     expect(open).not.toContain(`↳ General (5 tasks) ${GLYPH.expand}`)
     expect(countOccurrences(open, "3.7M tokens · $0.11")).toBe(1)
-    expect(open).toContain("3.5M input · 200K output")
-    expect(open).toContain("0 reason · 0 cache")
+    expect(open).toContain("3.5M in · 200K out")
+    expect(open).toContain("0 reason · 0% cache")
     const agentRow = open
       .split(/[\r\n]+/)
       .find((line) => line.includes(`↳ General (5 tasks) ${GLYPH.collapse}`))
@@ -3690,7 +3706,7 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
     // the container, nothing sliced away.
     const scrollbox = findScrollbox(setup)
     expect(scrollbox).not.toBeNull()
-    expect(scrollbox!.getChildren().length).toBe(6)
+    expect(must(scrollbox).getChildren().length).toBe(6)
     disposeReconcile()
     dispose()
   }, 20000)
@@ -3713,40 +3729,40 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
     await waitForFrameDriven(setup, (frame) =>
       frame.includes(`↳ explore (1 task) ${GLYPH.expand}`),
     )
-    expect(setup.captureCharFrame()).not.toContain("6K input · 300 output")
+    expect(setup.captureCharFrame()).not.toContain("6K in · 300 out")
 
     // Open explore: its detail replaces the compact lines.
     await clickAgentRow(setup, setup.captureCharFrame(), "explore")
     await waitForFrameDriven(setup, (frame) =>
-      frame.includes("6K input · 300 output"),
+      frame.includes("6K in · 300 out"),
     )
     // explore's open detail fills the 4-row viewport: general sits below the
     // fold now, so the REAL scroll container is the only way down to it.
     const scrollbox = findScrollbox(setup)
     expect(scrollbox).not.toBeNull()
-    scrollbox!.scrollTo(scrollbox!.scrollHeight)
+    must(scrollbox).scrollTo(must(scrollbox).scrollHeight)
     await waitForFrameDriven(setup, (frame) =>
       frame.includes(`↳ general (1 task) ${GLYPH.expand}`),
     )
     // Open general: explore's detail closes (exclusive one-open accordion).
     await clickAgentRow(setup, setup.captureCharFrame(), "general")
     await waitForFrameDriven(setup, (frame) =>
-      frame.includes("4K input · 200 output"),
+      frame.includes("4K in · 200 out"),
     )
     const swapped = setup.captureCharFrame()
-    expect(swapped).not.toContain("6K input · 300 output")
+    expect(swapped).not.toContain("6K in · 300 out")
     expect(swapped).toContain(`↳ general (1 task) ${GLYPH.collapse}`)
 
     // Scroll back to the top; clicking the open agent again closes it: no
     // detail rows remain and every compact L1 renders exactly once.
-    scrollbox!.scrollTo(0)
+    must(scrollbox).scrollTo(0)
     await waitForFrameDriven(setup, (frame) =>
       frame.includes(`↳ explore (1 task) ${GLYPH.expand}`),
     )
     await clickAgentRow(setup, setup.captureCharFrame(), "general")
     await waitForFrameDriven(
       setup,
-      (frame) => !frame.includes("4K input · 200 output"),
+      (frame) => !frame.includes("4K in · 200 out"),
     )
     const closed = setup.captureCharFrame()
     expect(countOccurrences(closed, "6K tokens · $0.00")).toBe(1)
@@ -3774,7 +3790,7 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
     )
     await clickAgentRow(setup, setup.captureCharFrame(), "explore")
     await waitForFrameDriven(setup, (frame) =>
-      frame.includes("6K input · 300 output"),
+      frame.includes("6K in · 300 out"),
     )
     // Opening a group is transient: no durable write was issued.
     expect(first.kvWrites).toEqual([])
@@ -3797,7 +3813,7 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
     await waitForFrameDriven(setup2, (frame) =>
       frame.includes(`↳ explore (1 task) ${GLYPH.expand}`),
     )
-    expect(setup2.captureCharFrame()).not.toContain("6K input · 300 output")
+    expect(setup2.captureCharFrame()).not.toContain("6K in · 300 out")
     disposeReconcile()
     second.dispose()
 
@@ -3843,14 +3859,14 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
     )
     await clickAgentRow(setup3, setup3.captureCharFrame(), "explore")
     await waitForFrameDriven(setup3, (frame) =>
-      frame.includes("6K input · 300 output"),
+      frame.includes("6K in · 300 out"),
     )
     setSid(bID)
     await waitFor(() => snapshot()?.rootID === bID)
     await waitForFrameDriven(setup3, (frame) =>
       frame.includes(`↳ explore (1 task) ${GLYPH.expand}`),
     )
-    expect(setup3.captureCharFrame()).not.toContain("6K input · 300 output")
+    expect(setup3.captureCharFrame()).not.toContain("6K in · 300 out")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -3881,10 +3897,10 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
     expect(scrollbox).not.toBeNull()
     // ALL agents are children of the scroll container — nothing sliced: 8
     // agents × 2 compact rows = 16 rows in the content.
-    expect(scrollbox!.getChildren().length).toBe(16)
+    expect(must(scrollbox).getChildren().length).toBe(16)
     // The viewport is roughly two compact agents: taller content than the
     // fixed viewport proves real scrolling is required.
-    expect(scrollbox!.scrollHeight).toBeGreaterThan(4)
+    expect(must(scrollbox).scrollHeight).toBeGreaterThan(4)
     const top = setup.captureCharFrame()
     expect(top).toContain(`↳ build (1 task) ${GLYPH.expand}`)
     expect(top).toContain(`↳ code (1 task) ${GLYPH.expand}`)
@@ -3893,7 +3909,7 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
     expect(top).not.toContain("write")
     expect(top).not.toContain("more — scroll")
     // Scrolling the real scroll container reaches the last agent.
-    scrollbox!.scrollTo(scrollbox!.scrollHeight)
+    must(scrollbox).scrollTo(must(scrollbox).scrollHeight)
     await waitForFrameDriven(setup, (frame) =>
       frame.includes(`↳ write (1 task) ${GLYPH.expand}`),
     )
@@ -3928,7 +3944,7 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
     expect(frame).toContain("4K tokens · $0.00")
     const scrollbox = findScrollbox(setup)
     expect(scrollbox).not.toBeNull()
-    expect(scrollbox!.scrollHeight).toBeLessThanOrEqual(4)
+    expect(must(scrollbox).scrollHeight).toBeLessThanOrEqual(4)
     disposeReconcile()
     dispose()
   }, 20000)
@@ -3958,12 +3974,13 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
       await waitFor(() => snapshot()?.rootID === rootID)
       await waitFor(() => snapshot()?.groups.length === groups.length)
       await waitForFrameDriven(setup, (frame) => frame.includes("↳"))
-      const sb: any = findScrollbox(setup)
+      const sb: ScrollBoxHandle | null = findScrollbox(setup)
       expect(sb).not.toBeNull()
+      const box = must(sb)
       // Raw ScrollBoxRenderable exposes viewport/content for height evidence.
-      expect(sb.viewport.height).toBe(expectedViewport)
-      expect(sb.scrollHeight).toBe(expectedScrollHeight)
-      expect(sb.height).toBe(expectedViewport)
+      expect(box.viewport.height).toBe(expectedViewport)
+      expect(box.scrollHeight).toBe(expectedScrollHeight)
+      expect(box.height).toBe(expectedViewport)
       disposeReconcile()
       dispose()
     }
@@ -3992,39 +4009,51 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
   }, 20000)
 
   test("REGRESSION #33: scrollbar never visible for totalRows<=4 — overflow-gated", async () => {
-    const gateWait = async (n: number, s: any, scroll: boolean) => {
+    const gateWait = async (
+      n: number,
+      s: Awaited<ReturnType<typeof testRender>>,
+      scroll: boolean,
+    ) => {
       const t = Date.now()
       while (Date.now() - t < 3000) {
-        const b: any = findScrollbox(s)
+        const b: ScrollBoxHandle | null = findScrollbox(s)
         if (b) expect(b.verticalScrollBar.visible).toBe(scroll)
         if (snapshot()?.groups.length === n) return
-        await (s as any).renderer.loop()
+        await rendererLoop(s.renderer)
         await new Promise((r) => setTimeout(r, 5))
       }
       throw new Error("gateWait timeout")
     }
-    const check = async (groups: any[], scroll: boolean) => {
+    const check = async (
+      groups: Array<{
+        id: string
+        agent: string
+        input: number
+        output: number
+      }>,
+      scroll: boolean,
+    ) => {
       const id = `ses33_${Math.random().toString(36).slice(2, 6)}`
       purgeTreeCache()
       const { slot, dispose } = await mountEntry(groupState(id, groups))
-      const setup: any = await testRender(
+      const setup: Awaited<ReturnType<typeof testRender>> = await testRender(
         () => slot({ theme: THEME }, { session_id: id }) as never,
         { width: 60, height: 20 },
       )
       await waitFor(() => snapshot()?.rootID === id)
       await gateWait(groups.length, setup, scroll)
       await setup.renderOnce()
-      let sb: any = findScrollbox(setup)
+      let sb: ScrollBoxHandle | null = findScrollbox(setup)
       expect(sb).not.toBeNull()
-      expect(sb.verticalScrollBar.visible).toBe(scroll)
-      await (setup as any).renderer.loop()
+      expect(must(sb).verticalScrollBar.visible).toBe(scroll)
+      await rendererLoop(setup.renderer)
       sb = findScrollbox(setup)
       expect(sb).not.toBeNull()
-      expect(sb.verticalScrollBar.visible).toBe(scroll)
+      expect(must(sb).verticalScrollBar.visible).toBe(scroll)
       await waitForFrameDriven(setup, (f) => f.includes("↳"))
       sb = findScrollbox(setup)
       expect(sb).not.toBeNull()
-      expect(sb.verticalScrollBar.visible).toBe(scroll)
+      expect(must(sb).verticalScrollBar.visible).toBe(scroll)
       disposeReconcile()
       dispose()
     }
@@ -4209,14 +4238,14 @@ describe("footer metrics (session_prompt_right slot: inline in the host's single
     // session_prompt_right slot — the metric must land inline in that same
     // row, never as a second row below.
     const setup = await mountComposition(rightSlot, rootID)
-    // Default metrics: input + output only, compact magnitudes, no total.
-    await setup.waitForFrame((frame) => frame.includes("40K in · 1K out"))
+    // Default metrics: input + output only, compact magnitudes, no total — icons.
+    await setup.waitForFrame((frame) => frame.includes("↑40K · ↓1K"))
     const frame = setup.captureCharFrame()
     expect(frame).not.toContain("total")
     // Exactly one native prompt and exactly one inline metric — no duplicate
     // prompt, no second standalone usage/status row.
     expect(countOccurrences(frame, "[prompt:")).toBe(1)
-    expect(countOccurrences(frame, "40K in")).toBe(1)
+    expect(countOccurrences(frame, "↑40K")).toBe(1)
     // The metric renders inline on the SAME row as the prompt marker: the
     // composition is a single non-empty row, not a prompt row plus an extra
     // appended row.
@@ -4225,13 +4254,13 @@ describe("footer metrics (session_prompt_right slot: inline in the host's single
       .filter((line) => line.trim().length > 0)
     expect(lines).toHaveLength(1)
     expect(lines[0]).toContain(`[prompt:${rootID}]`)
-    expect(lines[0]).toContain("40K in · 1K out")
+    expect(lines[0]).toContain("↑40K · ↓1K")
     // Muted, native-theme text — an ordinary inline segment, no bold, no
     // custom style.
     const spans = setup.captureSpans().lines.flatMap((line) => line.spans)
     const muted = rgbToHex(RGBA.fromHex("#a9b1d6"))
     const fg = spans
-      .filter((span) => span.text.includes("40K in"))
+      .filter((span) => span.text.includes("↑40K"))
       .map((span) => rgbToHex(span.fg))
     expect(fg).toEqual([muted])
     // The single native prompt received the session id and the right
@@ -4247,8 +4276,8 @@ describe("footer metrics (session_prompt_right slot: inline in the host's single
     await empty.renderOnce()
     const emptyFrame = empty.captureCharFrame()
     expect(emptyFrame).toContain("[prompt:ses_footer_empty]")
-    expect(emptyFrame).not.toContain("40K in")
-    expect(emptyFrame).not.toContain("1K out")
+    expect(emptyFrame).not.toContain("↑40K")
+    expect(emptyFrame).not.toContain("↓1K")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -4290,9 +4319,9 @@ describe("footer metrics (session_prompt_right slot: inline in the host's single
     // The snapshot aggregates root + child (591K), but the footer must show
     // the ROOT session's own usage only — the child's 500K never appears.
     await waitFor(() => snapshot()?.totalTokens === 591000)
-    await setup.waitForFrame((frame) => frame.includes("40K in · 1K out"))
+    await setup.waitForFrame((frame) => frame.includes("↑40K · ↓1K"))
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("40K in · 1K out")
+    expect(frame).toContain("↑40K · ↓1K")
     expect(frame).not.toContain("500K")
     expect(frame).not.toContain("591K")
 
@@ -4321,8 +4350,8 @@ describe("footer metrics (session_prompt_right slot: inline in the host's single
     expect(observedSessionUsage(rootID)?.output).toBe(1000)
     // The published snapshot and the mounted footer both keep their values.
     expect(snapshot()?.totalTokens).toBe(591000)
-    await setup.waitForFrame((frame) => frame.includes("40K in · 1K out"))
-    expect(setup.captureCharFrame()).toContain("40K in · 1K out")
+    await setup.waitForFrame((frame) => frame.includes("↑40K · ↓1K"))
+    expect(setup.captureCharFrame()).toContain("↑40K · ↓1K")
     disposeReconcile()
     dispose()
   }, 20000)
@@ -4377,32 +4406,28 @@ describe("footer metrics (session_prompt_right slot: inline in the host's single
     // Footer disabled: the slot emits nothing — the host's own native prompt
     // keeps rendering its own status row, the metric is simply absent.
     const disabledFrame = setup.captureCharFrame()
-    expect(disabledFrame).not.toContain("40K in")
+    expect(disabledFrame).not.toContain("↑40K")
 
     // Enable the footer through the real settings writer (ready-gated, same
     // kv the loadSettings read from): default subset appears reactively.
     cycleFooter(api)
-    await setup.waitForFrame((frame) => frame.includes("40K in · 1K out"))
+    await setup.waitForFrame((frame) => frame.includes("↑40K · ↓1K"))
     // Independent toggles: reasoning, then total (total-first ordering),
     // then the combined cache metric.
     cycleFooterMetric(api, "reasoning")
-    await setup.waitForFrame((frame) =>
-      frame.includes("40K in · 1K out · 800 reason"),
-    )
+    await setup.waitForFrame((frame) => frame.includes("↑40K · ↓1K · 󰧑 800"))
     cycleFooterMetric(api, "total")
     await setup.waitForFrame((frame) =>
-      frame.includes("44K total · 40K in · 1K out · 800 reason"),
+      frame.includes("Σ 44K · ↑40K · ↓1K · 󰧑 800"),
     )
     cycleFooterMetric(api, "cache")
     await setup.waitForFrame((frame) =>
-      frame.includes("44K total · 40K in · 1K out · 800 reason · 2K cache"),
+      frame.includes("Σ 44K · ↑40K · ↓1K · 󰧑 800 · 󰆼 2K"),
     )
     // The numbers preference applies to the footer line like the sidebar.
     cycleNumbers(api)
     await setup.waitForFrame((frame) =>
-      frame.includes(
-        "43,900 total · 40,000 in · 1,000 out · 800 reason · 2,100 cache",
-      ),
+      frame.includes("Σ 43,900 · ↑40,000 · ↓1,000 · 󰧑 800 · 󰆼 2,100"),
     )
     disposeReconcile()
     dispose()

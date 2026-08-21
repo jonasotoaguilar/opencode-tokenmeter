@@ -2,18 +2,18 @@
  * Unit suite for the plugin-owned settings model (src/tokenmeter/settings.ts).
  *
  * Covers the tokenmeter-settings spec:
- *  - defaults apply when nothing is persisted (combined/compact/session,
+ *  - defaults apply when nothing is persisted (percentage/compact/session,
  *    footer on with input+output enabled and reasoning/cache/total disabled)
  *  - malformed or missing values resolve to per-field safe defaults; valid
  *    overrides are honored; no throw, no NaN; the stale legacy view field
- *    is ignored
+ *    is ignored; invalid cache values fall back to percentage
  *  - `settings.v1` holds exactly the object fields `cache`/`numbers`/
  *    `collapsedSummary`/`footer`, never `subagents` or the legacy view field
  *  - cycling object preferences writes the whole object exactly once per
- *    change when `api.kv.ready`; footer flags toggle independently; cycling
- *    Subagents writes only `tokenmeter.sidebar.expanded`; when not ready the
- *    value updates in memory only and persistence is not claimed
- *    (`persisted() === false`)
+ *    change when `api.kv.ready`; cache cycles combined->separated->percentage->combined
+ *  - footer flags toggle independently; cycling Subagents writes only
+ *    `tokenmeter.sidebar.expanded`; when not ready the value updates in
+ *    memory only and persistence is not claimed (`persisted() === false`)
  *
  * The kv store is faked (map-backed) so every write is observable: each
  * `kv.set` call is recorded with key and value, and a fresh `loadSettings`
@@ -62,7 +62,7 @@ function makeKv(initial: Record<string, unknown> = {}, ready = true): FakeKv {
 const apiOf = (fake: FakeKv): SettingsApi => ({ kv: fake.kv })
 
 const DEFAULTS = {
-  cache: "combined",
+  cache: "percentage",
   numbers: "compact",
   collapsedSummary: "session",
   footer: { ...DEFAULT_FOOTER },
@@ -113,11 +113,39 @@ describe("settings defaults and sanitization", () => {
     expect(settings().numbers).not.toBeNaN()
   })
 
+  test("invalid cache values fall back to percentage default while preserving valid separated/combined", () => {
+    const apiSeparated = apiOf(
+      makeKv({ [SETTINGS_KV_KEY]: { cache: "separated" } }),
+    )
+    loadSettings(apiSeparated)
+    expect(settings().cache).toBe("separated")
+
+    const apiCombined = apiOf(
+      makeKv({ [SETTINGS_KV_KEY]: { cache: "combined" } }),
+    )
+    loadSettings(apiCombined)
+    expect(settings().cache).toBe("combined")
+
+    const apiInvalid = apiOf(makeKv({ [SETTINGS_KV_KEY]: { cache: "bogus" } }))
+    loadSettings(apiInvalid)
+    expect(settings().cache).toBe("percentage")
+
+    const apiMissing = apiOf(
+      makeKv({ [SETTINGS_KV_KEY]: { numbers: "precise" } }),
+    )
+    loadSettings(apiMissing)
+    expect(settings().cache).toBe("percentage")
+  })
+
+  test("preserves existing persisted valid combined/separated modes", () => {
+    for (const cache of ["combined", "separated"] as const) {
+      const api = apiOf(makeKv({ [SETTINGS_KV_KEY]: { cache } }))
+      loadSettings(api)
+      expect(settings().cache).toBe(cache)
+    }
+  })
+
   test("ignores a stale legacy view field and resolves the remaining fields", () => {
-    // The unshipped legacy view preference never made it into `settings.v1`;
-    // the sanitizer drops any unknown field, so a stale value from a
-    // pre-change build is ignored. (4.3 sweep: the fixture uses a generic
-    // stale key — the unshipped field name is gone from the codebase.)
     const api = apiOf(
       makeKv({
         [SETTINGS_KV_KEY]: {
@@ -162,24 +190,46 @@ describe("settings defaults and sanitization", () => {
 })
 
 describe("settings cycling and kv persistence", () => {
-  test("cycles cache combined -> separated -> combined, one whole-object write each", () => {
+  test("cycles cache percentage -> combined -> separated -> percentage, one whole-object write each", () => {
     const fake = makeKv()
     const api = apiOf(fake)
     loadSettings(api)
-
-    cycleCache(api)
-    expect(settings().cache).toBe("separated")
-    expect(fake.sets).toEqual([
-      { key: SETTINGS_KV_KEY, value: { ...DEFAULTS, cache: "separated" } },
-    ])
+    expect(settings().cache).toBe("percentage")
 
     cycleCache(api)
     expect(settings().cache).toBe("combined")
+    expect(fake.sets).toEqual([
+      { key: SETTINGS_KV_KEY, value: { ...DEFAULTS, cache: "combined" } },
+    ])
+
+    cycleCache(api)
+    expect(settings().cache).toBe("separated")
     expect(fake.sets).toHaveLength(2)
     expect(fake.sets[1]).toEqual({
       key: SETTINGS_KV_KEY,
-      value: { ...DEFAULTS },
+      value: { ...DEFAULTS, cache: "separated" },
     })
+
+    cycleCache(api)
+    expect(settings().cache).toBe("percentage")
+    expect(fake.sets).toHaveLength(3)
+    expect(fake.sets[2]).toEqual({
+      key: SETTINGS_KV_KEY,
+      value: { ...DEFAULTS, cache: "percentage" },
+    })
+  })
+
+  test("starting from combined cycles to separated then percentage then combined", () => {
+    const fake = makeKv({ [SETTINGS_KV_KEY]: { cache: "combined" } })
+    const api = apiOf(fake)
+    loadSettings(api)
+    expect(settings().cache).toBe("combined")
+    cycleCache(api)
+    expect(settings().cache).toBe("separated")
+    cycleCache(api)
+    expect(settings().cache).toBe("percentage")
+    cycleCache(api)
+    expect(settings().cache).toBe("combined")
   })
 
   test("each object write carries the full object including earlier changes", () => {
@@ -204,7 +254,7 @@ describe("settings cycling and kv persistence", () => {
     expect(persisted()).toBe(true)
 
     loadSettings(api)
-    expect(settings().cache).toBe("separated")
+    expect(settings().cache).toBe("combined")
   })
 
   test("subagents cycles write only the sidebar.expanded key, never settings.v1", () => {
@@ -245,7 +295,7 @@ describe("settings cycling and kv persistence", () => {
     expect(persisted()).toBe(true)
 
     cycleCache(api)
-    expect(settings().cache).toBe("separated")
+    expect(settings().cache).toBe("combined")
     expect(persisted()).toBe(false)
     expect(fake.sets).toEqual([])
 
@@ -318,7 +368,7 @@ describe("footer settings (defaults, sanitization, independent toggles)", () => 
       {
         key: SETTINGS_KV_KEY,
         value: {
-          cache: "combined",
+          cache: "percentage",
           numbers: "compact",
           collapsedSummary: "session",
           footer: { ...DEFAULT_FOOTER, enabled: false },
@@ -346,7 +396,7 @@ describe("footer settings (defaults, sanitization, independent toggles)", () => 
     expect(settings().footer.total).toBe(false)
     expect(fake.sets).toHaveLength(1)
     expect(fake.sets[0].value).toEqual({
-      cache: "combined",
+      cache: "percentage",
       numbers: "compact",
       collapsedSummary: "session",
       footer: { ...DEFAULT_FOOTER, reasoning: true },

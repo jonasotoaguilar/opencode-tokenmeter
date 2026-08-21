@@ -1,18 +1,20 @@
 /**
  * Unit suite for the pure footer line formatter (src/tokenmeter/footer.ts).
  *
- * Covers issue #24's footer contract:
- *  - default subset renders exactly `<input> in · <output> out`
+ * Covers issue #24's footer contract + compact metric icons:
+ *  - default subset renders exactly input/output as icon-first `↑`/`↓`
  *  - independent metric selection: every subset renders in fixed order
  *    (total first, then in/out/reason/cache) and an empty subset is `""`
- *  - cache is the single combined metric (read + write summed upstream)
- *  - total uses the canonical cumulative spend (summed upstream)
+ *  - cache is the single combined metric (read + write summed upstream) or
+ *    its percentage when `cache=percentage` (cache/total*100, 0% when total 0)
+ *  - total uses the canonical cumulative spend (summed upstream) with `Σ`
  *  - the `numbers` preference picks compact magnitudes vs precise integers
  *  - the line never exceeds its width budget: predictable `…` truncation
- *    instead of wrapping or overflowing the host footer
+ *  - footer icons are exactly the specified glyphs; total icon `Σ` is the
+ *    chosen project plain-Unicode sum glyph
  */
 import { describe, expect, test } from "bun:test"
-import { formatFooterLine } from "../src/tokenmeter/footer"
+import { FOOTER_ICONS, formatFooterLine } from "../src/tokenmeter/footer"
 import type { FooterSettings } from "../src/tokenmeter/settings"
 import type { SessionUsage } from "../src/tokenmeter/types"
 
@@ -37,22 +39,22 @@ const FOOTER = {
 } as const satisfies FooterSettings
 
 describe("formatFooterLine metric selection", () => {
-  test("default subset renders only input and output", () => {
+  test("default subset renders only input and output as icons", () => {
     const line = formatFooterLine(
       USAGE,
       { ...FOOTER, reasoning: false, cache: false, total: false },
       "compact",
       80,
     )
-    expect(line).toBe("40K in · 1K out")
+    expect(line).toBe("↑40K · ↓1K")
   })
 
-  test("all metrics render in fixed order: total first, then in/out/reason/cache", () => {
+  test("all metrics render in fixed order: total first, then in/out/reason/cache with icons", () => {
     const line = formatFooterLine(USAGE, FOOTER, "compact", 80)
-    expect(line).toBe("44K total · 40K in · 1K out · 800 reason · 2K cache")
+    expect(line).toBe("Σ 44K · ↑40K · ↓1K · 󰧑 800 · 󰆼 2K")
   })
 
-  test("each metric renders alone when it is the only one enabled", () => {
+  test("each metric renders alone when it is the only one enabled (icon shape)", () => {
     const alone = (metric: keyof FooterSettings) =>
       formatFooterLine(
         USAGE,
@@ -68,11 +70,11 @@ describe("formatFooterLine metric selection", () => {
         "compact",
         80,
       )
-    expect(alone("total")).toBe("44K total")
-    expect(alone("input")).toBe("40K in")
-    expect(alone("output")).toBe("1K out")
-    expect(alone("reasoning")).toBe("800 reason")
-    expect(alone("cache")).toBe("2K cache")
+    expect(alone("total")).toBe("Σ 44K")
+    expect(alone("input")).toBe("↑40K")
+    expect(alone("output")).toBe("↓1K")
+    expect(alone("reasoning")).toBe("󰧑 800")
+    expect(alone("cache")).toBe("󰆼 2K")
   })
 
   test("an empty metric subset renders the empty string", () => {
@@ -92,7 +94,7 @@ describe("formatFooterLine metric selection", () => {
     expect(line).toBe("")
   })
 
-  test("subset selection is independent: any combination is reachable", () => {
+  test("subset selection is independent: any combination is reachable (icons)", () => {
     const withSubset = (
       flags: Partial<Record<keyof FooterSettings, boolean>>,
     ) => formatFooterLine(USAGE, { ...FOOTER, ...flags }, "compact", 80)
@@ -104,18 +106,18 @@ describe("formatFooterLine metric selection", () => {
         reasoning: false,
         cache: false,
       }),
-    ).toBe("44K total")
+    ).toBe("Σ 44K")
     expect(withSubset({ reasoning: true, cache: true, total: false })).toBe(
-      "40K in · 1K out · 800 reason · 2K cache",
+      "↑40K · ↓1K · 󰧑 800 · 󰆼 2K",
     )
     expect(withSubset({ output: false, cache: false })).toBe(
-      "44K total · 40K in · 800 reason",
+      "Σ 44K · ↑40K · 󰧑 800",
     )
   })
 })
 
 describe("formatFooterLine values and number modes", () => {
-  test("cache is the single combined read+write metric", () => {
+  test("cache is the single combined read+write metric (icon)", () => {
     const line = formatFooterLine(
       USAGE,
       {
@@ -129,10 +131,10 @@ describe("formatFooterLine values and number modes", () => {
       80,
     )
     // cache = cacheRead + cacheWrite = 2000 + 100 = 2100 -> 2K
-    expect(line).toBe("2K cache")
+    expect(line).toBe("󰆼 2K")
   })
 
-  test("total is the canonical cumulative spend input+output+reasoning+cache.read+cache.write", () => {
+  test("total is the canonical cumulative spend input+output+reasoning+cache.read+cache.write (Σ)", () => {
     // 40000 + 1000 + 800 + 2000 + 100 = 43900 (usage.total), rendered 44K.
     const line = formatFooterLine(
       USAGE,
@@ -146,14 +148,12 @@ describe("formatFooterLine values and number modes", () => {
       "compact",
       80,
     )
-    expect(line).toBe("44K total")
+    expect(line).toBe("Σ 44K")
   })
 
-  test("precise numbers mode renders thousands-separated integers", () => {
+  test("precise numbers mode renders thousands-separated integers with icons", () => {
     const line = formatFooterLine(USAGE, FOOTER, "precise", 80)
-    expect(line).toBe(
-      "43,900 total · 40,000 in · 1,000 out · 800 reason · 2,100 cache",
-    )
+    expect(line).toBe("Σ 43,900 · ↑40,000 · ↓1,000 · 󰧑 800 · 󰆼 2,100")
   })
 
   test("the enabled flag does not affect the line (the component gates on it)", () => {
@@ -163,22 +163,130 @@ describe("formatFooterLine values and number modes", () => {
       "compact",
       80,
     )
-    expect(line).toBe("44K total · 40K in · 1K out · 800 reason · 2K cache")
+    expect(line).toBe("Σ 44K · ↑40K · ↓1K · 󰧑 800 · 󰆼 2K")
+  })
+
+  test("footer icons are exactly the specified glyphs and total icon is Σ", () => {
+    expect(FOOTER_ICONS.input).toBe("↑")
+    expect(FOOTER_ICONS.output).toBe("↓")
+    expect(FOOTER_ICONS.cache).toBe("󰆼")
+    expect(FOOTER_ICONS.reasoning).toBe("󰧑")
+    expect(FOOTER_ICONS.total).toBe("Σ")
+  })
+})
+
+describe("formatFooterLine cache percentage mode", () => {
+  test("cache percentage shows cache/total*100 rounded integer percent", () => {
+    // 2100 / 43900 = 4.78% -> 5%
+    const line = formatFooterLine(
+      USAGE,
+      {
+        ...FOOTER,
+        input: false,
+        output: false,
+        reasoning: false,
+        total: false,
+      },
+      "compact",
+      80,
+      "percentage",
+    )
+    expect(line).toBe("󰆼 5%")
+  })
+
+  test("cache percentage with total 0 is deterministically 0%", () => {
+    const zeroTotal: SessionUsage = {
+      cost: 0,
+      input: 0,
+      output: 0,
+      reasoning: 0,
+      cacheRead: 100,
+      cacheWrite: 50,
+      total: 0,
+      cache: 150,
+    }
+    const line = formatFooterLine(
+      zeroTotal,
+      {
+        ...FOOTER,
+        input: false,
+        output: false,
+        reasoning: false,
+        total: false,
+      },
+      "compact",
+      80,
+      "percentage",
+    )
+    expect(line).toBe("󰆼 0%")
+  })
+
+  test("cache percentage rounding and clamping", () => {
+    const cases: Array<[SessionUsage, string]> = [
+      // 50% exactly
+      [
+        {
+          cost: 0,
+          input: 50,
+          output: 0,
+          reasoning: 0,
+          cacheRead: 50,
+          cacheWrite: 0,
+          total: 100,
+          cache: 50,
+        },
+        "󰆼 50%",
+      ],
+      // 99.5% rounds to 100%
+      [
+        {
+          cost: 0,
+          input: 1,
+          output: 0,
+          reasoning: 0,
+          cacheRead: 199,
+          cacheWrite: 0,
+          total: 200,
+          cache: 199,
+        },
+        "󰆼 100%",
+      ],
+    ]
+    for (const [usage, expected] of cases) {
+      expect(
+        formatFooterLine(
+          usage,
+          {
+            ...FOOTER,
+            input: false,
+            output: false,
+            reasoning: false,
+            total: false,
+          },
+          "compact",
+          80,
+          "percentage",
+        ),
+      ).toBe(expected)
+    }
+  })
+
+  test("percentage mode does not affect non-cache metrics and preserves order", () => {
+    const line = formatFooterLine(USAGE, FOOTER, "compact", 80, "percentage")
+    expect(line).toBe("Σ 44K · ↑40K · ↓1K · 󰧑 800 · 󰆼 5%")
   })
 })
 
 describe("formatFooterLine width safety", () => {
   test("returns the full line when it fits", () => {
     expect(formatFooterLine(USAGE, FOOTER, "compact", 100)).toBe(
-      "44K total · 40K in · 1K out · 800 reason · 2K cache",
+      "Σ 44K · ↑40K · ↓1K · 󰧑 800 · 󰆼 2K",
     )
   })
 
   test("truncates predictably with an ellipsis when the line overflows", () => {
     const line = formatFooterLine(USAGE, FOOTER, "compact", 20)
-    expect(line.length).toBeLessThan(
-      "44K total · 40K in · 1K out · 800 reason · 2K cache".length,
-    )
+    expect(line.length).toBeLessThan("Σ 44K · ↑40K · ↓1K · 󰧑 800 · 󰆼 2K".length)
     expect(line.endsWith("…")).toBe(true)
   })
 

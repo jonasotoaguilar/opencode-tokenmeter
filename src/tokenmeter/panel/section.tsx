@@ -33,7 +33,7 @@
  * line from project-section.tsx in the fallback and below the data.
  */
 import { For, Show } from "solid-js"
-import { formatCompactSummary, formatDetailLines } from "../format"
+import { formatCompactSummary, formatDetailLines } from "../format-detail"
 import { GLYPH } from "../glyphs"
 import { projectError } from "../project"
 import { settings } from "../settings"
