@@ -18,7 +18,7 @@
  */
 import { createSignal } from "solid-js"
 
-export type CachePref = "combined" | "separated"
+export type CachePref = "combined" | "separated" | "percentage"
 export type NumbersPref = "compact" | "precise"
 export type CollapsedSummaryPref = "session" | "project"
 export type SubagentsPref = "collapsed" | "expanded"
@@ -68,7 +68,7 @@ export const DEFAULT_FOOTER: FooterSettings = {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  cache: "combined",
+  cache: "percentage",
   numbers: "compact",
   collapsedSummary: "session",
   footer: { ...DEFAULT_FOOTER },
@@ -104,7 +104,7 @@ const [persisted, setPersisted] = createSignal(true)
 export { persisted, settings }
 
 const isCachePref = (v: unknown): v is CachePref =>
-  v === "combined" || v === "separated"
+  v === "combined" || v === "separated" || v === "percentage"
 const isNumbersPref = (v: unknown): v is NumbersPref =>
   v === "compact" || v === "precise"
 const isCollapsedSummaryPref = (v: unknown): v is CollapsedSummaryPref =>
@@ -214,10 +214,15 @@ export function cycleCollapsedSummary(api: SettingsApi): void {
   writeObject(api)
 }
 
-/** Cycles `cache` combined -> separated -> combined. */
+/** Cycles `cache` combined -> separated -> percentage -> combined. */
 export function cycleCache(api: SettingsApi): void {
+  const current = settings().cache
   const next: CachePref =
-    settings().cache === "combined" ? "separated" : "combined"
+    current === "combined"
+      ? "separated"
+      : current === "separated"
+        ? "percentage"
+        : "combined"
   setSettings({ ...settings(), cache: next })
   writeObject(api)
 }

@@ -30,13 +30,18 @@
 import { describe, expect, test } from "bun:test"
 import {
   formatAgentLine,
-  formatCachePair,
-  formatCacheSegment,
-  formatCompactSummary,
   formatCount,
-  formatDetailLines,
   formatMetricLines,
 } from "../src/tokenmeter/format"
+import {
+  formatCachePair,
+  formatCachePercent,
+  formatCacheSegment,
+} from "../src/tokenmeter/format-cache"
+import {
+  formatCompactSummary,
+  formatDetailLines,
+} from "../src/tokenmeter/format-detail"
 import { fmtCompact, fmtPrecise } from "../src/tokenmeter/numbers"
 import { textColumns } from "../src/tokenmeter/text"
 
@@ -51,7 +56,7 @@ describe("fmtPrecise — thousands-separated integers (numbers=precise)", () => 
     expect(fmtPrecise(999)).toBe("999")
   })
 
-  test("handles zero, larger magnitudes, signs and non-finite input", () => {
+  test("handles zero, larger magnitudes, signs and non-finite in", () => {
     expect(fmtPrecise(0)).toBe("0")
     expect(fmtPrecise(1234567890)).toBe("1,234,567,890")
     expect(fmtPrecise(-1234567)).toBe("-1,234,567")
@@ -188,7 +193,7 @@ describe("metricColor is gone — metric tone lives in the panel tone module, ne
   })
 })
 
-/** Spec scenario: 10M total tokens, $92.24 spend, 152K input, 215M real output, 414K reasoning, 212M combined cache. */
+/** Spec scenario: 10M total tokens, $92.24 spend, 152K in, 215M real output, 414K reasoning, 212M combined cache. */
 const SPEC_VIEW = {
   totalTokens: 10_000_000,
   cost: 92.24,
@@ -210,7 +215,7 @@ describe("formatMetricLines — exact three labeled lines (corrected contract)",
     })
     expect(lines).toHaveLength(3)
     expect(joined(lines[0])).toBe("10M tokens · $92.24")
-    expect(joined(lines[1])).toBe("152K input · 215M output")
+    expect(joined(lines[1])).toBe("152K in · 215M out")
     expect(joined(lines[2])).toBe("414K reason · 212M cache")
   })
 
@@ -219,7 +224,7 @@ describe("formatMetricLines — exact three labeled lines (corrected contract)",
       { ...SPEC_VIEW, output: 10, reasoning: 5 },
       { cache: "combined", numbers: "compact" },
     )
-    expect(joined(lines[1])).toBe("152K input · 15 output")
+    expect(joined(lines[1])).toBe("152K in · 15 out")
   })
 
   test("separated cache renders R|W from the same raw pair", () => {
@@ -236,7 +241,7 @@ describe("formatMetricLines — exact three labeled lines (corrected contract)",
       numbers: "precise",
     })
     expect(joined(lines[0])).toBe("10,000,000 tokens · $92.24")
-    expect(joined(lines[1])).toBe("152,000 input · 215,000,000 output")
+    expect(joined(lines[1])).toBe("152,000 in · 215,000,000 out")
     expect(joined(lines[2])).toBe("414,000 reason · 212,000,000 cache")
   })
 
@@ -373,7 +378,7 @@ describe("formatDetailLines — mode-aware rows (three compact, five precise)", 
     expect(line2[0]).toEqual({ text: "152K", role: "input" })
     expect(line3[0]).toEqual({ text: "414K", role: "reasoning" })
     expect(joined(line1)).toBe("10M tokens · $92.24")
-    expect(joined(line2)).toBe("152K input · 215M output")
+    expect(joined(line2)).toBe("152K in · 215M out")
     expect(joined(line3)).toBe("414K reason · 212M cache")
     expect(joined(line1)).not.toContain("●")
   })
@@ -382,8 +387,8 @@ describe("formatDetailLines — mode-aware rows (three compact, five precise)", 
     const lines = formatDetailLines(SPEC_VIEW, precise, 36)
     expect(lines).toHaveLength(5)
     expect(joined(lines[0])).toBe("10,000,000 tokens · $92.24")
-    expect(joined(lines[1])).toBe("152,000 input")
-    expect(joined(lines[2])).toBe("215,000,000 output")
+    expect(joined(lines[1])).toBe("152,000 in")
+    expect(joined(lines[2])).toBe("215,000,000 out")
     expect(joined(lines[3])).toBe("414,000 reason")
     expect(joined(lines[4])).toBe("212,000,000 cache")
   })
@@ -427,18 +432,19 @@ describe("formatDetailLines — mode-aware rows (three compact, five precise)", 
 
   test("compact paired rows: labels and the separator drop before values truncate; values never truncate while labeled", () => {
     // The paired input/output row walks its ladder in COMPACT mode: the
-    // full labeled pair is 24 columns — at 25 it fits whole; at 22 the
-    // trailing label drops (`152K input · 215M`); at 16 the labels and the
-    // separator yield to the values-only pair; below 11 both values
-    // truncate with `…` around ` · ` — reasoning/cache values are never
-    // omitted. Separated cache degrades through the same ladder.
+    // full labeled pair is 18 columns with `in`/`out` (was 24 with
+    // `input`/`output`) — at 25 it fits whole; at 14 the trailing label
+    // drops (`152K in · 215M`); at 12 the labels and the separator yield
+    // to the values-only pair; below 11 both values truncate with `…`
+    // around ` · ` — reasoning/cache values are never omitted. Separated
+    // cache degrades through the same ladder.
     expect(joined(formatDetailLines(SPEC_VIEW, opts, 25)[1])).toBe(
-      "152K input · 215M output",
+      "152K in · 215M out",
     )
-    expect(joined(formatDetailLines(SPEC_VIEW, opts, 22)[1])).toBe(
-      "152K input · 215M",
+    expect(joined(formatDetailLines(SPEC_VIEW, opts, 14)[1])).toBe(
+      "152K in · 215M",
     )
-    expect(joined(formatDetailLines(SPEC_VIEW, opts, 16)[1])).toBe(
+    expect(joined(formatDetailLines(SPEC_VIEW, opts, 12)[1])).toBe(
       "152K · 215M",
     )
     expect(joined(formatDetailLines(SPEC_VIEW, opts, 10)[1])).toBe("152K · 21…")
@@ -454,12 +460,13 @@ describe("formatDetailLines — mode-aware rows (three compact, five precise)", 
   })
 
   test("precise single-metric rows degrade individually: label drops, then the value truncates — never omitted", () => {
-    // `152,000 input` is 13 columns; at 12 the label drops; at 7 the value
-    // truncates; below 2 even the ellipsis is the whole row.
+    // `152,000 in` is 10 columns (was 13 with `input`); at 9 the label
+    // drops; at 7 the value truncates; below 2 even the ellipsis is the
+    // whole row.
     expect(joined(formatDetailLines(SPEC_VIEW, precise, 14)[1])).toBe(
-      "152,000 input",
+      "152,000 in",
     )
-    expect(joined(formatDetailLines(SPEC_VIEW, precise, 12)[1])).toBe("152,000")
+    expect(joined(formatDetailLines(SPEC_VIEW, precise, 9)[1])).toBe("152,000")
     expect(joined(formatDetailLines(SPEC_VIEW, precise, 6)[1])).toBe("152,0…")
     expect(joined(formatDetailLines(SPEC_VIEW, precise, 1)[1])).toBe("…")
   })
@@ -670,5 +677,83 @@ describe("the corrected-contract formatters carry no repeated metric glyphs", ()
         }
       }
     }
+  })
+
+  test("sidebar labels use in/out (not input/output) everywhere", () => {
+    const lines = formatMetricLines(SPEC_VIEW, {
+      cache: "combined",
+      numbers: "compact",
+    })
+    expect(joined(lines[1])).toBe("152K in · 215M out")
+    expect(joined(lines[1])).not.toContain(" input")
+    expect(joined(lines[1])).not.toContain(" output")
+    const precise = { cache: "combined", numbers: "precise" } as const
+    const detail = formatDetailLines(SPEC_VIEW, precise, 36)
+    expect(joined(detail[1])).toBe("152,000 in")
+    expect(joined(detail[2])).toBe("215,000,000 out")
+  })
+})
+
+describe("formatCachePercent — cache share percentage (cache/total*100)", () => {
+  test("computes cache / total * 100 as rounded integer percent", () => {
+    expect(formatCachePercent(50, 0, 100)).toBe("50%")
+    expect(formatCachePercent(25, 25, 100)).toBe("50%")
+    expect(formatCachePercent(2100, 0, 43900)).toBe("5%") // footer scenario
+  })
+
+  test("total 0 is deterministically 0%", () => {
+    expect(formatCachePercent(0, 0, 0)).toBe("0%")
+    expect(formatCachePercent(100, 50, 0)).toBe("0%")
+    expect(formatCachePercent(0, 0, -10)).toBe("0%")
+  })
+
+  test("rounding and clamping", () => {
+    expect(formatCachePercent(1, 0, 3)).toBe("33%") // 33.33 -> 33
+    expect(formatCachePercent(2, 0, 3)).toBe("67%") // 66.66 -> 67
+    expect(formatCachePercent(199, 0, 200)).toBe("100%") // 99.5 -> 100 clamped
+    expect(formatCachePercent(100, 100, 100)).toBe("100%") // cache > total would be 200% but clamped to 100
+  })
+
+  test("negative cache sides clamp to zero", () => {
+    expect(formatCachePercent(-50, 30, 100)).toBe("30%")
+    expect(formatCachePercent(-10, -20, 100)).toBe("0%")
+  })
+})
+
+describe("formatCacheSegment percentage mode — sidebar and footer share the same seam", () => {
+  test("percentage mode returns the cache share percent, not R|W or combined", () => {
+    const total = 10_000_000
+    const seg = formatCacheSegment(
+      212_000_000,
+      0,
+      "percentage",
+      "compact",
+      total,
+    )
+    // 212M impossible > total, clamped to 100%
+    expect(seg).toEqual({ text: "100%", role: "cache" })
+    const small = formatCacheSegment(100, 50, "percentage", "compact", 300)
+    expect(small).toEqual({ text: "50%", role: "cache" })
+  })
+
+  test("metric lines with percentage cache show percent and in/out labels", () => {
+    const view = { ...SPEC_VIEW, cacheRead: 5_000_000, cacheWrite: 0 }
+    // SPEC_VIEW total 10M, cache 5M -> 50%
+    const lines = formatMetricLines(view, {
+      cache: "percentage",
+      numbers: "compact",
+    })
+    expect(joined(lines[1])).toBe("152K in · 215M out")
+    expect(joined(lines[2])).toBe("414K reason · 50% cache")
+  })
+
+  test("detail lines with percentage cache in precise mode show percent", () => {
+    const view = { ...SPEC_VIEW, cacheRead: 5_000_000, cacheWrite: 0 }
+    const lines = formatDetailLines(
+      view,
+      { cache: "percentage", numbers: "precise" },
+      36,
+    )
+    expect(joined(lines[4])).toBe("50% cache")
   })
 })

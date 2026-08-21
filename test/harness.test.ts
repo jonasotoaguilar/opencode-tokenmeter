@@ -104,12 +104,9 @@ import {
   readDeletedAggregate,
   recordDeletedSession,
 } from "../src/tokenmeter/db"
-import {
-  formatAgentLine,
-  formatCachePair,
-  formatCompactSummary,
-  formatMetricLines,
-} from "../src/tokenmeter/format"
+import { formatAgentLine, formatMetricLines } from "../src/tokenmeter/format"
+import { formatCachePair } from "../src/tokenmeter/format-cache"
+import { formatCompactSummary } from "../src/tokenmeter/format-detail"
 import { GLYPH } from "../src/tokenmeter/glyphs"
 import {
   realOutput,
@@ -161,9 +158,13 @@ import {
 import type {
   ProjectSessionLike,
   SessionInfo,
-  SessionUsage,
   UsageMessage,
 } from "../src/tokenmeter/types"
+
+function must<T>(value: T | null | undefined, message?: string): T {
+  if (value == null) throw new Error(message ?? "Unexpected nullish value")
+  return value
+}
 
 const msg = (
   id: string,
@@ -247,24 +248,28 @@ describe("context snapshot policy (math.ts)", () => {
     // Verified against a real OpenCode session (ses_011740ed4ffe7vHkmKoHsR1faj,
     // 2 assistant messages): input 3167 + output 249 + reasoning 64 +
     // cache.read 66816 + cache.write 0 = 70296 == the provider tokens.total.
-    const m1 = usageOf(
-      msg("m1", "ses_root", {
-        input: 2000,
-        output: 150,
-        reasoning: 40,
-        cache: { read: 40000, write: 0 },
-        total: 42190,
-      }),
-    )!
-    const m2 = usageOf(
-      msg("m2", "ses_root", {
-        input: 1167,
-        output: 99,
-        reasoning: 24,
-        cache: { read: 26816, write: 0 },
-        total: 28106,
-      }),
-    )!
+    const m1 = must(
+      usageOf(
+        msg("m1", "ses_root", {
+          input: 2000,
+          output: 150,
+          reasoning: 40,
+          cache: { read: 40000, write: 0 },
+          total: 42190,
+        }),
+      ),
+    )
+    const m2 = must(
+      usageOf(
+        msg("m2", "ses_root", {
+          input: 1167,
+          output: 99,
+          reasoning: 24,
+          cache: { read: 26816, write: 0 },
+          total: 28106,
+        }),
+      ),
+    )
     const s = sumMessages(
       new Map([
         ["m1", m1],
@@ -282,14 +287,16 @@ describe("context snapshot policy (math.ts)", () => {
   })
 
   test("REGRESSION: screenshot parity — the spend formula reproduces the atomic 48,891 total exactly", () => {
-    const m1 = usageOf(
-      msg("m1", "ses_root", {
-        input: 27773,
-        output: 17,
-        reasoning: 109,
-        cache: { read: 20992, write: 0 },
-      }),
-    )!
+    const m1 = must(
+      usageOf(
+        msg("m1", "ses_root", {
+          input: 27773,
+          output: 17,
+          reasoning: 109,
+          cache: { read: 20992, write: 0 },
+        }),
+      ),
+    )
     // The single observed message contributes the full five-channel spend.
     expect(m1.context).toBe(27773 + 17 + 109 + 20992)
     const s = sumMessages(new Map([["m1", m1]]))
@@ -316,7 +323,7 @@ describe("context snapshot policy (math.ts)", () => {
     )
     expect(thinking?.context).toBe(1000 + 500 + 99999)
     expect(thinking?.reasoning).toBe(500)
-    const s = sumMessages(new Map([["m1", thinking!]]))
+    const s = sumMessages(new Map([["m1", must(thinking)]]))
     expect(s.total).toBe(1000 + 500 + 99999)
   })
 
@@ -395,17 +402,19 @@ describe("output real accounting (raw output + raw reasoning, exactly once)", ()
     // messages' cache tokens are billed, so the session spend accumulates
     // them all: m1's 9.5M cache enters the total, and the separately
     // displayed cache metric is the same cumulative sum.
-    const m1 = usageOf(
-      msg("m1", "ses_x", {
-        input: 100,
-        output: 20,
-        reasoning: 5,
-        cache: { read: 9000000, write: 500000 },
-      }),
-    )!
-    const m2 = usageOf(
-      msg("m2", "ses_x", { input: 2000, output: 700, reasoning: 300 }),
-    )!
+    const m1 = must(
+      usageOf(
+        msg("m1", "ses_x", {
+          input: 100,
+          output: 20,
+          reasoning: 5,
+          cache: { read: 9000000, write: 500000 },
+        }),
+      ),
+    )
+    const m2 = must(
+      usageOf(msg("m2", "ses_x", { input: 2000, output: 700, reasoning: 300 })),
+    )
     expect(m1.context).toBe(9500125)
     expect(m2.context).toBe(3000)
     const map = new Map([
@@ -427,20 +436,24 @@ describe("output real accounting (raw output + raw reasoning, exactly once)", ()
   })
 
   test("REGRESSION: cache read/write accumulate into the session spend across messages", () => {
-    const m1 = usageOf(
-      msg("m1", "ses_x", {
-        input: 100,
-        output: 20,
-        cache: { read: 100, write: 0 },
-      }),
-    )!
-    const m2 = usageOf(
-      msg("m2", "ses_x", {
-        input: 2000,
-        output: 700,
-        cache: { read: 3000, write: 500 },
-      }),
-    )!
+    const m1 = must(
+      usageOf(
+        msg("m1", "ses_x", {
+          input: 100,
+          output: 20,
+          cache: { read: 100, write: 0 },
+        }),
+      ),
+    )
+    const m2 = must(
+      usageOf(
+        msg("m2", "ses_x", {
+          input: 2000,
+          output: 700,
+          cache: { read: 3000, write: 500 },
+        }),
+      ),
+    )
     const s = sumMessages(
       new Map([
         ["m1", m1],
@@ -457,9 +470,18 @@ describe("output real accounting (raw output + raw reasoning, exactly once)", ()
 describe("session aggregation (complete-session spend, cumulative breakdowns)", () => {
   test("REGRESSION: total is the spend formula — Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write — never the maximum atomic snapshot", () => {
     const map = new Map<string, NonNullable<ReturnType<typeof usageOf>>>()
-    map.set("m1", usageOf(msg("m1", "ses_x", { input: 1000, output: 100 }))!)
-    map.set("m2", usageOf(msg("m2", "ses_x", { input: 3000, output: 300 }))!)
-    map.set("m3", usageOf(msg("m3", "ses_x", { input: 2000, output: 200 }))!)
+    map.set(
+      "m1",
+      must(usageOf(msg("m1", "ses_x", { input: 1000, output: 100 }))),
+    )
+    map.set(
+      "m2",
+      must(usageOf(msg("m2", "ses_x", { input: 3000, output: 300 }))),
+    )
+    map.set(
+      "m3",
+      must(usageOf(msg("m3", "ses_x", { input: 2000, output: 200 }))),
+    )
     const s = sumMessages(map)
     // The largest single-message snapshot is 3300, but the spend formula is
     // the cumulative sum: 6000 + 600 = 6600 — never below cumulative
@@ -473,37 +495,41 @@ describe("session aggregation (complete-session spend, cumulative breakdowns)", 
     const map = new Map<string, NonNullable<ReturnType<typeof usageOf>>>()
     map.set(
       "m1",
-      usageOf(
-        msg(
-          "m1",
-          "ses_x",
-          {
-            input: 500,
-            output: 100,
-            reasoning: 50,
-            cache: { read: 30, write: 20 },
-            total: 700,
-          },
-          0.1,
+      must(
+        usageOf(
+          msg(
+            "m1",
+            "ses_x",
+            {
+              input: 500,
+              output: 100,
+              reasoning: 50,
+              cache: { read: 30, write: 20 },
+              total: 700,
+            },
+            0.1,
+          ),
         ),
-      )!,
+      ),
     )
     map.set(
       "m2",
-      usageOf(
-        msg(
-          "m2",
-          "ses_x",
-          {
-            input: 500,
-            output: 100,
-            reasoning: 50,
-            cache: { read: 30, write: 20 },
-            total: 700,
-          },
-          0.1,
+      must(
+        usageOf(
+          msg(
+            "m2",
+            "ses_x",
+            {
+              input: 500,
+              output: 100,
+              reasoning: 50,
+              cache: { read: 30, write: 20 },
+              total: 700,
+            },
+            0.1,
+          ),
         ),
-      )!,
+      ),
     )
     const s = sumMessages(map)
     // Each message contributes 700 (i+o+r+cr+cw); the spend sums them all:
@@ -521,8 +547,14 @@ describe("session aggregation (complete-session spend, cumulative breakdowns)", 
 
   test("message-ID replacement (retry/streaming upsert) keeps one contribution per message", () => {
     const map = new Map<string, NonNullable<ReturnType<typeof usageOf>>>()
-    map.set("m1", usageOf(msg("m1", "ses_x", { input: 1000, output: 100 }))!)
-    map.set("m1", usageOf(msg("m1", "ses_x", { input: 2500, output: 250 }))!)
+    map.set(
+      "m1",
+      must(usageOf(msg("m1", "ses_x", { input: 1000, output: 100 }))),
+    )
+    map.set(
+      "m1",
+      must(usageOf(msg("m1", "ses_x", { input: 2500, output: 250 }))),
+    )
     const s = sumMessages(map)
     expect(s.total).toBe(2750)
     expect(s.input).toBe(2500)
@@ -534,14 +566,14 @@ describe("session aggregation (complete-session spend, cumulative breakdowns)", 
     // Full observation: spend 10500 + 1050 = 11550.
     upsertMessageUsage(msg("m1", rootID, { input: 10000, output: 1000 }))
     upsertMessageUsage(msg("m2", rootID, { input: 500, output: 50 }))
-    const full = observedSessionUsage(rootID)!
+    const full = must(observedSessionUsage(rootID))
     expect(full.total).toBe(11550)
     expect(full.input).toBe(10500)
     // Compaction: the old message is gone, the map computes 550 — the
     // per-component high-water (input 10500, output 1050) must survive, so
     // the spend stays 11550 and the displayed components never lower.
     removeMessageUsage(rootID, "m1")
-    const compacted = observedSessionUsage(rootID)!
+    const compacted = must(observedSessionUsage(rootID))
     expect(compacted.input).toBe(10500)
     expect(compacted.output).toBe(1050)
     expect(compacted.total).toBe(11550)
@@ -552,20 +584,24 @@ describe("session aggregation (complete-session spend, cumulative breakdowns)", 
   })
 
   test("REGRESSION: a zero-output tail's cache still counts into the spend — cache is cumulative", () => {
-    const m1 = usageOf(
-      msg("m1", "ses_z", {
-        input: 100,
-        output: 100,
-        cache: { read: 200, write: 0 },
-      }),
-    )!
-    const tail = usageOf(
-      msg("m2", "ses_z", {
-        input: 0,
-        output: 0,
-        cache: { read: 9999, write: 0 },
-      }),
-    )!
+    const m1 = must(
+      usageOf(
+        msg("m1", "ses_z", {
+          input: 100,
+          output: 100,
+          cache: { read: 200, write: 0 },
+        }),
+      ),
+    )
+    const tail = must(
+      usageOf(
+        msg("m2", "ses_z", {
+          input: 0,
+          output: 0,
+          cache: { read: 9999, write: 0 },
+        }),
+      ),
+    )
     const s = sumMessages(
       new Map([
         ["m1", m1],
@@ -578,14 +614,16 @@ describe("session aggregation (complete-session spend, cumulative breakdowns)", 
   })
 
   test("REGRESSION: replacing an existing message keeps one contribution per message — cache stays cumulative", () => {
-    const m1 = usageOf(msg("m1", "ses_o", { input: 100, output: 10 }))!
-    const m2 = usageOf(
-      msg("m2", "ses_o", {
-        input: 200,
-        output: 20,
-        cache: { read: 300, write: 0 },
-      }),
-    )!
+    const m1 = must(usageOf(msg("m1", "ses_o", { input: 100, output: 10 })))
+    const m2 = must(
+      usageOf(
+        msg("m2", "ses_o", {
+          input: 200,
+          output: 20,
+          cache: { read: 300, write: 0 },
+        }),
+      ),
+    )
     const map = new Map([
       ["m1", m1],
       ["m2", m2],
@@ -593,7 +631,7 @@ describe("session aggregation (complete-session spend, cumulative breakdowns)", 
     // Replace m1's value (retry/streaming upsert): the key keeps its
     // insertion position, the map still holds exactly one contribution per
     // message, and every billed cache token stays in the spend.
-    map.set("m1", usageOf(msg("m1", "ses_o", { input: 500, output: 50 }))!)
+    map.set("m1", must(usageOf(msg("m1", "ses_o", { input: 500, output: 50 }))))
     const s = sumMessages(map)
     expect(s.total).toBe(700 + 70 + 300)
     expect(s.input).toBe(700)
@@ -601,6 +639,7 @@ describe("session aggregation (complete-session spend, cumulative breakdowns)", 
 })
 
 describe("project aggregation (project.ts)", () => {
+  /** Temp state directories created by this block; removed after each test. */
   /** Temp state directories created by this block; removed after each test. */
   const tmps: string[] = []
   const tmpStateDir = () => {
@@ -719,10 +758,10 @@ describe("project aggregation (project.ts)", () => {
     expect(usage?.cacheRead).toBe(125)
     expect(usage?.cacheWrite).toBe(75)
     expect(usage?.cache).toBe(200)
-    expect(usage!.context).toBeGreaterThanOrEqual(
-      usage!.input + realOutput(usage!.output, usage!.reasoning),
+    expect(must(usage).context).toBeGreaterThanOrEqual(
+      must(usage).input + realOutput(must(usage).output, must(usage).reasoning),
     )
-    expect(realOutput(usage!.output, usage!.reasoning)).toBe(1850)
+    expect(realOutput(must(usage).output, must(usage).reasoning)).toBe(1850)
   })
 
   test("REGRESSION: Project counts each unique session exactly once — a duplicated sessionID in the live list is summed once", async () => {
@@ -1095,7 +1134,7 @@ describe("project aggregation (project.ts)", () => {
     // A rejected/missing lookup surfaces the stable message — never a raw
     // runtime error ("undefined is not an object", stacks, etc).
     expect(projectError()).toBe("Unable to load project data")
-    expect(projectError()!).not.toContain("undefined is not an object")
+    expect(must(projectError())).not.toContain("undefined is not an object")
   })
 
   test("project.current without data is an error, not a silent placeholder", async () => {
@@ -1167,7 +1206,7 @@ describe("project aggregation (project.ts)", () => {
     expect(projectSnapshot()).toBeNull()
     // Raw runtime detail never surfaces: always the stable message.
     expect(projectError()).toBe("Unable to load project data")
-    expect(projectError()!).not.toContain("boom")
+    expect(must(projectError())).not.toContain("boom")
 
     // Starting a refresh clears the error immediately, so an in-flight or
     // successful refresh never shows a stale error.
@@ -1197,7 +1236,7 @@ describe("project aggregation (project.ts)", () => {
     await refreshProject(api as never)
     expect(projectSnapshot()).toBeNull()
     expect(projectError()).toBe("Unable to load project data")
-    expect(projectError()!).not.toContain("boom")
+    expect(must(projectError())).not.toContain("boom")
   })
 
   test("REGRESSION: a client exposing only the old experimental.session.list path fails with the stable message, never a raw undefined error", async () => {
@@ -1219,8 +1258,8 @@ describe("project aggregation (project.ts)", () => {
     await refreshProject(api as never)
     expect(projectSnapshot()).toBeNull()
     expect(projectError()).toBe("Unable to load project data")
-    expect(projectError()!).not.toContain("undefined is not an object")
-    expect(projectError()!).not.toContain("\n    at ")
+    expect(must(projectError())).not.toContain("undefined is not an object")
+    expect(must(projectError())).not.toContain("\n    at ")
   })
 
   test("REGRESSION: project.ts targets the stable client API only — explicit limit, no experimental, no archived, no kv, no raw error capture", () => {
@@ -1345,7 +1384,7 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
       rootID,
     )
     await waitFor(() => snapshot()?.rootID === rootID)
-    const snap = snapshot()!
+    const snap = must(snapshot())
     // Each session contributes its complete spend — the root sums ALL of
     // its messages (4 × 52000), the child sums all of its (3 × 10500), so
     // the coins total is 208000 + 31500 — never below the cumulative input +
@@ -1402,7 +1441,7 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
       rootID,
     )
     await waitFor(() => snapshot()?.rootID === rootID)
-    const snap = snapshot()!
+    const snap = must(snapshot())
     expect(snap.output).toBe(1500)
     expect(snap.reasoning).toBe(600)
     expect(realOutput(snap.output, snap.reasoning)).toBe(2100)
@@ -1448,7 +1487,7 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
       rootID,
     )
     await waitFor(() => snapshot()?.rootID === rootID)
-    const snap = snapshot()!
+    const snap = must(snapshot())
     // 55000 = 50000+2000+3000: the session's billed cache read IS part of
     // its complete spend (matching the provider total); tokens.total (55000
     // here) is coincidental and still never read.
@@ -1473,7 +1512,7 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
     purgeTreeCache()
     activateRoot(fakeApi(sessions, {}, {}), rootID)
     await waitFor(() => snapshot()?.rootID === rootID)
-    expect(snapshot()!.input).toBe(3000)
+    expect(must(snapshot()).input).toBe(3000)
 
     // The final message.updated is MISSED: only the current messages now
     // carry the completed totals, with m1 removed and m2 grown. Invalidation
@@ -1483,13 +1522,13 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
     ]
     invalidateUsage(rootID)
     await reconcile(fakeApi(sessions, {}, {}), rootID)
-    await waitFor(() => snapshot()!.input === 3000)
+    await waitFor(() => must(snapshot()).input === 3000)
     // The rehydrated map computes 2200, but the per-field high-waters
     // (input 3000, cost 0.03) preserve the full spend (3300, observed at
     // full size) — removal can never lower the displayed spend.
-    expect(snapshot()!.totalTokens).toBe(3300)
-    expect(snapshot()!.input).toBe(3000)
-    expect(snapshot()!.cost).toBeCloseTo(0.03)
+    expect(must(snapshot()).totalTokens).toBe(3300)
+    expect(must(snapshot()).input).toBe(3000)
+    expect(must(snapshot()).cost).toBeCloseTo(0.03)
     disposeReconcile()
   })
 
@@ -1514,7 +1553,7 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
       rootID,
     )
     await waitFor(() => snapshot()?.rootID === rootID)
-    const snap = snapshot()!
+    const snap = must(snapshot())
     expect(snap.delegations).toBe(2)
     expect(snap.agents).toBe(1)
     expect(snap.groups).toHaveLength(1)
@@ -1551,7 +1590,7 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
       rootID,
     )
     await waitFor(() => snapshot()?.rootID === rootID)
-    const snap = snapshot()!
+    const snap = must(snapshot())
     expect(snap.delegations).toBe(3)
     expect(snap.agents).toBe(2)
     expect(snap.groups).toHaveLength(2)
@@ -1589,7 +1628,7 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
       rootID,
     )
     await waitFor(() => snapshot()?.rootID === rootID)
-    const names = snapshot()!.groups.map((g) => g.name)
+    const names = must(snapshot()).groups.map((g) => g.name)
     // Spend total desc: beta (5.5k) first; alpha and zeta tie on total
     // (1.1k), cost and runs, so the name tiebreak puts alpha before zeta.
     expect(names).toEqual(["beta", "alpha", "zeta"])
@@ -1641,7 +1680,7 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
       rootID,
     )
     await waitFor(() => snapshot()?.rootID === rootID)
-    const snap = snapshot()!
+    const snap = must(snapshot())
     // The tree walk is recursive: the grandchild sessions are descendants
     // of the root even though they are children of a child.
     expect(snap.delegations).toBe(3)
@@ -1657,7 +1696,7 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
     // Single-message descendants: the group total equals their cumulative
     // input + real output here (one message per session).
     expect(sdd?.total).toBe(
-      sdd!.input + realOutput(sdd!.output, sdd!.reasoning),
+      must(sdd).input + realOutput(must(sdd).output, must(sdd).reasoning),
     )
     expect(explore?.runs).toBe(1)
     expect(explore?.total).toBe(3250)
@@ -1689,8 +1728,8 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
     activateRoot(fakeApi(sessions, {}, {}), rootID)
     await waitFor(() => snapshot()?.rootID === rootID)
     // Spend formula: 70000 + 4000 = 74000.
-    expect(snapshot()!.totalTokens).toBe(74000)
-    expect(snapshot()!.input).toBe(70000)
+    expect(must(snapshot()).totalTokens).toBe(74000)
+    expect(must(snapshot()).input).toBe(70000)
 
     // session.compacted rewrites the client to a SMALLER message set: the
     // historical per-component maxima (input 70000, output 4000, cost 0.03)
@@ -1700,10 +1739,10 @@ describe("reconcile snapshot (root + recursive descendants)", () => {
     await reconcile(fakeApi(sessions, {}, {}), rootID)
     // Components keep their per-field maxima; the coins total keeps the
     // historical spend (74000), never 2200.
-    expect(snapshot()!.totalTokens).toBe(74000)
-    expect(snapshot()!.input).toBe(70000)
-    expect(snapshot()!.output).toBe(4000)
-    expect(snapshot()!.cost).toBeCloseTo(0.03)
+    expect(must(snapshot()).totalTokens).toBe(74000)
+    expect(must(snapshot()).input).toBe(70000)
+    expect(must(snapshot()).output).toBe(4000)
+    expect(must(snapshot()).cost).toBeCloseTo(0.03)
     disposeReconcile()
   })
 })
@@ -1992,8 +2031,8 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
     }
     expect(formatSrc).toContain('labelSegment("tokens")')
     expect(formatSrc).not.toContain('labelSegment("spent")')
-    expect(formatSrc).toContain('labelSegment("input")')
-    expect(formatSrc).toContain('labelSegment("output")')
+    expect(formatSrc).toContain('labelSegment("in")')
+    expect(formatSrc).toContain('labelSegment("out")')
     // The reasoning DISPLAY label is exactly `reason` in every metric row;
     // the data field/role stays `reasoning`.
     expect(formatSrc).toContain('labelSegment("reason")')
@@ -2042,6 +2081,7 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
       '{"  " + (props.expanded() ? GLYPH.collapse : GLYPH.expand)}',
     )
     expect(panelSrc).toContain("masterCollapsed")
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal source snippet asserts exact template placeholder syntax
     expect(panelSrc).toContain("{`${masterChevron()} `}")
     expect(panelSrc).not.toContain("Settings")
     expect(panelSrc).not.toContain("Back")
@@ -2055,8 +2095,10 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
     // (no Settings toggle).
     expect(sectionSrc.match(/onMouseDown/g)).toHaveLength(2)
     expect(panelSrc.match(/onMouseDown/g)).toHaveLength(5)
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal source snippet asserts exact template placeholder syntax
     expect(sectionSrc).toContain("{`${chevron()} `}")
     expect(sectionSrc).toContain("onMouseDown={props.onToggle}>")
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal source snippet asserts exact template placeholder syntax
     expect(sectionSrc.indexOf("{`${chevron()} `}")).toBeLessThan(
       sectionSrc.indexOf("{props.title}"),
     )
@@ -2067,6 +2109,7 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
     expect(panelSrc).not.toContain("GLYPH.dot")
     expect(sectionSrc).not.toContain("●")
     expect(panelSrc).not.toContain("●")
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal source snippet asserts exact template placeholder syntax
     expect(sectionSrc.indexOf("{`${chevron()} `}")).toBeLessThan(
       sectionSrc.indexOf("{props.title}"),
     )
@@ -2077,14 +2120,17 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
     expect(panelSrc).toMatch(
       /fg=\{theme\(\)\.warning\}[^>]*>\s*Subagents\s*<\/text>/,
     )
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal source snippet asserts exact template placeholder syntax
     expect(panelSrc).toContain("{`${chevron()} `}")
     expect(panelSrc).toContain(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal source snippet asserts exact template placeholder syntax
       '{` (${formatCount(snap().agents, "agent")} · ${formatCount(snap().delegations, "task")})`}',
     )
     expect(panelSrc).toContain('props.subagentsPref() === "expanded"')
     expect(panelSrc).not.toContain("formatAgents")
     expect(panelSrc).not.toContain("formatTaskCount")
     expect(panelSrc).not.toContain(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal source snippet asserts exact template placeholder syntax
       '{` ${props.subagentsPref() === "expanded" ? GLYPH.collapse : GLYPH.expand}`}',
     )
     // The compact summary row is the section's elastic L1; its tone comes
@@ -2239,6 +2285,7 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
     expect(projectSectionSrc).toContain(
       "truncateToColumns(message(), props.inner())",
     )
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal source snippet asserts exact template placeholder syntax
     expect(projectSectionSrc).not.toContain("Error: ${message()}")
     expect(projectSectionSrc).toContain("fg={props.theme().error}")
     // Session keeps its own neutral fallback without a loading state.

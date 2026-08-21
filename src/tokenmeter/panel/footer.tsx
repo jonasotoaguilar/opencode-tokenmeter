@@ -68,6 +68,7 @@ export function SessionPromptRight(props) {
       settings().footer,
       settings().numbers,
       dimensions().width,
+      settings().cache,
     )
   })
 
