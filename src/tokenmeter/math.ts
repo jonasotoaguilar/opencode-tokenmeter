@@ -35,11 +35,15 @@
  * the aggregation so nothing is double-counted; the DISPLAYED output real is
  * `output + reasoning`, computed once per message/session by realOutput().
  */
+import { estimateCost, getPricing, pricingKey } from "./pricing"
 import type {
+  FinitePrice,
   MessageUsage,
+  MonetarySource,
   ProjectAggregateEntry,
   ProjectSessionLike,
   ProjectUsage,
+  ResolvedCost,
   SessionComponents,
   SessionUsage,
   UsageMessage,
@@ -47,6 +51,63 @@ import type {
 
 const num = (v: unknown): number =>
   typeof v === "number" && Number.isFinite(v) ? v : 0
+
+function isOpenAI(providerID: unknown): boolean {
+  if (typeof providerID !== "string") return false
+  return providerID.trim().toLowerCase() === "openai"
+}
+
+/**
+ * Resolves monetary cost for a message/row.
+ * Non-zero reported cost wins unchanged. Else OpenAI + billable usage + exact pricing => estimated; else reported 0.
+ * Never throws.
+ */
+export function resolveCost(opts: {
+  cost: number
+  providerID: unknown
+  modelID: unknown
+  tokens: {
+    input: number
+    output: number
+    reasoning: number
+    cacheRead: number
+    cacheWrite: number
+  }
+}): ResolvedCost {
+  try {
+    const cost = num(opts.cost)
+    if (cost !== 0) return { cost, source: "reported" as MonetarySource }
+    if (!isOpenAI(opts.providerID)) return { cost: 0, source: "reported" }
+    const { input, output, reasoning, cacheRead, cacheWrite } = opts.tokens
+    const billable =
+      num(input) +
+        num(output) +
+        num(reasoning) +
+        num(cacheRead) +
+        num(cacheWrite) >
+      0
+    if (!billable) return { cost: 0, source: "reported" }
+    const key = pricingKey(opts.providerID, opts.modelID)
+    if (!key) return { cost: 0, source: "reported" }
+    const price = getPricing(key)
+    if (!price) return { cost: 0, source: "reported" }
+    const est = estimateCost(
+      {
+        input: num(input),
+        output: num(output),
+        reasoning: num(reasoning),
+        cacheRead: num(cacheRead),
+        cacheWrite: num(cacheWrite),
+      },
+      price as FinitePrice,
+    )
+    if (!Number.isFinite(est) || est <= 0)
+      return { cost: 0, source: "reported" }
+    return { cost: est, source: "estimated" }
+  } catch {
+    return { cost: 0, source: "reported" }
+  }
+}
 
 const hasUsage = (entry: ProjectAggregateEntry): boolean =>
   entry.cost +
@@ -100,8 +161,15 @@ export function usageOf(
   // Per-message spend contribution: all five billed channels. `tokens.total`
   // is intentionally unused — this sum reconstructs it exactly.
   const context = input + output + reasoning + cacheRead + cacheWrite
-  const usage: MessageUsage = {
+  const resolved = resolveCost({
     cost: num(message.cost),
+    providerID: (message as UsageMessage).providerID,
+    modelID: (message as UsageMessage).modelID,
+    tokens: { input, output, reasoning, cacheRead, cacheWrite },
+  })
+  const usage: MessageUsage = {
+    cost: resolved.cost,
+    source: resolved.source,
     input,
     output,
     reasoning,

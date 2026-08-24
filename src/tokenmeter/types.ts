@@ -33,8 +33,21 @@ export type TokenUsage = {
   cacheWrite: number
 }
 
+export type FinitePrice = {
+  input: number
+  output: number
+  cache: { read: number; write: number }
+}
+
+export type MonetarySource = "reported" | "estimated"
+
+export type ResolvedCost = { cost: number; source: MonetarySource }
+
+export type MoneyRow = ResolvedCost
+
 export type MessageUsage = TokenUsage & {
   cost: number
+  source: MonetarySource
   /**
    * Per-message spend contribution: `input + output + reasoning + cacheRead
    * + cacheWrite`. `tokens.total` is intentionally unused — the plugin
@@ -187,6 +200,8 @@ export type UsageMessage = {
   sessionID?: string
   role?: string
   cost?: number
+  providerID?: string
+  modelID?: string
   tokens?: {
     total?: number
     input?: number
