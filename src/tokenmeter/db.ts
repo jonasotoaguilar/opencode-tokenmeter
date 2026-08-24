@@ -171,6 +171,27 @@ export function recordDeletedSession(
 }
 
 /**
+ * Reads the set of tombstoned session IDs for ONE project. Scoped by
+ * `(session_id, project_id)` so the same session ID tombstoned in
+ * Project A remains eligible in Project B. Fail-contained: null/empty
+ * project, missing DB, or corrupt file returns an empty set without
+ * throwing, matching `readDeletedAggregate`/`recordDeletedSession`.
+ */
+export function readDeletedSessionIDs(
+  dbPath: string | null,
+  projectID: string,
+): ReadonlySet<string> {
+  if (!dbPath || !projectID) return new Set<string>()
+  const result = withDb(dbPath, (db) => {
+    const rows = db
+      .query("SELECT session_id FROM tombstones WHERE project_id = ?")
+      .all(projectID) as { session_id: string }[]
+    return new Set<string>(rows.map((r) => r.session_id))
+  })
+  return result ?? new Set<string>()
+}
+
+/**
  * Reads ONE project's deleted aggregate (null when the project has no
  * recorded deletions yet). Used by the Project refresh to compute
  * live total + deleted aggregate. Never throws: a broken/absent state

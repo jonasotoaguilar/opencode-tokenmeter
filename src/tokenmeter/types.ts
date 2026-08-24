@@ -177,7 +177,7 @@ export type SessionComponents = {
   cacheWrite: number
 }
 
-/** Minimal session shape returned by the client session.list endpoint (`scope: "project"`). */
+/** Minimal session shape returned by the client session.list endpoint (`scope: "project"`). Mirrors SDK `GlobalSession` (`types.gen.d.ts:1790`). */
 export type ProjectSessionLike = {
   id: string
   projectID: string
@@ -192,6 +192,8 @@ export type ProjectSessionLike = {
     reasoning?: number
     cache?: { read?: number; write?: number }
   }
+  /** SDK `GlobalSession.model` — used for per-row OpenAI cost fallback via `resolveCost`. */
+  model?: { id: string; providerID: string; variant?: string }
 }
 
 /** Minimal assistant-message shape carrying usage data. */

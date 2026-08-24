@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { resolveCost, usageOf } from "../src/tokenmeter/math"
+import {
+  projectDbPath,
+  readDeletedSessionIDs,
+  recordDeletedSession,
+} from "../src/tokenmeter/db"
+import {
+  resolveCost,
+  sumProjectSessions,
+  usageOf,
+} from "../src/tokenmeter/math"
 import {
   clearPricing,
   estimateCost,
@@ -9,6 +18,12 @@ import {
   selectFiniteNonTier,
   setPricing,
 } from "../src/tokenmeter/pricing"
+import {
+  disposeProjectRefresh,
+  projectSnapshot,
+  refreshProject,
+  setProjectSnapshot,
+} from "../src/tokenmeter/project"
 import { activateRoot, disposeReconcile } from "../src/tokenmeter/reconcile"
 import {
   forgetSession,
@@ -430,5 +445,141 @@ describe("Unit 2 adapter+reconcile", () => {
     disposeReconcile()
     clearPricing()
     setSnapshot(null)
+  })
+})
+
+describe("Unit 3 project tombstone scope", () => {
+  beforeEach(() => {
+    clearPricing()
+    setProjectSnapshot(null)
+    disposeProjectRefresh()
+  })
+  afterEach(() => {
+    clearPricing()
+    setProjectSnapshot(null)
+    disposeProjectRefresh()
+  })
+  test("tombstone scope (sessionX,projectA) exclude before sum; B remains eligible; reported+estimated", async () => {
+    const { mkdtempSync, rmSync } = await import("node:fs")
+    const { tmpdir } = await import("node:os")
+    const { join } = await import("node:path")
+    const price: FinitePrice = {
+      input: 5,
+      output: 15,
+      cache: { read: 0, write: 0 },
+    }
+    setPricing(new Map([["openai:gpt-4o", price]]))
+    const dir = mkdtempSync(join(tmpdir(), "tokenmeter-ut3-"))
+    const dbPath = projectDbPath(dir)
+    // tombstone (sessionX, projectA) only
+    recordDeletedSession(dbPath, {
+      id: "sessionX",
+      projectID: "projA",
+      cost: 0.01,
+      tokens: { input: 1000, output: 500, reasoning: 0 },
+    })
+    expect(readDeletedSessionIDs(dbPath, "projA").has("sessionX")).toBe(true)
+    expect(readDeletedSessionIDs(dbPath, "projB").has("sessionX")).toBe(false)
+    expect(readDeletedSessionIDs(null, "projA").size).toBe(0)
+    // live rows: sessionX (openai cost 0 → estimated 0.0125) + sessionY reported 0.03
+    const liveA = [
+      {
+        id: "sessionX",
+        projectID: "projA",
+        cost: 0,
+        tokens: { input: 1000, output: 500, reasoning: 0 },
+        model: { id: "gpt-4o", providerID: "openai" },
+      },
+      {
+        id: "sessionY",
+        projectID: "projA",
+        cost: 0.03,
+        tokens: { input: 2000, output: 700, reasoning: 300 },
+        model: { id: "gpt-4o", providerID: "openai" },
+      },
+    ]
+    const liveB = [
+      {
+        id: "sessionX",
+        projectID: "projB",
+        cost: 0,
+        tokens: { input: 1000, output: 500, reasoning: 0 },
+        model: { id: "gpt-4o", providerID: "openai" },
+      },
+    ]
+    const excludeA = readDeletedSessionIDs(dbPath, "projA")
+    const excludeB = readDeletedSessionIDs(dbPath, "projB")
+    const sumA = sumProjectSessions("projA", liveA as never, excludeA)
+    const sumB = sumProjectSessions("projB", liveB as never, excludeB)
+    // A: sessionX excluded BEFORE sum — tokens/cost from X absent
+    expect(sumA.sessions).toBe(1)
+    expect(sumA.cost).toBeCloseTo(0.03)
+    expect(sumA.input).toBe(2000)
+    expect(sumA.context).toBe(3000)
+    // B: same ID but different project — still eligible, estimated cost counts
+    expect(sumB.sessions).toBe(1)
+    expect(sumB.cost).toBeCloseTo(0.0125)
+    expect(sumB.input).toBe(1000)
+    expect(sumB.context).toBe(1500)
+    // reported+estimated through existing authority: non-openai stays zero
+    const nonOpenAI = sumProjectSessions("projA", [
+      {
+        id: "s3",
+        projectID: "projA",
+        cost: 0,
+        tokens: { input: 1000, output: 500 },
+        model: { id: "claude-3", providerID: "anthropic" },
+      },
+    ] as never)
+    expect(nonOpenAI.cost).toBe(0)
+    // refreshProject live path: tombstoned X excluded, Y reported, deleted aggregate once
+    const apiA = {
+      state: { path: { directory: "/proj/dir", state: dir } },
+      client: {
+        project: { current: async () => ({ data: { id: "projA" } }) },
+        session: {
+          list: async () => ({ data: liveA }),
+        },
+        model: {
+          list: async () => ({
+            data: [
+              {
+                providerID: "openai",
+                id: "gpt-4o",
+                cost: [{ input: 5, output: 15, cache: { read: 0, write: 0 } }],
+              },
+            ],
+          }),
+        },
+      },
+    }
+    await refreshProject(apiA as never)
+    const snapA = projectSnapshot()
+    // live Y (0.03) + deleted X (0.01 from aggregate) — X live excluded, deleted once
+    expect(snapA?.sessions).toBe(2)
+    expect(snapA?.cost).toBeCloseTo(0.04)
+    // B refresh still counts its X estimated (no tombstone)
+    const apiB = {
+      state: { path: { directory: "/proj/dir", state: dir } },
+      client: {
+        project: { current: async () => ({ data: { id: "projB" } }) },
+        session: { list: async () => ({ data: liveB }) },
+        model: {
+          list: async () => ({
+            data: [
+              {
+                providerID: "openai",
+                id: "gpt-4o",
+                cost: [{ input: 5, output: 15, cache: { read: 0, write: 0 } }],
+              },
+            ],
+          }),
+        },
+      },
+    }
+    await refreshProject(apiB as never)
+    const snapB = projectSnapshot()
+    expect(snapB?.cost).toBeCloseTo(0.0125)
+    rmSync(dir, { recursive: true, force: true })
   })
 })
