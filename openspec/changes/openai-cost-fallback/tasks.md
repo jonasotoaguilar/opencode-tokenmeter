@@ -30,10 +30,10 @@ Decision needed before apply: No — stacked-to-main chosen. Slice 1A first.
 - [x] 1A.3 GREEN `src/tokenmeter/pricing.ts` `pricingKey` `selectFiniteNonTier` `estimateCost` `getPricing`/`setPricing`/`clearPricing` — pure, no `model.list`
 - [x] 1A.4 GREEN `src/tokenmeter/math.ts` `resolveCost` `usageOf` source — reported wins, `/1_000_000`, trim+lower exact, never throw
 
-## Phase 1B: Store Identity (PR 1B — next, pending)
+## Phase 1B: Store Identity (PR 1B — done)
 
-- [ ] 1B.1 RED composite: M1.10+M2.05+M3.04 refill M2.02 M3 absent→.16 repeat→.16 converted replaces self missing archives once
-- [ ] 1B.2 GREEN `src/tokenmeter/store.ts` `rememberCosts` `sessionCostIdentity` `observedSessionUsage` Σ identity `forgetSession`
+- [x] 1B.1 RED composite: M1.10+M2.05+M3.04 refill M2.02 M3 absent→.16 repeat→.16 converted replaces self missing archives once
+- [x] 1B.2 GREEN `src/tokenmeter/store.ts` `rememberCosts` `sessionCostIdentity` `observedSessionUsage` Σ identity `forgetSession`
 
 ## Phase 2: Adapter + Reconcile (pending)
 

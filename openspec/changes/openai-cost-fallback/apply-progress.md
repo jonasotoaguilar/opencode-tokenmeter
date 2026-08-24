@@ -1,65 +1,90 @@
-# Apply Progress: OpenAI Cost Fallback — Unit 1A Pure Resolver (corrected)
+# Apply Progress: OpenAI Cost Fallback — Units 1A+1B cumulative
 
-**Change**: `openai-cost-fallback` **Slice**: Unit 1A (1A.1–1A.4) **Branch**: `fix/issue-27-openai-cost-fallback`
+**Change**: `openai-cost-fallback` **Slice**: Unit 1B Store Identity (1B.1–1B.2) **Branch**: `fix/issue-27-openai-cost-fallback-1b`
 **Chain**: stacked-to-main, auto-chain **Date**: 2026-08-24
-**Correction**: `sha256:92b4e9ef834ea9949608bc15b85483db8910b0731322562bb9d8142e4208d31f`
-**Parent**: `sha256:dfa51ba40dffcf3d9fb139f7051debb0f5e81f1228465eaa1e150e0e17c1f87c`
+**Parent attempt**: `sha256:e9564ff2271793b4abfe4450bc0764408a207cffd0e3e589dcac93c5f81f9e8c` (parent settles)
+**Base**: `2f25084e271a0b7d78d6e6ab4947e20aea23bf4b` (Unit 1A merged)
+**Correction lineage**: `92b4e9ef834ea9949608bc15b85483db8910b0731322562bb9d8142e4208d31f` → `e9564ff2` (bounded Unit1B correction)
 
 ## Completed
 - [x] 1A.1 RED `test/cost-fallback.test.ts` — gates, reported wins, /1M reasoning/cache, trim+lower exact, suffix miss, safe-zero, source
 - [x] 1A.2 GREEN `types.ts` — FinitePrice, MonetarySource, ResolvedCost, MoneyRow, MessageUsage.source, UsageMessage.providerID/modelID
 - [x] 1A.3 GREEN `pricing.ts` — pricingKey, selectFiniteNonTier, estimateCost, getPricing/setPricing/clearPricing (pure, no model.list)
-- [x] 1A.4 GREEN `math.ts` — resolveCost, usageOf source (reported wins, billable, exact key, /1M, never throw)
+- [x] 1A.4 GREEN `math.ts` — resolveCost, usageOf source (reported wins, /1M, exact key, never throw)
+- [x] 1B.1 RED composite per-message authority: M1.10+M2.05+M3.04 refill M2.02 M3 absent→.16 repeat→.16 mixed sums idempotency
+- [x] 1B.2 GREEN `store.ts` — rememberCosts, sessionCostIdentity, observedSessionUsage Σ identity, remove/forget clean identity
 
-## Pending (not in 1A)
-- [ ] 1B store identity (rememberCosts, sessionCostIdentity, observedSessionUsage) — 1B.1/1B.2
+## Pending (not in 1A/1B)
 - [ ] 2 adapter+reconcile (loadPricing model.list one in-flight) — 2.1/2.2
 - [ ] 3 project tombstones (readDeletedSessionIDs, sumProjectSessions) — 3.1/3.2
 - [ ] 4 deleted resolveEntry + docs — 4.1/4.2
 
-## Files Changed (1A slice)
-- `types.ts` modified — monetary types
-- `pricing.ts` created — pure seam, injectable map
-- `math.ts` modified — resolveCost gates + usageOf source
-- `test/cost-fallback.test.ts` created — concise 1A suite (data-driven)
-- `tasks.md` modified — split 1→1A/1B
-- `apply-progress.md` modified — this file
+## Files Changed (1B slice only)
+- `src/tokenmeter/store.ts` modified — sessionCostIdentity (now private), rememberCosts, observedSessionUsage identity sum + token high-water, remove/forget clean; header fixed (tokens high-water vs cost identity), duplication removed via upsertCostIdentity helper with centralized empty-ID guard
+- `test/cost-fallback.test.ts` modified — concise 1B suite (composite, idempotency, reported>estimated, token high-water, remove/forget) — asserts via public behavior/cleanup only, no internal mutation
+- `openspec/changes/openai-cost-fallback/tasks.md` modified — mark 1B.1/1B.2 done
+- `openspec/changes/openai-cost-fallback/apply-progress.md` modified — this file (cumulative) + correction evidence
 - Pre-slice docs excluded: proposal/spec/design/exploration (planning, not slice)
 
-## Diff Accounting (post-format, slice only)
-- `math.ts` 70 (69+1) + `types.ts` 15 + `pricing.ts` 75 + `test` 119 + `tasks.md` 51 + `apply-progress.md` 65 = **395 ≤400**
-- Prod 160 + test 119 + docs 116 = 395; hardening +5 (negative guard + dedupe + test) keeps cap; prior failure 966 corrected
+## Diff Accounting (post-format, 1B slice only)
+- `store.ts` 93+17 + `test` 93+1 + `tasks.md` 3+3 + `apply-progress.md` 60+35 = **305 ≤400** (exact post-format recount)
+- Prod 110 + test 94 + docs 101 = 305; pure store seam, no SDK wiring; prior 1A 395 preserved on main
 
-## TDD Evidence
-- 1A.1: RED pricing missing→fail, GREEN 2 tests pass, triangulate gates/report/trim/suffix/safe-zero/selector, helpers P10/T100/RC
-- 1A.2: types RED→GREEN single type, clean
-- 1A.3: pricing RED→GREEN key trim-lower vs suffix, selector first finite vs tier + negative >=0 guard, pure no network
-- 1A.4: math RED→GREEN formula reasoning+cache, reported wins, safe-zero + negative est guard (est<=0), never throw
-- Summary: 2 tests, 25 expects; `bun test` 271 pass with slice (254 pre); typecheck+build pass
+## TDD Cycle Evidence
+
+| Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
+|------|-----------|-------|------------|-----|-------|-------------|----------|
+| 1A.1 | `test/cost-fallback.test.ts` | Unit | ✅ 269/269 | ✅ missing pricing→fail | ✅ 2 pass | ✅ gates/report/trim/suffix/safe-zero/selector | ✅ mk helpers P10/T100/RC |
+| 1A.2 | `types.ts` | Unit | N/A new | ✅ Written | ✅ Pass | ➖ Single types | ✅ Clean re-export |
+| 1A.3 | `pricing.ts` | Unit | N/A new | ✅ Written | ✅ Pass | ✅ key+selector negative guard | ✅ isFiniteNumber >=0 |
+| 1A.4 | `math.ts` | Unit | ✅ 269/269 | ✅ Written | ✅ Pass | ✅ reasoning/cache formula | ➖ None needed |
+| 1B.1 | `test/cost-fallback.test.ts` | Unit | ✅ 269/269 | ✅ `rememberCosts` not found | ✅ 4 pass composite | ✅ idempotency+mixed+repeat archival | ✅ mk helper |
+| 1B.2 | `src/tokenmeter/store.ts` | Unit | ✅ 269/269 | ✅ observed cost high-water fail (0.01 vs 0.03) | ✅ 273 pass | ✅ reported>estimated, zero-guard, token high-water, remove/forget | ✅ upsertCostIdentity helper (centralized empty-ID, preserves reported>estimated + non-zero-over-zero) |
+
+### Test Summary
+- **Total tests written**: 4 (2×1A, 2×1B) — 40 expects in cost-fallback (25×1A +15×1B)
+- **Total tests passing**: 273 across 10 files (269 pre +4 cost-fallback) — 8261 expects
+- **Layers used**: Unit (4), Integration (0), E2E (0)
+- **Approval tests**: None — new seam, no refactoring
+- **Pure functions created**: rememberCosts, syncIdentityFromMap, upsertCostIdentity (private helper)
 
 ## Work Unit Evidence
-- Focused: `bun test test/cost-fallback.test.ts` → 2 pass, 0 fail, 25 expects [data-driven safe-zero + negative-price loop]
-- Runtime: N/A pure seam (no host SDK/DB) — `bun run typecheck` pass, `bun run build` pass
-- Rollback: `types.ts` `pricing.ts` `math.ts` `test/cost-fallback.test.ts` — delete reverts to reported-only; store untouched
-- Normalization: `biome format --write` on 4 TS/test files (no diff after), `biome check` 0 errors on slice (pricing re-exports canonical types)
+
+| Evidence | Required value |
+|---|---|
+| Focused test command and exact result | `bun test ./test/cost-fallback.test.ts` → 4 pass, 0 fail, 40 expects |
+| Runtime harness command/scenario and exact result | N/A pure store seam (no host SDK/DB) — `bun run typecheck` pass, `bun run build` pass, full `bun test` 273 pass |
+| Rollback boundary | `src/tokenmeter/store.ts` `test/cost-fallback.test.ts` — delete reverts cost to high-water max; tokens untouched; identity map removed |
+
+- Normalization: `biome format --write` on 2 TS/test files (store + test) no diff after, `biome check` 0 errors on slice
+- Strict TDD RED→GREEN verified: 1B.1 fail `rememberCosts not found`, 1B.2 fail cost 0.01 vs 0.03 high-water → both green after store identity
+- Correction (bounded) 2026-08-24 `e9564ff2`: header fixed (tokens high-water vs cost identity); duplication removed via single private `upsertCostIdentity` helper (reported>estimated + zero-guard, centralized `!id` guard, no broader scope); `sessionCostIdentity` made private after CodeGraph confirms zero production callers (grep `src/` only internal; tests already use public `rememberCosts`/`observedSessionUsage`/`removeMessageUsage`/`forgetSession` cleanup, no accessor added); timing unchanged
 
 ## Deviations
-None for 1A. Store identity, alias guessing, model.list, costParts deferred to 1B+ per correction.
+None for 1B. Reuses Unit1A canonical types/pure resolver; no duplicate monetary types; no SDK model.list/loadPricing/reconcile (Unit2), no Project/tombstones (Unit3), no deleted/docs (Unit4). Zero-cost guard (`incoming.cost===0 && existing.cost!==0 → keep`) preserves compaction high-water for reported costs while allowing lower reported to replace estimate.
 
 ## Issues Found
-Gate failure corrected: 966→390 by reverting store identity (169 lines) and data-driven test compaction (no duplicated matrices).
-Hardening: negative price guard (`isFiniteNumber >=0` + `est<=0` in resolveCost, deduped MonetarySource/ResolvedCost/MoneyRow re-exports) +1 negative-price assertion; candidate stays bounded.
+- Harness compaction cost high-water (0.03) failed under identity sum (0.01) because same-ID zero overwrote non-zero. Fixed with zero-guard: reported non-zero never overwritten by zero, preserving historical spend while still allowing estimated→reported lower replacement. Full suite now 273 pass.
 
 ## Workload / PR Boundary
-- Mode: stacked PR slice correction `92b4e9...` — Unit 1A pure resolver, ends before store/adapter/project/deleted
-- Budget: 396 ≤400 (hardened), pre-slice docs excluded
-- Next: Unit 1B store identity (dependent)
+- Mode: stacked PR slice `e9564ff2` (bounded correction on `a89477...`) — Unit 1B Store Identity, autonomous slice
+- Boundary: starts after 1A pure resolver (2f25084), ends before adapter/project/deleted; no SDK wiring, timing unchanged
+- Budget: 305 ≤400 (hard cap), docs excluded — exact post-format recount 249+56=305
+- Next: Unit 2 adapter+reconcile (dependent)
 
 ## Status
-4/11 tasks complete (1A.1–1A.4), 7 pending. Pure resolver proven: gates, reported authority, /1M with reasoning/cache, exact trim+lower/no suffix, safe-zero, selector, source all green; no store side effects.
+6/11 tasks complete (1A.1–1A.4, 1B.1–1B.2), 5 pending. Store monetary identity proven: per-message upsert, reported>estimated even if lower, missing estimated archives once, repeat no double, observed cost Σ identity while tokens keep maxComponents high-water, remove/forget clean identity.
 
 ## Next
-Unit 1B — Store Identity (dependent PR, same chain). sdd-verify not yet.
+Unit 2 — Adapter+Reconcile (dependent PR, same chain). sdd-verify not yet.
+
+## Correction Evidence
+
+- **Finding 1 — stale header**: fixed `store.ts` module header to state token components use per-field high-water (maxComponents semantics) while monetary cost uses per-message identity Σ; observedSessionUsage doc already correct, header now matches.
+- **Finding 2 — duplication**: extracted single cohesive private helper `upsertCostIdentity(identity, id, incoming)` preserving `reported>estimated` and `non-zero-over-zero`; both `rememberCosts` and `syncIdentityFromMap` now delegate to it (net -6 lines duplicated logic, +11 helper, behavior identical).
+- **Finding 3 — visibility**: `sessionCostIdentity` made `private` (`const` not `export`) after CodeGraph + `grep src/` confirms zero production importers (only `store.ts` internal + `test` via public API). Tests already assert via public `rememberCosts`/`observedSessionUsage`/`removeMessageUsage`/`forgetSession` cleanup; no test-only accessor added. If production had depended, would have left export and reported reason.
+- **Finding 4 — empty-ID guard**: centralized `if (!id) return` inside `upsertCostIdentity`; `rememberCosts` no longer duplicates `if (!id) continue`, `syncIdentityFromMap` now gains correct guard via helper (helper-scoped, no new sessionID guard, no broadened scope).
 
 ## Skill Resolution
 - Loaded: sdd-apply, opencode-plugin, work-unit-commits, chained-pr (stacked-to-main), code-simplification, debugging-and-error-recovery
+- skill_resolution=paths-injected
