@@ -48,6 +48,7 @@
 
 import { buildGroups } from "./groups"
 import { usageOf } from "./math"
+import { loadPricing } from "./pricing"
 import {
   clearRehydrate,
   getStatus,
@@ -77,8 +78,10 @@ export type ReconcileApi = {
       children(params: { sessionID: string }): Promise<{ data?: SessionInfo[] }>
       get(params: { sessionID: string }): Promise<{ data?: SessionInfo }>
     }
+    model?: { list(params?: unknown): Promise<unknown> }
   }
   state: {
+    path?: { directory?: string }
     session: {
       status(sessionID: string): { type?: SessionStatusType } | undefined
     }
@@ -146,6 +149,9 @@ export async function reconcile(
   force = false,
 ): Promise<void> {
   const seq = ++reconcileSeq
+  try {
+    await loadPricing(api as unknown as Parameters<typeof loadPricing>[0])
+  } catch {}
   let ids: string[]
   try {
     ids = await discoverTree(api, rootID)

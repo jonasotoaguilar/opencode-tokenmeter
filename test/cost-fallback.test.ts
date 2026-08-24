@@ -3,17 +3,23 @@ import { resolveCost, usageOf } from "../src/tokenmeter/math"
 import {
   clearPricing,
   estimateCost,
+  getPricing,
+  loadPricing,
   pricingKey,
   selectFiniteNonTier,
   setPricing,
 } from "../src/tokenmeter/pricing"
+import { activateRoot, disposeReconcile } from "../src/tokenmeter/reconcile"
 import {
   forgetSession,
   observedSessionUsage,
   rememberCosts,
   removeMessageUsage,
+  setSnapshot,
+  snapshot,
   usageMap,
 } from "../src/tokenmeter/store"
+import { purgeTreeCache } from "../src/tokenmeter/tree"
 import type { FinitePrice, MessageUsage } from "../src/tokenmeter/types"
 
 const P10: FinitePrice = {
@@ -207,5 +213,222 @@ describe("Unit 1B store identity", () => {
     expect(
       rememberCosts(sid, new Map([["m1", mk(0.1, "reported")]])),
     ).toBeCloseTo(0.1)
+  })
+})
+
+const pricingApi = (list: () => Promise<unknown>) => ({
+  state: { path: { directory: "/tmp/test" } },
+  client: { model: { list } },
+})
+
+describe("Unit 2 adapter+reconcile", () => {
+  beforeEach(() => {
+    clearPricing()
+    setSnapshot(null)
+    purgeTreeCache()
+    disposeReconcile()
+  })
+  afterEach(() => {
+    clearPricing()
+    setSnapshot(null)
+    purgeTreeCache()
+    disposeReconcile()
+  })
+  test("success atomically replaces map; failure/offline/throw retains last-known-good; malformed omitted", async () => {
+    setPricing(new Map([["openai:gpt-4o", P10]]))
+    await loadPricing(
+      pricingApi(async () => ({
+        data: [
+          {
+            providerID: "openai",
+            id: "gpt-4o-mini",
+            cost: [{ input: 1, output: 2, cache: { read: 3, write: 4 } }],
+          },
+        ],
+      })),
+    )
+    expect(getPricing("openai:gpt-4o")).toBeUndefined()
+    expect(getPricing("openai:gpt-4o-mini")).toEqual({
+      input: 1,
+      output: 2,
+      cache: { read: 3, write: 4 },
+    })
+    // malformed omitted but valid kept; atomic replace
+    await loadPricing(
+      pricingApi(async () => ({
+        data: [
+          {
+            providerID: "openai",
+            id: " gpt-4o ",
+            cost: [{ input: 5, output: 6, cache: { read: 7, write: 8 } }],
+          },
+          {
+            providerID: "openai",
+            id: "bad-tier",
+            cost: [
+              {
+                tier: { type: "context", size: 1 },
+                input: 1,
+                output: 1,
+                cache: { read: 1, write: 1 },
+              },
+            ],
+          },
+          {
+            providerID: "openai",
+            id: "bad-nan",
+            cost: [{ input: NaN, output: 1, cache: { read: 1, write: 1 } }],
+          },
+          {
+            providerID: "",
+            id: "gpt-4o",
+            cost: [{ input: 1, output: 1, cache: { read: 1, write: 1 } }],
+          },
+          {
+            providerID: "openai",
+            id: "",
+            cost: [{ input: 1, output: 1, cache: { read: 1, write: 1 } }],
+          },
+          {
+            id: "gpt-4o",
+            cost: [{ input: 1, output: 1, cache: { read: 1, write: 1 } }],
+          },
+        ],
+      })),
+    )
+    expect(getPricing("openai:gpt-4o")).toEqual({
+      input: 5,
+      output: 6,
+      cache: { read: 7, write: 8 },
+    })
+    expect(getPricing("openai:bad-tier")).toBeUndefined()
+    expect(getPricing("openai:bad-nan")).toBeUndefined()
+    // failure retains last-known-good, no partial mutation, never throws
+    const good = getPricing("openai:gpt-4o")
+    await expect(
+      loadPricing(
+        pricingApi(async () => {
+          throw new Error("offline")
+        }),
+      ),
+    ).resolves.toBeUndefined()
+    expect(getPricing("openai:gpt-4o")).toEqual(good)
+    await loadPricing(pricingApi(async () => ({ data: null })))
+    expect(getPricing("openai:gpt-4o")).toEqual(good)
+    await loadPricing(pricingApi(async () => ({})))
+    expect(getPricing("openai:gpt-4o")).toEqual(good)
+  })
+  test("one-in-flight coalesced refresh and poll-delay lifecycle retains map", async () => {
+    let calls = 0
+    const slow = pricingApi(
+      () =>
+        new Promise((res) =>
+          setTimeout(() => {
+            calls++
+            res({
+              data: [
+                {
+                  providerID: "openai",
+                  id: "gpt-4o",
+                  cost: [{ input: 9, output: 9, cache: { read: 9, write: 9 } }],
+                },
+              ],
+            })
+          }, 40),
+        ),
+    )
+    const p1 = loadPricing(slow)
+    const p2 = loadPricing(slow)
+    await Promise.all([p1, p2])
+    expect(calls).toBe(1)
+    expect(getPricing("openai:gpt-4o")).toEqual({
+      input: 9,
+      output: 9,
+      cache: { read: 9, write: 9 },
+    })
+    // poll-delay: immediate failure cooldown keeps last-known-good
+    clearPricing()
+    setPricing(new Map([["openai:gpt-4o", P10]]))
+    let failCalls = 0
+    const failApi = pricingApi(async () => {
+      failCalls++
+      throw new Error("offline")
+    })
+    await loadPricing(failApi)
+    expect(getPricing("openai:gpt-4o")).toEqual(P10)
+    const before = failCalls
+    await loadPricing(failApi)
+    expect(failCalls).toBe(before)
+    expect(getPricing("openai:gpt-4o")).toEqual(P10)
+  })
+  test("reconcile awaits pricing before publishing estimated cost", async () => {
+    const rootID = "s1-reconcile-cost"
+    forgetSession(rootID)
+    purgeTreeCache()
+    clearPricing()
+    setSnapshot(null)
+    disposeReconcile()
+    const fake = {
+      client: {
+        session: {
+          messages: async ({ sessionID }: { sessionID: string }) => ({
+            data: [
+              {
+                info: {
+                  id: "m1",
+                  sessionID,
+                  role: "assistant",
+                  cost: 0,
+                  providerID: "openai",
+                  modelID: "gpt-4o-mini",
+                  tokens: {
+                    input: 1000,
+                    output: 500,
+                    reasoning: 0,
+                    cache: { read: 0, write: 0 },
+                  },
+                },
+              },
+            ],
+          }),
+          children: async () => ({ data: [] }),
+          get: async () => ({ data: undefined }),
+        },
+        model: {
+          list: async () => ({
+            data: [
+              {
+                providerID: "openai",
+                id: "gpt-4o-mini",
+                cost: [{ input: 5, output: 15, cache: { read: 0, write: 0 } }],
+              },
+            ],
+          }),
+        },
+      },
+      state: {
+        path: { directory: "/tmp/test" },
+        session: { status: () => undefined },
+      },
+    }
+    // use activateRoot so currentRoot is set for publish guard
+    activateRoot(fake as unknown as Parameters<typeof activateRoot>[0], rootID)
+    await new Promise<void>((resolve) => {
+      const start = Date.now()
+      const check = () => {
+        if (snapshot()?.rootID === rootID) resolve()
+        else if (Date.now() - start > 1000) resolve()
+        else setTimeout(check, 10)
+      }
+      check()
+    })
+    const snap = snapshot()
+    expect(snap).not.toBeNull()
+    expect(snap?.cost).toBeCloseTo(0.0125)
+    forgetSession(rootID)
+    purgeTreeCache()
+    disposeReconcile()
+    clearPricing()
+    setSnapshot(null)
   })
 })

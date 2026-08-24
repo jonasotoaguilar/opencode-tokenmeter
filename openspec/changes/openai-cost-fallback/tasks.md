@@ -35,10 +35,10 @@ Decision needed before apply: No — stacked-to-main chosen. Slice 1A first.
 - [x] 1B.1 RED composite: M1.10+M2.05+M3.04 refill M2.02 M3 absent→.16 repeat→.16 converted replaces self missing archives once
 - [x] 1B.2 GREEN `src/tokenmeter/store.ts` `rememberCosts` `sessionCostIdentity` `observedSessionUsage` Σ identity `forgetSession`
 
-## Phase 2: Adapter + Reconcile (pending)
+## Phase 2: Adapter + Reconcile (Unit 2 — current)
 
-- [ ] 2.1 RED list throw/offline keeps map, success replaces
-- [ ] 2.2 GREEN `loadPricing` `model.list` one in-flight `PROJECT_POLL_DELAY` `reconcile.ts` awaits
+- [x] 2.1 RED list throw/offline keeps map, success replaces; malformed omitted; one-in-flight/coalesced + poll-delay
+- [x] 2.2 GREEN `loadPricing` `model.list` one in-flight `PROJECT_POLL_DELAY` `reconcile.ts` awaits
 
 ## Phase 3: Live Project (pending)
 
