@@ -1,9 +1,9 @@
-# Apply Progress: OpenAI Cost Fallback — Units 1A+1B+2 cumulative
+# Apply Progress: OpenAI Cost Fallback — Units 1A+1B+2+3 cumulative
 
-**Change**: `openai-cost-fallback` **Slice**: Unit 2 Adapter+Reconcile (2.1–2.2) **Branch**: `fix/issue-27-openai-cost-fallback-2`
+**Change**: `openai-cost-fallback` **Slice**: Unit 3 Live Project + Tombstones (3.1–3.2) **Branch**: `fix/issue-27-openai-cost-fallback-3`
 **Chain**: stacked-to-main, auto-chain **Date**: 2026-08-24
-**Parent attempt**: `sha256:337bb4fc54c1fe526e9ee0687d9eed3408276e196b4c746188ae978aa10e3a3e` (parent settles)
-**Base**: `b67612162153cd0e09ee312b4371c108058c2b98` (Unit1B merged @ b676121)
+**Parent attempt**: `sha256:ac51b4dcb3f74f69d01ba0d59b824fdb2dbab1cc749a19c06827a1a77ffa8165` (parent settles)
+**Base**: `efd52be5474e886a384db58fcbd2814fdc045135` (Unit2 merged origin/main)
 **Correction lineage**: `92b4e9ef834ea9949608bc15b85483db8910b0731322562bb9d8142e4208d31f` → `e9564ff2` → `remed-0.03`
 
 ## Completed
@@ -14,29 +14,33 @@
 - [x] 1B.1 RED composite per-message authority: M1.10+M2.05+M3.04 refill M2.02 M3 absent→.16 repeat→.16 mixed sums idempotency
 - [x] 1B.2 GREEN `store.ts` — rememberCosts, sessionCostIdentity, observedSessionUsage Σ identity, remove/forget clean identity
 - [x] 2.1 RED pricing list: success atomically replaces cached exact map; failure/offline/throw retains last-known-good; malformed tier/NaN/missing omitted; one-in-flight coalesced + poll-delay cooldown retains map
-- [x] 2.2 GREEN `pricing.ts` `loadPricing` around `client.model.list({location:{directory}})` one in-flight + cooldown ≥PROJECT_POLL_DELAY (2000), atomic replace via new Map, never throw; `reconcile.ts` awaits `loadPricing` before `discoverTree`/`loadSessionUsage` (coalesced, fail-closed, lifecycle via existing poll seam, no direct HTTP/static prices)
+- [x] 2.2 GREEN `pricing.ts` `loadPricing` around `client.model.list({location:{directory}})` one in-flight + cooldown ≥2000, atomic replace via new Map, never throw; `reconcile.ts` awaits `loadPricing` before discoverTree (coalesced, fail-closed)
+- [x] 3.1 RED tombstone scope `(sessionX,projectA)` exclude before sum; B remains eligible; reported+estimated via session authority
+- [x] 3.2 GREEN `db.ts` `readDeletedSessionIDs` scoped `(session_id,project_id)` + `math.ts` `sumProjectSessions` exclude+resolveCost + `project.ts` `refreshProject` awaits `loadPricing` then `readDeletedSessionIDs` before sum
 
-## Pending (not in 1A/1B/2)
-- [ ] 3 project+tombstones (readDeletedSessionIDs, sumProjectSessions) — 3.1/3.2
-- [ ] 4 deleted resolveEntry + docs — 4.1/4.2
+## Pending (not in 1A/1B/2/3)
+- [ ] 4.1 RED `resolveEntry` money
+- [ ] 4.2 GREEN `resolveEntry`+`tokenmeter.tsx`+ADR docs
 
 ## CI Remediation — Unit 2 deterministic coverage failure (2026-08-24)
 - **CI**: run 32758190541 job 97530496958 `Unit tests with coverage` 260 pass/1 fail `test/cost-fallback.test.ts:414` expected 0.0125 received 0.03
-- **Repro**: `bun test test/harness.test.ts test/cost-fallback.test.ts` → 75 pass/1 fail (same 0.03); `bun test test/cost-fallback.test.ts` alone → 7 pass; `bun run coverage` (9 files) passed locally due to alphabetical order masking
-- **Root cause**: test isolation — global `snapshot` leaked across files; `reconcile awaits pricing` polled `snapshot()?.cost` (any) not its `rootID`; harness left `snapshot.cost=0.03`, wait resolved on stale snapshot before new `loadPricing` published `0.0125` (1000*5+500*15/1e6). Prod `loadPricing`→`reconcile` correct; pricing globals already isolated via `clearPricing`.
-- **Correction**: test-only minimal fix — import `setSnapshot`/`disposeReconcile`/`purgeTreeCache`, clear `snapshot`/`tree`/`reconcile` in `beforeEach`/`afterEach` and before `activateRoot`, wait for `snapshot()?.rootID===rootID`. No assertion weakened, no sleeps, no prod change, no Unit3/4.
-- **Evidence**: after fix harness+cost → 76 pass; `bun test ./test/cost-fallback.test.ts` → 7 pass; `bun run coverage` → 261 pass; `bun test` → 276 pass; typecheck/build pass
+- **Repro**: `bun test test/harness.test.ts test/cost-fallback.test.ts` → 75 pass/1 fail (same 0.03); `bun test test/cost-fallback.test.ts` alone → 7 pass; `bun run coverage` (9 files) passed due to alphabetical order masking
+- **Root cause**: global `snapshot` leaked across files; `reconcile awaits pricing` polled `snapshot()?.cost` not `rootID`; harness left `snapshot.cost=0.03`, wait resolved stale before new `loadPricing` published `0.0125`.
+- **Correction**: test-only — clear `snapshot`/`tree`/`reconcile` before/after and before `activateRoot`, wait for `snapshot()?.rootID===rootID`. No prod change.
+- **Evidence**: harness+cost 76 pass; `bun test ./test/cost-fallback.test.ts` 7 pass; `bun run coverage` 261 pass; `bun test` 276 pass; typecheck/build pass
 
-## Files Changed (Unit 2 slice only)
-- `src/tokenmeter/pricing.ts` modified — `loadPricing` SDK adapter (`client.model.list` / `ModelV2Info.cost`), one in-flight promise, success atomically replaces via `pricingKey`+`selectFiniteNonTier`, failure/offline/throw retains last-known-good, malformed omitted, cooldown ≥2000 (PROJECT_POLL_DELAY), never throw, `clearPricing` resets cooldown/inflight, `PricingApi` permissive optional shape
-- `src/tokenmeter/reconcile.ts` modified — imports `loadPricing`, extends `ReconcileApi` with optional `model.list` + `path.directory`, `reconcile()` awaits `loadPricing(api)` before `discoverTree` (coalesced, fail-contained), preserves Unit1B identity via `usageOf`
-- `test/cost-fallback.test.ts` modified — Unit 2 suite + isolation fix (`setSnapshot` + `rootID` guard, clear `snapshot`/`tree`/`reconcile` before/after; keeps 0.0125 assertion) — `success replaces/malformed omitted/failure retains`, `one-in-flight coalesced + poll-delay`, `reconcile awaits pricing` via `activateRoot`
-- `openspec/changes/openai-cost-fallback/tasks.md` modified — mark 2.1/2.2 done
+## Files Changed (Unit 3 slice only)
+- `src/tokenmeter/db.ts` modified — `readDeletedSessionIDs(dbPath,projectID)` `SELECT session_id FROM tombstones WHERE project_id=?` PK `(session_id,project_id)` scoped; fail/null→empty Set; uses `withDb`; no schema migration
+- `src/tokenmeter/types.ts` modified — `ProjectSessionLike.model?:{id,providerID,variant?}` mirrors SDK `GlobalSession.model` (`types.gen.d.ts:1790` `ModelRef:2387`); narrow local type, no SDK import
+- `src/tokenmeter/math.ts` modified — `sumProjectSessions(projectID,sessions,exclude?)` now `exclude?.has(id)` BEFORE tokens/cost, dedup via `seen`, then `resolveCost({cost, providerID:model.providerID, modelID:model.id, tokens})` per row; reported wins, else OpenAI estimated via `getPricing`; preserves existing deduplication and `context` formula
+- `src/tokenmeter/project.ts` modified — `ProjectApi.client.model.list?` optional; `refreshProject` now `await loadPricing(api)` (fail-contained) then `readDeletedSessionIDs(dbPath,projectID)` then `sumProjectSessions(...,exclude)` before `combineProjectUsage`; preserves fail-closed cap, hint, error, polling
+- `test/cost-fallback.test.ts` modified — Unit 3 suite `tombstone scope (sessionX,projectA) exclude before sum; B remains eligible; reported+estimated` via temp DB `projectDbPath` + `recordDeletedSession` + `readDeletedSessionIDs` + `sumProjectSessions` pure + `refreshProject` live+deleted once; covers scoped exclusion, global-not, estimated cost, reported wins, non-OpenAI zero
+- `openspec/changes/openai-cost-fallback/tasks.md` modified — mark 3.1/3.2 done; Unit4 pending
 - `openspec/changes/openai-cost-fallback/apply-progress.md` modified — this file (cumulative) + TDD/work-unit evidence
 
-## Diff Accounting (post-format, Unit 2 slice only)
-- `pricing.ts` 60+0 + `reconcile.ts` 6+0 + `test` 223+0 + `tasks.md` 3+3 + `apply-progress.md` 52+45 = **344+48=392 ≤400** (exact `git diff origin/main --numstat` 52+45, 3+3, 60, 6, 223; prod 66 + test 223 + docs 103 =392)
-- Pure adapter+orchestrator + test isolation; no Project/tombstones/deleted/UI (Unit3/4 untouched); prior 1A 395 + 1B 305 on main (stacked)
+## Diff Accounting (post-format, Unit 3 slice only)
+- `db.ts` 21+0 + `math.ts` 20+1 + `project.ts` 16+6 + `types.ts` 3+1 + `test` 152+1 + `tasks.md` 3+3 + `apply-progress.md` 48+41 = **263+53=316 ≤400** (exact `git diff origin/main --numstat` 48+41, 3+3, 21+0, 20+1, 16+6, 3+1, 152+1; prod 60+test 152+docs 95=316 inc. correction; prior 1A 395+1B 305 on main stacked)
+- Pure read seam + pure sum + orchestrator await + scoped SQL; no deleted `resolveEntry`/`tokenmeter.tsx`/`docs`/migration (Unit4 untouched)
 - Untracked planning docs excluded: `proposal.md`, `spec.md`, `design.md`, `exploration.md`, `specs/` (phase inputs)
 
 ## TDD Cycle Evidence
@@ -52,45 +56,48 @@
 | 2.1 | `test/cost-fallback.test.ts` | Unit | ✅ 273/273 | ✅ `loadPricing` not found + `snapshot null` | ✅ 3 pass (success/failure/malformed, coalesced, reconcile await) | ✅ atomic replace + failure retain + malformed omitted + coalesced + cooldown | ✅ pricingApi helper, activateRoot wait helper |
 | 2.2 | `src/tokenmeter/pricing.ts` + `src/tokenmeter/reconcile.ts` | Unit | ✅ 273/273 | ✅ pricing model.list throws retains / snapshot null | ✅ 276 pass (adapter + reconcile) | ✅ malformed tier/NaN/missing + poll-delay + one-in-flight + reconcile estimated | ✅ permissive PricingApi, cooldown matches PROJECT_POLL_DELAY, no throw |
 | 2.2-remed | `test/cost-fallback.test.ts` | Unit | ✅ 260/1 fail → | ✅ repro 75/1 harness+cost isolates | ✅ 76 pass harness+cost, 261 cov, 276 full | ✅ stale 0.03 → `rootID` guard | ✅ `setSnapshot(null)` + `rootID` |
+| 3.1 | `test/cost-fallback.test.ts` | Unit | ✅ 276/276 | ✅ `readDeletedSessionIDs` not found | ✅ 8 pass cost-fallback (was 7) | ✅ scoped A vs B + before-sum tokens/cost + reported+estimated + non-OpenAI zero + refresh live+deleted once | ✅ temp DB helper, pricing P_EST, liveA/liveB fixtures |
+| 3.2 | `src/tokenmeter/db.ts` + `math.ts` + `project.ts` | Unit | ✅ 276/276 | ✅ `sumProjectSessions` included tombstoned cost 0.0125 (not excluded) + B still eligible fail | ✅ 277 pass full, 262 cov | ✅ exclude before sum (sessions/input/context) + scoped SQL + `loadPricing` await + reported wins | ✅ `exclude?` optional param, `model?` narrow type, `readDeletedSessionIDs` fail-contained, `loadPricing` fail-contained |
 
 ### Test Summary
-- **Total tests written**: 7 (4×1A/1B +3×Unit2) — 56 expects in cost-fallback (40×1A/1B +16×Unit2)
-- **Total tests passing**: 276 across 10 files (273 pre +3 Unit2) — 8277 expects
-- **Layers used**: Unit (7), Integration (0 wrapped via activateRoot harness for reconcile), E2E (0)
+- **Total tests written**: 8 (4×1A/1B +3×Unit2 +1×Unit3) — 71 expects in cost-fallback (40×1A/1B +16×Unit2 +15×Unit3)
+- **Total tests passing**: 277 across 10 files (276 pre +1 Unit3) — 8292 expects; coverage 262 pass 8223 expects
+- **Layers used**: Unit (8), Integration (0 wrapped via `refreshProject` harness with temp SQLite), E2E (0)
 - **Approval tests**: None — new seam, no refactoring
-- **Pure functions created**: rememberCosts, syncIdentityFromMap, upsertCostIdentity, loadPricing (adapter, minimal impurity via SDK)
+- **Pure functions created**: rememberCosts, syncIdentityFromMap, upsertCostIdentity, loadPricing, readDeletedSessionIDs, sumProjectSessions (enhanced pure with exclude+resolveCost)
 
 ## Work Unit Evidence
 
 | Evidence | Required value |
 |---|---|
-| Focused test command and exact result | `bun test ./test/cost-fallback.test.ts` → 7 pass, 0 fail, 56 expects [~250ms] |
-| Runtime harness command/scenario and exact result | Full `bun test` → 276 pass, 8277 expects [~18s]; `bun run coverage` → 261 pass, 8208 expects [~19s]; harness+cost 76 pass (was 75/1 before fix); SDK `Model.list` verified via types.gen.d.ts:4012/4024 + sdk.gen.d.ts:1786 |
-| Rollback boundary | `test/cost-fallback.test.ts` isolation only — revert `setSnapshot`/`rootID` guard restores old `snapshot()?.cost` poll; prod `pricing.ts`/`reconcile.ts` untouched; tokens/identity untouched |
+| Focused test command and exact result | `bun test ./test/cost-fallback.test.ts` → 8 pass, 0 fail, 71 expects [~260ms] |
+| Runtime harness command/scenario and exact result | Full `bun test` → 277 pass, 8292 expects [~19s]; `bun run coverage` → 262 pass, 8223 expects [~19s]; harness+cost 76 pass retained; `refreshProject` with temp SQLite `recordDeletedSession` + `readDeletedSessionIDs` + `loadPricing` verified |
+| Rollback boundary | `src/tokenmeter/db.ts` `readDeletedSessionIDs`, `src/tokenmeter/types.ts` `model?`, `src/tokenmeter/math.ts` `sumProjectSessions` exclude+resolveCost, `src/tokenmeter/project.ts` `loadPricing`+`exclude`+`sum` — revert restores raw cost sum and no tombstone filtering; `test/cost-fallback.test.ts` Unit3 suite only; tokens/identity/reconcile untouched; no `resolveEntry`/`tokenmeter.tsx`/`docs` |
 
-- Normalization: `biome format --write` on pricing/reconcile/test (no diff after), `biome check` 0 errors on slice
-- Strict TDD RED→GREEN verified: 2.1 fail `loadPricing not found` + `snapshot null`, 2.2 green after adapter+reconcile (coalesced calls=1, poll-delay retains, atomic replace)
-- SDK verify: `ModelV2Info.cost` is `Array<ModelCost>` where `ModelCost { input, output, cache:{read,write}, tier? }` (types.gen.d.ts:4012), `ModelV2Info { providerID, id, cost }` (4024), `V2ModelListResponses {data: ModelV2Info[]}` (10302), `Model.list({location:{directory,workspace}})` (sdk.gen.d.ts:1786) — pricingKey `providerID:id` trim+lower + selectFiniteNonTier first non-tier finite quartet only
+- Normalization: `biome format --write` on db/math/project/types/test (no diff after), `biome check` 0 errors on slice
+- Strict TDD RED→GREEN verified: 3.1 fail `readDeletedSessionIDs not found`, 3.2 green after `readDeletedSessionIDs` + `sumProjectSessions` exclude+pricing + `refreshProject` await+exclude (B still eligible, A excluded before sum, live+deleted once, reported+estimated)
+- SDK verify: `GlobalSession.model?:{id,providerID,variant?}` (`types.gen.d.ts:1790` `ModelRef:2387`), `ModelCost` (`:4012`), `ModelV2Info` (`:4024`), `V2ModelListResponses` (`:10302`), `Model.list` (`sdk.gen.d.ts:1786`) — pricingKey `${providerID}:${modelID}` trim+lower + selectFiniteNonTier first non-tier only; `sumProjectSessions` resolves via `resolveCost` per row
 
 ## Deviations
-None for 2. Reuses Unit1A canonical types/pure resolver (`pricingKey`/`selectFiniteNonTier` exact, no alias) and Unit1B identity (`rememberCosts` Σ) as-is. No `sumProjectSessions`/`readDeletedSessionIDs`/`resolveEntry`/`tokenmeter.tsx`/`docs` (Units3-4). No new deps, no direct HTTP/fetch, no static prices, no backwards-compat layer, no `config.providers`.
+None for 3. Reuses Unit1A canonical pure resolver (`pricingKey`/`selectFiniteNonTier` exact, no alias) and Unit1B identity (`rememberCosts` Σ) and Unit2 adapter (`loadPricing` one in-flight, cooldown, fail-contained, never throw) as-is. No `resolveEntry`/`tokenmeter.tsx`/`docs/adr` (Unit4). No new deps, no direct HTTP/fetch, no static prices, no speculative migration/compatibility layer, no global session-ID exclusion.
 
 ## Issues Found
-- One-in-flight `p1===p2` false (async wrap) → assert `calls` count + map state, not ref equality.
-- Reconcile guard `currentRoot !== rootID` caused `snapshot null` without `activateRoot`; fixed via `activateRoot` + wait loop.
-- **CI isolation (remediation)**: global `snapshot` leaked `cost=0.03` from harness; loose `snapshot()?.cost` poll resolved stale before new pricing. Fixed test-only via `setSnapshot(null)` + `rootID` guard; no prod change, harness+cost now 76 pass, coverage 261 pass.
+- One-in-flight `p1===p2` false (async wrap) → assert `calls` count + map state, not ref equality (Unit2).
+- Reconcile guard `currentRoot !== rootID` caused `snapshot null` without `activateRoot`; fixed via `activateRoot` + wait loop (Unit2).
+- CI isolation (remediation): global `snapshot` leaked `cost=0.03` from harness; loose `snapshot()?.cost` poll resolved stale before new pricing. Fixed test-only via `setSnapshot(null)` + `rootID` guard (Unit2).
+- No new issues for Unit3; `readDeletedSessionIDs` must be scoped `(session_id,project_id)` not global — verified via `tombstones` PK and `WHERE project_id=?`; `sumProjectSessions` must exclude BEFORE sum (tokens/cost) not after.
 
 ## Workload / PR Boundary
-- Mode: stacked PR slice `sha256:337bb4fc…` — Unit 2 Adapter+Reconcile + remediation, autonomous
-- Boundary: after Unit1B (#48 b676121), before Project/tombstones/deleted; only SDK adapter + reconcile + test isolation (no Project/live sum)
-- Budget: 344+48=392 ≤400 (hard cap), planning docs excluded — prod 66 + test 223 + docs 103 =392
-- Next: Unit 3 Project+tombstones (dependent), Unit 4 Deleted+docs
+- Mode: stacked PR slice `sha256:ac51b4dc…` — Unit 3 Live Project + Tombstones, autonomous
+- Boundary: after Unit2 (#50 efd52be), before Deleted+docs (Unit4); only `readDeletedSessionIDs` + `sumProjectSessions` + `refreshProject` + `ProjectSessionLike.model` (no deleted `resolveEntry`/`tokenmeter.tsx`/docs)
+- Budget: 263+53=316 ≤400 (hard cap), planning docs excluded — prod 60+test 152+docs 95=316 inc. correction (+2+1); prior 1A 395+1B 305 on main stacked
+- Next: Unit 4 Deleted+docs (dependent final PR, same chain). `sdd-verify` not yet (Unit4 pending).
 
 ## Status
-8/11 tasks complete (1A.1–1A.4, 1B.1–1B.2, 2.1–2.2), 3 pending (3.1–3.2, 4.1–4.2). Adapter proven + remediation verified: harness+cost 76 pass, coverage 261 pass, full 276 pass; success atomically replaces, failure retains, coalesced, cooldown, reconcile awaits pricing.
+10/12 tasks complete (1A.1–1A.4, 1B.1–1B.2, 2.1–2.2, 3.1–3.2), 2 pending (4.1, 4.2). Live Project proven: scoped tombstone exclude before sum (A excluded, B eligible, tokens/cost), reported+estimated via `resolveCost` per row, `refreshProject` awaits `loadPricing` then `readDeletedSessionIDs` then `sumProjectSessions` before `combineProjectUsage` (live+deleted once, fail-contained).
 
 ## Next
-Unit 3 — Live Project (dependent PR, same chain). `sdd-verify` not yet (Units3-4 pending).
+Unit 4 — Deleted `resolveEntry` + UI + ADR/docs (dependent final PR, same chain). After Unit4, `sdd-verify` then `sdd-archive`.
 
 ## Skill Resolution
 - Loaded: sdd-apply, opencode-plugin, work-unit-commits, chained-pr (stacked-to-main), code-simplification, debugging-and-error-recovery, source-driven-development, api-and-interface-design

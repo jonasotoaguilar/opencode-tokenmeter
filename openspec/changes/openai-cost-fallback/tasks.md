@@ -40,10 +40,10 @@ Decision needed before apply: No — stacked-to-main chosen. Slice 1A first.
 - [x] 2.1 RED list throw/offline keeps map, success replaces; malformed omitted; one-in-flight/coalesced + poll-delay
 - [x] 2.2 GREEN `loadPricing` `model.list` one in-flight `PROJECT_POLL_DELAY` `reconcile.ts` awaits
 
-## Phase 3: Live Project (pending)
+## Phase 3: Live Project (PR 3 — done)
 
-- [ ] 3.1 RED tombstone scope `(sessionX,projectA)` exclude before sum
-- [ ] 3.2 GREEN `readDeletedSessionIDs` `sumProjectSessions` exclude `refreshProject`
+- [x] 3.1 RED tombstone scope `(sessionX,projectA)` exclude before sum
+- [x] 3.2 GREEN `readDeletedSessionIDs` `sumProjectSessions` exclude `refreshProject`
 
 ## Phase 4: Deleted + Docs (pending)
 

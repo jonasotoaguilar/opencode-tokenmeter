@@ -233,10 +233,16 @@ export function sumMessages(map: Map<string, MessageUsage>): SessionUsage {
  * output + reasoning + cache.read + cache.write` per session (the full
  * formula from the payload's own fields), so the live total always satisfies
  * context >= input + output + reasoning.
+ * Tombstoned sessions (`exclude` contains `session.id` scoped by
+ * `(sessionID, projectID)`) are skipped BEFORE any token/cost summation so
+ * they never contribute live, while the same ID in another project remains
+ * eligible. Per-row cost is resolved through `resolveCost` (reported wins,
+ * else OpenAI estimated via `model` when pricing is present).
  */
 export function sumProjectSessions(
   projectID: string,
   sessions: ProjectSessionLike[],
+  exclude?: ReadonlySet<string>,
 ): ProjectUsage {
   let cost = 0
   let input = 0
@@ -249,6 +255,7 @@ export function sumProjectSessions(
   const seen = new Set<string>()
   for (const session of sessions) {
     if (!session || session.projectID !== projectID) continue
+    if (exclude?.has(session.id)) continue
     // A session must never be counted twice: the list is keyed by sessionID
     // (the ledger is too), so a duplicated payload contributes exactly once.
     if (seen.has(session.id)) continue
@@ -260,7 +267,19 @@ export function sumProjectSessions(
     const reasoningN = num(tokens.reasoning)
     const readN = num(tokens.cache?.read)
     const writeN = num(tokens.cache?.write)
-    cost += num(session.cost)
+    const resolved = resolveCost({
+      cost: num(session.cost),
+      providerID: (session as ProjectSessionLike).model?.providerID,
+      modelID: (session as ProjectSessionLike).model?.id,
+      tokens: {
+        input: inputN,
+        output: outputN,
+        reasoning: reasoningN,
+        cacheRead: readN,
+        cacheWrite: writeN,
+      },
+    })
+    cost += resolved.cost
     input += inputN
     output += outputN
     reasoning += reasoningN

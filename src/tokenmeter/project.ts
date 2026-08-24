@@ -43,8 +43,13 @@
  * debounce timer.
  */
 import { createSignal } from "solid-js"
-import { projectDbPath, readDeletedAggregate } from "./db"
+import {
+  projectDbPath,
+  readDeletedAggregate,
+  readDeletedSessionIDs,
+} from "./db"
 import { combineProjectUsage, sumProjectSessions } from "./math"
+import { loadPricing } from "./pricing"
 import type { ProjectSessionLike, ProjectUsage } from "./types"
 
 export const [projectSnapshot, setProjectSnapshot] =
@@ -101,6 +106,9 @@ export type ProjectApi = {
         scope: "project"
         limit: number
       }): Promise<{ data?: ProjectSessionLike[] }>
+    }
+    model?: {
+      list?(params?: unknown): Promise<unknown>
     }
   }
 }
@@ -159,11 +167,13 @@ export async function refreshProject(
     const projectSessions = sessions.filter(
       (session) => session?.projectID === projectID,
     )
-    const live = sumProjectSessions(projectID, projectSessions)
-    const deleted = readDeletedAggregate(
-      projectDbPath(api.state.path.state),
-      projectID,
-    )
+    try {
+      await loadPricing(api as unknown as Parameters<typeof loadPricing>[0])
+    } catch {}
+    const dbPath = projectDbPath(api.state.path.state)
+    const exclude = readDeletedSessionIDs(dbPath, projectID)
+    const live = sumProjectSessions(projectID, projectSessions, exclude)
+    const deleted = readDeletedAggregate(dbPath, projectID)
     setProjectSnapshot(combineProjectUsage(live, deleted))
   } catch {
     // Preserve the previous snapshot (when one exists) and surface the
