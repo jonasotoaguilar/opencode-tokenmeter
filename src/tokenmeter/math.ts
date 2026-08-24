@@ -391,22 +391,50 @@ export function entryOfSessionUsage(
 export function resolveEntry(
   payload: ProjectAggregateEntry | null,
   observed: ProjectAggregateEntry | null,
+  model?: { providerID?: unknown; id?: unknown } | null,
 ): ProjectAggregateEntry | null {
-  if (!payload) return observed
-  if (!observed) return payload
-  const input = Math.max(payload.input, observed.input)
-  const output = Math.max(payload.output, observed.output)
-  const reasoning = Math.max(payload.reasoning, observed.reasoning)
-  const cacheRead = Math.max(payload.cacheRead, observed.cacheRead)
-  const cacheWrite = Math.max(payload.cacheWrite, observed.cacheWrite)
-  return {
-    cost: Math.max(payload.cost, observed.cost),
-    input,
-    output,
-    reasoning,
-    cacheRead,
-    cacheWrite,
-    cache: cacheRead + cacheWrite,
-    context: input + output + reasoning + cacheRead + cacheWrite,
+  try {
+    if (!payload && !observed) return null
+    const input = Math.max(num(payload?.input), num(observed?.input))
+    const output = Math.max(num(payload?.output), num(observed?.output))
+    const reasoning = Math.max(
+      num(payload?.reasoning),
+      num(observed?.reasoning),
+    )
+    const cacheRead = Math.max(
+      num(payload?.cacheRead),
+      num(observed?.cacheRead),
+    )
+    const cacheWrite = Math.max(
+      num(payload?.cacheWrite),
+      num(observed?.cacheWrite),
+    )
+    const raw = payload ? num(payload.cost) : 0
+    const obs = observed ? num(observed.cost) : 0
+    let cost: number
+    if (raw !== 0) cost = raw
+    else if (obs !== 0) cost = obs
+    else {
+      const resolved = resolveCost({
+        cost: 0,
+        providerID: (model as { providerID?: unknown })?.providerID,
+        modelID: (model as { id?: unknown })?.id,
+        tokens: { input, output, reasoning, cacheRead, cacheWrite },
+      })
+      cost = resolved.cost
+    }
+    const entry: ProjectAggregateEntry = {
+      cost,
+      input,
+      output,
+      reasoning,
+      cacheRead,
+      cacheWrite,
+      cache: cacheRead + cacheWrite,
+      context: input + output + reasoning + cacheRead + cacheWrite,
+    }
+    return hasUsage(entry) ? entry : null
+  } catch {
+    return null
   }
 }

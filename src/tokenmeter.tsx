@@ -65,6 +65,7 @@ import { handleProjectMilestone } from "./tokenmeter/milestone"
 import { UsagePanel } from "./tokenmeter/panel"
 import { SessionPromptRight } from "./tokenmeter/panel/footer"
 import { showSettingsDialog } from "./tokenmeter/panel/settings-dialog"
+import { loadPricing } from "./tokenmeter/pricing"
 import {
   disposeProjectRefresh,
   projectSnapshot,
@@ -111,6 +112,13 @@ const tui: TuiPlugin = async (api) => {
     // The toggle-sections shortcut preference loads before the toggle layer
     // registers, so the startup binding reflects the persisted choice.
     loadToggleShortcut(api)
+    // Warm the OpenAI pricing cache from host SDK `model.list` (fail-contained).
+    // Reuses Unit1–3 pricing helpers; never throws; ensures deleted-session
+    // monetary resolution can estimate payload-only sessions when provider/model
+    // gates pass, while safe-zero stays 0 for unresolved/malformed cases.
+    void loadPricing(api as unknown as Parameters<typeof loadPricing>[0]).catch(
+      () => {},
+    )
     // Palette command (spec: tokenmeter-command-palette), registered through
     // the modern keymap API: the host palette queries `namespace: "palette"`,
     // groups by `category` (`TokenMeter`), displays `title`, and dispatches

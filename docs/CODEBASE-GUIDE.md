@@ -35,6 +35,7 @@ Every file belongs to exactly one concern: the entry (`tokenmeter.tsx`) only wir
 | [src/tokenmeter/shortcut.ts](../src/tokenmeter/shortcut.ts) | Toggle command + configurable shortcut: keymap layer, kv preference, live re-registration | `api.keymap`, `src/tokenmeter/settings.ts` |
 | [src/tokenmeter/panel/](../src/tokenmeter/panel/) | Rendering and layout: master disclosure, section headings, agent accordion, tones, settings dialog | `index.tsx`, `section.tsx`, `group-rows.tsx`, `settings-dialog.tsx`, `tone.ts`, `project-section.tsx` |
 | [src/tokenmeter/math.ts](../src/tokenmeter/math.ts) | Pure helpers: usage math, numeric formatting, line formatting, column math, glyphs, types | `numbers.ts`, `format.ts`, `text.ts`, `glyphs.ts`, `types.ts` |
+| [src/tokenmeter/pricing.ts](../src/tokenmeter/pricing.ts) | OpenAI pricing cache from `model.list` (exact `pricingKey`, `estimateCost`, `loadPricing`); reused by Session, live Project and deleted paths | `src/tokenmeter/math.ts`, `docs/adr/0007-openai-cost-fallback.md` |
 | [scripts/build.ts](../scripts/build.ts) | Build and artifact guard: bundled dist, reactive-binding assertion, dist test | `test/artifact.test.ts` |
 | [test/harness.test.ts](../test/harness.test.ts) | Test suites: harness (modules), render (panel), artifact (dist) | `test/render.test.tsx`, `test/artifact.test.ts` |
 
@@ -52,7 +53,7 @@ Every file belongs to exactly one concern: the entry (`tokenmeter.tsx`) only wir
 - `PRD.md` — product intent, requirements, success criteria.
 - `ARCHITECTURE.md` — system design, flows, module map, ADR links.
 - `DESIGN.md` — panel layout, theme-role colors, glyphs, states.
-- `docs/adr/` — architecture decision records (build, reconcile, kv, external packages, width).
+- `docs/adr/` — architecture decision records (build, reconcile, kv, external packages, width, cost fallback — see [ADR-0007](adr/0007-openai-cost-fallback.md) via [ARCHITECTURE.md](../ARCHITECTURE.md)).
 - `docs/release-security.md` — release pipeline security controls, one-time npmjs trusted-publisher setup, maintainer drift checklist.
 - `docs/releases/` — the single current release document `vX.Y.Z.md`: curated narrative body used verbatim as the GitHub Release body. Lifecycle: `git mv` the previous release document to the new tag name, replace content, bump package, commit, tag; validated by `scripts/release-preflight` (exactly one document, name matches tag, body curated) before any tag publishes.
 - `docs/skill-style-guide.md` — how to author/update LLM-first skills in this repo.

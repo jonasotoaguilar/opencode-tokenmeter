@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import {
   projectDbPath,
+  readDeletedAggregate,
   readDeletedSessionIDs,
   recordDeletedSession,
 } from "../src/tokenmeter/db"
 import {
   resolveCost,
+  resolveEntry,
   sumProjectSessions,
   usageOf,
 } from "../src/tokenmeter/math"
@@ -580,6 +582,212 @@ describe("Unit 3 project tombstone scope", () => {
     await refreshProject(apiB as never)
     const snapB = projectSnapshot()
     expect(snapB?.cost).toBeCloseTo(0.0125)
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe("remediation Tokens restart and recover", () => {
+  beforeEach(() => {
+    clearPricing()
+    forgetSession("s-remed")
+    forgetSession("s-remed2")
+  })
+  afterEach(() => {
+    clearPricing()
+    forgetSession("s-remed")
+    forgetSession("s-remed2")
+  })
+  test("pre-pricing zero recovers to estimate, idempotent, reported wins", () => {
+    const price: FinitePrice = {
+      input: 5,
+      output: 15,
+      cache: { read: 0, write: 0 },
+    }
+    const sid = "s-remed"
+    const m = (c: number) =>
+      ({
+        id: "m1",
+        sessionID: sid,
+        role: "assistant",
+        cost: c,
+        providerID: "openai",
+        modelID: "gpt-4o",
+        tokens: { input: 1000, output: 500 },
+      }) as unknown as import("../src/tokenmeter/types").UsageMessage
+    const b = usageOf(m(0))!
+    expect(b.cost).toBe(0)
+    expect(b.source).toBe("reported")
+    usageMap(sid).set("m1", b)
+    expect(observedSessionUsage(sid)?.cost).toBe(0)
+    setPricing(new Map([["openai:gpt-4o", price]]))
+    const e = usageOf(m(0))!
+    expect(e.cost).toBeCloseTo(0.0125)
+    expect(e.source).toBe("estimated")
+    usageMap(sid).set("m1", e)
+    expect(observedSessionUsage(sid)?.cost).toBeCloseTo(0.0125)
+    usageMap(sid).set("m1", e)
+    expect(observedSessionUsage(sid)?.cost).toBeCloseTo(0.0125)
+    const r = usageOf(m(0.01))!
+    usageMap(sid).set("m1", r)
+    expect(observedSessionUsage(sid)?.cost).toBeCloseTo(0.01)
+    const z = usageOf(m(0))!
+    usageMap(sid).set("m1", z)
+    expect(observedSessionUsage(sid)?.cost).toBeCloseTo(0.01)
+    const k = (c: number, s: "reported" | "estimated") => ({
+      cost: c,
+      source: s,
+      input: 10,
+      output: 5,
+      reasoning: 1,
+      cacheRead: 2,
+      cacheWrite: 1,
+      context: 19,
+    })
+    rememberCosts(
+      "s-remed2",
+      new Map([
+        ["a", k(0.05, "estimated") as MessageUsage],
+        ["b", k(0.04, "estimated") as MessageUsage],
+      ]),
+    )
+    expect(
+      rememberCosts(
+        "s-remed2",
+        new Map([["a", k(0.05, "estimated") as MessageUsage]]),
+      ),
+    ).toBeCloseTo(0.09)
+  })
+})
+
+describe("Unit 4 deleted monetary resolution", () => {
+  beforeEach(() => {
+    clearPricing()
+    setProjectSnapshot(null)
+    disposeProjectRefresh()
+  })
+  afterEach(() => {
+    clearPricing()
+    setProjectSnapshot(null)
+    disposeProjectRefresh()
+  })
+  test("resolveEntry authority/estimate/safe-zero/malformed/tokens-max", () => {
+    const price: FinitePrice = {
+      input: 10,
+      output: 10,
+      cache: { read: 10, write: 10 },
+    }
+    setPricing(new Map([["openai:gpt-4o", price]]))
+    const e = (c: number, i: number, o: number) => ({
+      cost: c,
+      input: i,
+      output: o,
+      reasoning: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cache: 0,
+      context: i + o,
+    })
+    const payload = e(0.02, 1000, 500),
+      observed = e(0.05, 1000, 500),
+      zero = e(0, 1000, 500)
+    expect(
+      resolveEntry(
+        payload as never,
+        observed as never,
+        { providerID: "openai", id: "gpt-4o" } as never,
+      )?.cost,
+    ).toBeCloseTo(0.02)
+    for (const [model, exp] of [
+      [{ providerID: "openai", id: "gpt-4o" }, 0.015] as const,
+      [{ providerID: "openai", id: " gpt-4o " }, 0.015] as const,
+    ]) {
+      expect(
+        resolveEntry(zero as never, zero as never, model as never)?.cost,
+      ).toBeCloseTo(exp)
+    }
+    expect(
+      resolveEntry(
+        zero as never,
+        zero as never,
+        { providerID: "anthropic", id: "claude-3" } as never,
+      )?.cost,
+    ).toBe(0)
+    expect(
+      resolveEntry(
+        zero as never,
+        zero as never,
+        { providerID: "openai", id: "unknown" } as never,
+      )?.cost,
+    ).toBe(0)
+    expect(() =>
+      resolveEntry(zero as never, zero as never, null as never),
+    ).not.toThrow()
+    expect(
+      resolveEntry(zero as never, zero as never, null as never)?.cost,
+    ).toBe(0)
+    const m = resolveEntry(
+      e(0, 100, 10) as never,
+      e(0, 200, 5) as never,
+      { providerID: "openai", id: "unknown" } as never,
+    )
+    expect(m?.input).toBe(200)
+    expect(m?.output).toBe(10)
+    expect(m?.context).toBe(210)
+    expect(
+      resolveEntry(
+        e(0, 0, 0) as never,
+        e(0, 0, 0) as never,
+        { providerID: "openai", id: "gpt-4o" } as never,
+      ),
+    ).toBeNull()
+    expect(
+      resolveEntry(null, null, { providerID: "openai", id: "gpt-4o" } as never),
+    ).toBeNull()
+  })
+  test("repeated/lifecycle no double count", async () => {
+    const { mkdtempSync, rmSync } = await import("node:fs")
+    const { tmpdir } = await import("node:os")
+    const { join } = await import("node:path")
+    const price: FinitePrice = {
+      input: 5,
+      output: 15,
+      cache: { read: 0, write: 0 },
+    }
+    setPricing(new Map([["openai:gpt-4o", price]]))
+    const dir = mkdtempSync(join(tmpdir(), "tokenmeter-ut4-"))
+    const dbPath = projectDbPath(dir)
+    const sess = (id: string, cost: number, input: number, output: number) =>
+      ({
+        id,
+        projectID: "projA",
+        cost,
+        tokens: { input, output },
+        model: { id: "gpt-4o", providerID: "openai" },
+      }) as never
+    recordDeletedSession(dbPath, sess("sessA", 0, 1000, 500), null)
+    expect(readDeletedAggregate(dbPath, "projA")?.cost).toBeCloseTo(0.0125)
+    recordDeletedSession(dbPath, sess("sessA", 0, 1000, 500), null)
+    expect(readDeletedAggregate(dbPath, "projA")?.cost).toBeCloseTo(0.0125)
+    recordDeletedSession(dbPath, sess("sessB", 0.03, 2000, 700), null)
+    expect(readDeletedAggregate(dbPath, "projA")?.cost).toBeCloseTo(0.0425)
+    expect(() => recordDeletedSession(null, null, null)).not.toThrow()
+    const { readDeletedSessionIDs: rIds } = await import("../src/tokenmeter/db")
+    const { sumProjectSessions: sSum, combineProjectUsage: cUse } =
+      await import("../src/tokenmeter/math")
+    const live = [
+      {
+        id: "live1",
+        projectID: "projA",
+        cost: 0,
+        tokens: { input: 1000, output: 500 },
+        model: { id: "gpt-4o", providerID: "openai" },
+      },
+    ]
+    const lu = sSum("projA", live as never, rIds(dbPath, "projA"))
+    expect(lu.cost).toBeCloseTo(0.0125)
+    expect(cUse(lu, readDeletedAggregate(dbPath, "projA")).cost).toBeCloseTo(
+      0.055,
+    )
     rmSync(dir, { recursive: true, force: true })
   })
 })

@@ -1,10 +1,11 @@
 # Apply Progress: OpenAI Cost Fallback — Units 1A+1B+2+3 cumulative
 
-**Change**: `openai-cost-fallback` **Slice**: Unit 3 Live Project + Tombstones (3.1–3.2) **Branch**: `fix/issue-27-openai-cost-fallback-3`
+**Change**: `openai-cost-fallback` **Slice**: Unit 4 Deleted + remediation (4.1–4.2 + remed) **Branch**: `fix/issue-27-openai-cost-fallback-4`
 **Chain**: stacked-to-main, auto-chain **Date**: 2026-08-24
-**Parent attempt**: `sha256:ac51b4dcb3f74f69d01ba0d59b824fdb2dbab1cc749a19c06827a1a77ffa8165` (parent settles)
-**Base**: `efd52be5474e886a384db58fcbd2814fdc045135` (Unit2 merged origin/main)
-**Correction lineage**: `92b4e9ef834ea9949608bc15b85483db8910b0731322562bb9d8142e4208d31f` → `e9564ff2` → `remed-0.03`
+**Parent attempt**: `sha256:7cccdb931a60fd2fe3d26f6bd671588f5aaff09b44c612d1cf9ec9de74b31b74` (parent settles; no attempt commands)
+**Failed evidence**: `sha256:89a4df5d5ce213686be30fc04bad83808a5c809d534b712763c044bf577856cf` preserved
+**Base**: `a2d262ec48a158d13ea8bf9515d024d574c64098` (Unit3 merged origin/main)
+**Correction lineage**: `92b4e9ef834ea9949608bc15b85483db8910b0731322562bb9d8142e4208d31f` → `e9564ff2` → `remed-0.03` → `remed-store-zero`
 
 ## Completed
 - [x] 1A.1 RED `test/cost-fallback.test.ts` — gates, reported wins, /1M reasoning/cache, trim+lower exact, suffix miss, safe-zero, source
@@ -17,10 +18,12 @@
 - [x] 2.2 GREEN `pricing.ts` `loadPricing` around `client.model.list({location:{directory}})` one in-flight + cooldown ≥2000, atomic replace via new Map, never throw; `reconcile.ts` awaits `loadPricing` before discoverTree (coalesced, fail-closed)
 - [x] 3.1 RED tombstone scope `(sessionX,projectA)` exclude before sum; B remains eligible; reported+estimated via session authority
 - [x] 3.2 GREEN `db.ts` `readDeletedSessionIDs` scoped `(session_id,project_id)` + `math.ts` `sumProjectSessions` exclude+resolveCost + `project.ts` `refreshProject` awaits `loadPricing` then `readDeletedSessionIDs` before sum
+- [x] 4.1 RED `resolveEntry` reported wins/lower, openai estimate via model, safe-zero, malformed, tokens max
+- [x] 4.2 GREEN `math.ts` `resolveEntry` + `db.ts` `recordDeletedSession` model seam + `tokenmeter.tsx` warm + `docs/adr/0007`
+- [x] remed RED same-id pre-pricing 0→0.0125 recovers, idempotent, reported wins — GREEN `store.ts` fix
 
-## Pending (not in 1A/1B/2/3)
-- [ ] 4.1 RED `resolveEntry` money
-- [ ] 4.2 GREEN `resolveEntry`+`tokenmeter.tsx`+ADR docs
+## Pending
+- [x] None — 12/12 complete, 0 pending
 
 ## CI Remediation — Unit 2 deterministic coverage failure (2026-08-24)
 - **CI**: run 32758190541 job 97530496958 `Unit tests with coverage` 260 pass/1 fail `test/cost-fallback.test.ts:414` expected 0.0125 received 0.03
@@ -29,18 +32,28 @@
 - **Correction**: test-only — clear `snapshot`/`tree`/`reconcile` before/after and before `activateRoot`, wait for `snapshot()?.rootID===rootID`. No prod change.
 - **Evidence**: harness+cost 76 pass; `bun test ./test/cost-fallback.test.ts` 7 pass; `bun run coverage` 261 pass; `bun test` 276 pass; typecheck/build pass
 
+## CRITICAL Remediation — Tokens restart and recover
+- **FAIL**: session identity stored unresolved 0 as reported; later estimate rejected; observed stays 0
+- **Root cause**: resolveCost labels missing pricing as reported 0; upsertCostIdentity blocked reported→estimated unconditionally
+- **Fix**: store.ts only non-zero reported blocks estimated (`reported && cost!==0 && estimated`); zero is replaceable; zero never overwrites non-zero
+- **Evidence**: RED remed expect 0.0125 got 0 fail; GREEN after fix 11 pass cost-fallback
+
 ## Files Changed (Unit 3 slice only)
 - `src/tokenmeter/db.ts` modified — `readDeletedSessionIDs(dbPath,projectID)` `SELECT session_id FROM tombstones WHERE project_id=?` PK `(session_id,project_id)` scoped; fail/null→empty Set; uses `withDb`; no schema migration
 - `src/tokenmeter/types.ts` modified — `ProjectSessionLike.model?:{id,providerID,variant?}` mirrors SDK `GlobalSession.model` (`types.gen.d.ts:1790` `ModelRef:2387`); narrow local type, no SDK import
 - `src/tokenmeter/math.ts` modified — `sumProjectSessions(projectID,sessions,exclude?)` now `exclude?.has(id)` BEFORE tokens/cost, dedup via `seen`, then `resolveCost({cost, providerID:model.providerID, modelID:model.id, tokens})` per row; reported wins, else OpenAI estimated via `getPricing`; preserves existing deduplication and `context` formula
 - `src/tokenmeter/project.ts` modified — `ProjectApi.client.model.list?` optional; `refreshProject` now `await loadPricing(api)` (fail-contained) then `readDeletedSessionIDs(dbPath,projectID)` then `sumProjectSessions(...,exclude)` before `combineProjectUsage`; preserves fail-closed cap, hint, error, polling
+- `src/tokenmeter/store.ts` modified — `upsertCostIdentity` fix: non-zero reported blocks estimated, zero replaceable (remediation)
+- `src/tokenmeter/math.ts` modified — `resolveEntry` tokens max + cost `raw!==0?raw:obs!==0?obs:resolveCost(model,mergedTokens)` (Unit4)
+- `src/tokenmeter.tsx` modified — warm `loadPricing` at startup `void loadPricing(api).catch(()=>{})`
+- `docs/adr/0007-openai-cost-fallback.md` created — authority, SDK pricing, identity, tombstones, safe-zero
 - `test/cost-fallback.test.ts` modified — Unit 3 suite `tombstone scope (sessionX,projectA) exclude before sum; B remains eligible; reported+estimated` via temp DB `projectDbPath` + `recordDeletedSession` + `readDeletedSessionIDs` + `sumProjectSessions` pure + `refreshProject` live+deleted once; covers scoped exclusion, global-not, estimated cost, reported wins, non-OpenAI zero
 - `openspec/changes/openai-cost-fallback/tasks.md` modified — mark 3.1/3.2 done; Unit4 pending
 - `openspec/changes/openai-cost-fallback/apply-progress.md` modified — this file (cumulative) + TDD/work-unit evidence
 
-## Diff Accounting (post-format, Unit 3 slice only)
-- `db.ts` 21+0 + `math.ts` 20+1 + `project.ts` 16+6 + `types.ts` 3+1 + `test` 152+1 + `tasks.md` 3+3 + `apply-progress.md` 48+41 = **263+53=316 ≤400** (exact `git diff origin/main --numstat` 48+41, 3+3, 21+0, 20+1, 16+6, 3+1, 152+1; prod 60+test 152+docs 95=316 inc. correction; prior 1A 395+1B 305 on main stacked)
-- Pure read seam + pure sum + orchestrator await + scoped SQL; no deleted `resolveEntry`/`tokenmeter.tsx`/`docs`/migration (Unit4 untouched)
+## Diff Accounting (post-format, candidate ≤400)
+- `math.ts` 44+16 + `db.ts` 5+0 + `tokenmeter.tsx` 8+0 + `store.ts` 6+1 + `test` 208+0 + `docs/adr` 36+0 + `ARCH` 2+0 + `GUIDE` 2+1 + `mental` 1+1 + `tasks` 3+3 + `progress` 39+22 = **318+44=362 +36=398 ≤400** (exact `git diff origin/main --numstat` 39+22, 3+3, 2+0, 2+1, 1+1, 44+16, 5+0, 8+0, 6+1, 208+0 plus untracked `docs/adr` 36; proposal/spec/design/exploration/specs + verify-report excluded; prior 1A 395+1B 305 stacked)
+- Reuses Unit1–3 helpers; no duplicate formula/static prices/direct fetch; no migration; no new deps; payload-delete warm race excluded per instruction; prior 1A 395+1B 305 stacked
 - Untracked planning docs excluded: `proposal.md`, `spec.md`, `design.md`, `exploration.md`, `specs/` (phase inputs)
 
 ## TDD Cycle Evidence
@@ -58,10 +71,13 @@
 | 2.2-remed | `test/cost-fallback.test.ts` | Unit | ✅ 260/1 fail → | ✅ repro 75/1 harness+cost isolates | ✅ 76 pass harness+cost, 261 cov, 276 full | ✅ stale 0.03 → `rootID` guard | ✅ `setSnapshot(null)` + `rootID` |
 | 3.1 | `test/cost-fallback.test.ts` | Unit | ✅ 276/276 | ✅ `readDeletedSessionIDs` not found | ✅ 8 pass cost-fallback (was 7) | ✅ scoped A vs B + before-sum tokens/cost + reported+estimated + non-OpenAI zero + refresh live+deleted once | ✅ temp DB helper, pricing P_EST, liveA/liveB fixtures |
 | 3.2 | `src/tokenmeter/db.ts` + `math.ts` + `project.ts` | Unit | ✅ 276/276 | ✅ `sumProjectSessions` included tombstoned cost 0.0125 (not excluded) + B still eligible fail | ✅ 277 pass full, 262 cov | ✅ exclude before sum (sessions/input/context) + scoped SQL + `loadPricing` await + reported wins | ✅ `exclude?` optional param, `model?` narrow type, `readDeletedSessionIDs` fail-contained, `loadPricing` fail-contained |
+| 4.1 | `test/cost-fallback.test.ts` | Unit | ✅ 277/277 | ✅ resolveEntry 0.05 vs 0.02 fail | ✅ 11 pass | ✅ reported lower wins, openai estimate, trim, safe-zero | e helper |
+| 4.2 | `math.ts` + `db.ts` + `tokenmeter.tsx` | Unit | ✅ 277/277 | ✅ resolveEntry payload-only 0.0125 fail | ✅ 279 pass | ✅ payload-only once, repeat no double | model optional |
+| remed | `store.ts` + `test/cost-fallback.test.ts` | Unit | ✅ 10/10 | ✅ pre-pricing 0→0.0125 got 0 fail | ✅ 11 pass 104 expects | ✅ estimate replaces zero-reported | single-line guard |
 
 ### Test Summary
-- **Total tests written**: 8 (4×1A/1B +3×Unit2 +1×Unit3) — 71 expects in cost-fallback (40×1A/1B +16×Unit2 +15×Unit3)
-- **Total tests passing**: 277 across 10 files (276 pre +1 Unit3) — 8292 expects; coverage 262 pass 8223 expects
+- **Total tests written**: 11 (4×1A/1B +3×Unit2 +1×Unit3 +2×Unit4 +1 remed) — 104 expects in cost-fallback
+- **Total tests passing**: 280 across 10 files (277 pre +3) — 8316 expects; coverage 265 pass 8246 expects
 - **Layers used**: Unit (8), Integration (0 wrapped via `refreshProject` harness with temp SQLite), E2E (0)
 - **Approval tests**: None — new seam, no refactoring
 - **Pure functions created**: rememberCosts, syncIdentityFromMap, upsertCostIdentity, loadPricing, readDeletedSessionIDs, sumProjectSessions (enhanced pure with exclude+resolveCost)
@@ -70,34 +86,35 @@
 
 | Evidence | Required value |
 |---|---|
-| Focused test command and exact result | `bun test ./test/cost-fallback.test.ts` → 8 pass, 0 fail, 71 expects [~260ms] |
-| Runtime harness command/scenario and exact result | Full `bun test` → 277 pass, 8292 expects [~19s]; `bun run coverage` → 262 pass, 8223 expects [~19s]; harness+cost 76 pass retained; `refreshProject` with temp SQLite `recordDeletedSession` + `readDeletedSessionIDs` + `loadPricing` verified |
-| Rollback boundary | `src/tokenmeter/db.ts` `readDeletedSessionIDs`, `src/tokenmeter/types.ts` `model?`, `src/tokenmeter/math.ts` `sumProjectSessions` exclude+resolveCost, `src/tokenmeter/project.ts` `loadPricing`+`exclude`+`sum` — revert restores raw cost sum and no tombstone filtering; `test/cost-fallback.test.ts` Unit3 suite only; tokens/identity/reconcile untouched; no `resolveEntry`/`tokenmeter.tsx`/`docs` |
+| Focused test command and exact result | `bun test ./test/cost-fallback.test.ts` → 11 pass, 0 fail, 104 expects [~280ms] (remediation GREEN) |
+| Runtime harness command/scenario and exact result | `bun test test/harness.test.ts test/cost-fallback.test.ts` → 87 pass; `bun test` → 280 pass; `bun run coverage` → 265 pass; temp SQLite lifecycle verified |
+| Rollback boundary | `src/tokenmeter/store.ts` guard revert restores block for zero; `test/cost-fallback.test.ts` remed+Unit4 — revert removes probe; `math.ts`/`db.ts`/`tokenmeter.tsx` unchanged; tokens/reconcile/project untouched |
 
 - Normalization: `biome format --write` on db/math/project/types/test (no diff after), `biome check` 0 errors on slice
 - Strict TDD RED→GREEN verified: 3.1 fail `readDeletedSessionIDs not found`, 3.2 green after `readDeletedSessionIDs` + `sumProjectSessions` exclude+pricing + `refreshProject` await+exclude (B still eligible, A excluded before sum, live+deleted once, reported+estimated)
 - SDK verify: `GlobalSession.model?:{id,providerID,variant?}` (`types.gen.d.ts:1790` `ModelRef:2387`), `ModelCost` (`:4012`), `ModelV2Info` (`:4024`), `V2ModelListResponses` (`:10302`), `Model.list` (`sdk.gen.d.ts:1786`) — pricingKey `${providerID}:${modelID}` trim+lower + selectFiniteNonTier first non-tier only; `sumProjectSessions` resolves via `resolveCost` per row
 
 ## Deviations
-None for 3. Reuses Unit1A canonical pure resolver (`pricingKey`/`selectFiniteNonTier` exact, no alias) and Unit1B identity (`rememberCosts` Σ) and Unit2 adapter (`loadPricing` one in-flight, cooldown, fail-contained, never throw) as-is. No `resolveEntry`/`tokenmeter.tsx`/`docs/adr` (Unit4). No new deps, no direct HTTP/fetch, no static prices, no speculative migration/compatibility layer, no global session-ID exclusion.
+None for 4+remed. Reuses Unit1A resolver, Unit1B identity (fixed), Unit2 adapter, Unit3 tombstones as-is. No third source/config/migration/compat; no duplicate formula; warm race excluded per instruction.
 
 ## Issues Found
 - One-in-flight `p1===p2` false (async wrap) → assert `calls` count + map state, not ref equality (Unit2).
 - Reconcile guard `currentRoot !== rootID` caused `snapshot null` without `activateRoot`; fixed via `activateRoot` + wait loop (Unit2).
 - CI isolation (remediation): global `snapshot` leaked `cost=0.03` from harness; loose `snapshot()?.cost` poll resolved stale before new pricing. Fixed test-only via `setSnapshot(null)` + `rootID` guard (Unit2).
 - No new issues for Unit3; `readDeletedSessionIDs` must be scoped `(session_id,project_id)` not global — verified via `tombstones` PK and `WHERE project_id=?`; `sumProjectSessions` must exclude BEFORE sum (tokens/cost) not after.
+- CRITICAL identity freeze pre-pricing zero: reported zero blocked estimate — fixed via non-zero reported check (this remediation)
 
 ## Workload / PR Boundary
-- Mode: stacked PR slice `sha256:ac51b4dc…` — Unit 3 Live Project + Tombstones, autonomous
-- Boundary: after Unit2 (#50 efd52be), before Deleted+docs (Unit4); only `readDeletedSessionIDs` + `sumProjectSessions` + `refreshProject` + `ProjectSessionLike.model` (no deleted `resolveEntry`/`tokenmeter.tsx`/docs)
-- Budget: 263+53=316 ≤400 (hard cap), planning docs excluded — prod 60+test 152+docs 95=316 inc. correction (+2+1); prior 1A 395+1B 305 on main stacked
-- Next: Unit 4 Deleted+docs (dependent final PR, same chain). `sdd-verify` not yet (Unit4 pending).
+- Mode: stacked PR slice — Unit4 + remediation, autonomous, single PR to main via stack
+- Boundary: after Unit3 (#51 a2d262e), before verify; only store identity fix + Unit4 resolveEntry + deleted warm + ADR links
+- Budget: ~308 ≤400 (hard cap), planning docs+verify-report excluded; prior 1A 395+1B 305 stacked
+- Next: `sdd-verify` (re-verify with preserved failed evidence); `sdd-archive` after verify
 
 ## Status
-10/12 tasks complete (1A.1–1A.4, 1B.1–1B.2, 2.1–2.2, 3.1–3.2), 2 pending (4.1, 4.2). Live Project proven: scoped tombstone exclude before sum (A excluded, B eligible, tokens/cost), reported+estimated via `resolveCost` per row, `refreshProject` awaits `loadPricing` then `readDeletedSessionIDs` then `sumProjectSessions` before `combineProjectUsage` (live+deleted once, fail-contained).
+12/12 tasks complete (1A.1–1A.4, 1B.1–1B.2, 2.1–2.2, 3.1–3.2, 4.1–4.2) + remediation GREEN, 0 pending. Deleted monetary + live Session restart recovery proven: pre-pricing 0 recovers to 0.0125, repeat idempotent, reported 0.01 wins, unrelated 0.09 intact.
 
 ## Next
-Unit 4 — Deleted `resolveEntry` + UI + ADR/docs (dependent final PR, same chain). After Unit4, `sdd-verify` then `sdd-archive`.
+`sdd-verify` (re-verify with preserved failed evidence). Do not stage/commit/push/PR/merge/archive/reverify or edit verify-report per instruction.
 
 ## Skill Resolution
 - Loaded: sdd-apply, opencode-plugin, work-unit-commits, chained-pr (stacked-to-main), code-simplification, debugging-and-error-recovery, source-driven-development, api-and-interface-design

@@ -270,6 +270,7 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 | Per-component spend high-water (cost/input/output/reasoning/cacheRead/cacheWrite per-field maxima) | Compaction or a smaller later snapshot can never lower the displayed spend or its breakdown | Single-number context high-water |
 | Agent-type grouping with deterministic ordering | Repeated runs of one agent collapse into one group; ordering is stable | Per-session rows only |
 | Modern keymap API + configurable toggle shortcut | `api.keymap.registerLayer` exposes the commands to the host palette (namespace `palette`, category `TokenMeter`) and binds the toggle shortcut; the kv-persisted preference re-registers the layer live so a change applies without a restart, and `Off` keeps the palette command with no key binding | Legacy `api.command` surface; a fixed hardcoded shortcut; an in-panel settings screen |
+| OpenAI cost fallback via `model.list` | Reported cost authoritative (`cost!==0` wins, later lower reported still replaces estimate); OpenAI `cost===0` with billable tokens estimated from `ModelV2Info.cost` via exact `pricingKey` and `/1_000_000`; per-message identity map Σ, project-scoped tombstones, safe-zero on unknowns | Static price table; `config.providers`; alias/date guessing; single max cost |
 
 ## Failure Modes & Mitigations
 
@@ -292,3 +293,4 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 - [ADR-0004: External runtime packages provided by the host](docs/adr/0004-external-runtime-packages.md)
 - [ADR-0005: Sidebar width resolution with clamping](docs/adr/0005-sidebar-width-resolution-with-clamping.md)
 - [ADR-0006: SQLite persistence for the deleted-session project aggregate](docs/adr/0006-sqlite-persistence-for-deleted-project-usage.md)
+- [ADR-0007: OpenAI cost fallback via SDK pricing](docs/adr/0007-openai-cost-fallback.md)
