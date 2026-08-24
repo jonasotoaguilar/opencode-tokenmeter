@@ -51,7 +51,12 @@ function upsertCostIdentity(
     identity.set(id, incoming)
     return
   }
-  if (existing.source === "reported" && incoming.source === "estimated") return
+  if (
+    existing.source === "reported" &&
+    existing.cost !== 0 &&
+    incoming.source === "estimated"
+  )
+    return
   if (incoming.cost === 0 && existing.cost !== 0) return
   identity.set(id, incoming)
 }

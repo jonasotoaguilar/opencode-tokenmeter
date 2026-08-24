@@ -45,7 +45,7 @@ Decision needed before apply: No — stacked-to-main chosen. Slice 1A first.
 - [x] 3.1 RED tombstone scope `(sessionX,projectA)` exclude before sum
 - [x] 3.2 GREEN `readDeletedSessionIDs` `sumProjectSessions` exclude `refreshProject`
 
-## Phase 4: Deleted + Docs (pending)
+## Phase 4: Deleted + Docs (final)
 
-- [ ] 4.1 RED `resolveEntry` money
-- [ ] 4.2 GREEN `resolveEntry`+`tokenmeter.tsx`+ADR docs
+- [x] 4.1 RED `resolveEntry` money — reported wins/lower, openai estimate via model, safe-zero, malformed, tokens max, repeat/lifecycle no double count
+- [x] 4.2 GREEN `resolveEntry`+`tokenmeter.tsx`+ADR docs — cost authority + pricing lifecycle + docs linked from ARCHITECTURE

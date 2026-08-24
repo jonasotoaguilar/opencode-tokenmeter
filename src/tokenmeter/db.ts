@@ -124,9 +124,14 @@ export function recordDeletedSession(
 ): void {
   const info = session as ProjectSessionLike | undefined
   if (!info?.id || !info.projectID) return
+  const model = (info as ProjectSessionLike)?.model as
+    | { providerID?: unknown; id?: unknown }
+    | null
+    | undefined
   const entry = resolveEntry(
     entryOfSession(info),
     entryOfSessionUsage(observed),
+    model,
   )
   if (!entry) return
   withDb(dbPath, (db) => {

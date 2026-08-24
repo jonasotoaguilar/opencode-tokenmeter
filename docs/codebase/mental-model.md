@@ -30,7 +30,7 @@ Project section (parallel path):
       └──────► ~2s polling timer keeps sibling TUIs fresh
 ```
 
-Two independent data paths feed one panel: the **Session** path (active session + delegation tree, rehydrated from client messages) and the **Project** path (authoritative live list sum + the SQLite deleted aggregate). A Project failure never touches the Session section.
+Two independent data paths feed one panel: the **Session** path (active session + delegation tree, rehydrated from client messages) and the **Project** path (authoritative live list sum + the SQLite deleted aggregate). A Project failure never touches the Session section. Monetary cost reuses the same gates everywhere (`pricing.ts` `model.list` cache → `math.resolveCost` per row, reported wins, OpenAI `cost===0` + billable + exact pricing → estimate, else safe-zero); Session keeps per-message identity Σ, Project scopes tombstones by `(session_id, project_id)` and deleted aggregates via `resolveEntry`; see [ADR-0007](../adr/0007-openai-cost-fallback.md) and [ARCHITECTURE.md](../../ARCHITECTURE.md).
 
 ## Entry points
 
