@@ -15,6 +15,7 @@ import {
   observedSessionUsage,
   rememberCosts,
   removeMessageUsage,
+  setSnapshot,
   snapshot,
   usageMap,
 } from "../src/tokenmeter/store"
@@ -221,8 +222,18 @@ const pricingApi = (list: () => Promise<unknown>) => ({
 })
 
 describe("Unit 2 adapter+reconcile", () => {
-  beforeEach(() => clearPricing())
-  afterEach(() => clearPricing())
+  beforeEach(() => {
+    clearPricing()
+    setSnapshot(null)
+    purgeTreeCache()
+    disposeReconcile()
+  })
+  afterEach(() => {
+    clearPricing()
+    setSnapshot(null)
+    purgeTreeCache()
+    disposeReconcile()
+  })
   test("success atomically replaces map; failure/offline/throw retains last-known-good; malformed omitted", async () => {
     setPricing(new Map([["openai:gpt-4o", P10]]))
     await loadPricing(
@@ -355,6 +366,8 @@ describe("Unit 2 adapter+reconcile", () => {
     forgetSession(rootID)
     purgeTreeCache()
     clearPricing()
+    setSnapshot(null)
+    disposeReconcile()
     const fake = {
       client: {
         session: {
@@ -403,7 +416,7 @@ describe("Unit 2 adapter+reconcile", () => {
     await new Promise<void>((resolve) => {
       const start = Date.now()
       const check = () => {
-        if (snapshot()?.cost) resolve()
+        if (snapshot()?.rootID === rootID) resolve()
         else if (Date.now() - start > 1000) resolve()
         else setTimeout(check, 10)
       }
@@ -416,5 +429,6 @@ describe("Unit 2 adapter+reconcile", () => {
     purgeTreeCache()
     disposeReconcile()
     clearPricing()
+    setSnapshot(null)
   })
 })
