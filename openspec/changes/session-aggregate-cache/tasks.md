@@ -44,7 +44,7 @@ Apply PR1A. Dirty worktree ≠ baseline. Skills: sdd-apply, chained-pr, stacked-
 
 ## Phase 2: PR2 schema (≤300)
 
-- [ ] 2.1 RED `test/session-totals.test.ts`: one row; CAS match/dup; no additive SQL; two-conn migrate; same-id token edit ≠ `unchanged`; `busy`/`io` lastGood no repair/zero 3×≤50ms; delete idempotent.
+- [x] 2.1 RED `test/session-totals.test.ts`: PR2A schema — fresh/legacy/idempotent/one-row/two-conn/fingerprint/uninvoked/no-additive — 7 pass (CAS/busy/delete → PR2B)
 - [ ] 2.2 GREEN `src/tokenmeter/session-totals.ts`+types: DDL; `migrateSessionTotals` WAL/`user_version=1` drop `projects`/`tombstones`; `casReplace`/`read`/`sumProject`/`readTree`/`markDeleted`/`listPricingRepair`; SHA-256 `id:cost:tokens`. Not called from `db.ts`.
 
 ## Phase 3: PR3 modules (≤350)
