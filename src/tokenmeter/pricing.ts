@@ -13,17 +13,44 @@ export function getPricing(key: string): FinitePrice | undefined {
   return pricingMap.get(key)
 }
 export function setPricing(map: Map<string, FinitePrice>): void {
+  const prevSize = pricingMap.size
   pricingMap.clear()
   for (const [k, v] of map) pricingMap.set(k, v)
+  notifyPricingFirstFill(prevSize, pricingMap.size)
 }
 let pricingInflight: Promise<void> | null = null
 let pricingLastFailure = 0
 const PRICING_COOLDOWN_MS = 2000
 
+let pricingFirstFillFired = false
+const pricingFirstFillListeners = new Set<() => void>()
+
+export function onPricingFirstFill(callback: () => void): () => void {
+  if (pricingFirstFillFired) return () => {}
+  pricingFirstFillListeners.add(callback)
+  return () => {
+    pricingFirstFillListeners.delete(callback)
+  }
+}
+
+function notifyPricingFirstFill(prevSize: number, nextSize: number): void {
+  if (pricingFirstFillFired) return
+  if (prevSize !== 0 || nextSize === 0) return
+  pricingFirstFillFired = true
+  const callbacks = [...pricingFirstFillListeners]
+  pricingFirstFillListeners.clear()
+  for (const callback of callbacks) {
+    try {
+      callback()
+    } catch {}
+  }
+}
+
 export function clearPricing(): void {
   pricingMap.clear()
   pricingLastFailure = 0
   pricingInflight = null
+  pricingFirstFillFired = false
 }
 
 // biome-ignore format: keep minimal v2.model.list on one line to preserve 400 review budget
@@ -46,6 +73,7 @@ export async function loadPricing(api: PricingApi): Promise<void> {
     pricingLastFailure = Date.now()
     throw new Error("method_missing: api.client.v2.model.list is not available")
   }
+  const prevSize = pricingMap.size
   pricingInflight = (async () => {
     try {
       const res = await (fn as (p: unknown) => Promise<unknown>).call(v2Model, {
@@ -69,6 +97,7 @@ export async function loadPricing(api: PricingApi): Promise<void> {
       pricingMap.clear()
       for (const [k, v] of next) pricingMap.set(k, v)
       pricingLastFailure = 0
+      notifyPricingFirstFill(prevSize, pricingMap.size)
     } catch {
       pricingLastFailure = Date.now()
     } finally {

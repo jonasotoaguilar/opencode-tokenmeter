@@ -40,7 +40,7 @@ Apply PR1A. Dirty worktree ≠ baseline. Skills: sdd-apply, chained-pr, stacked-
 
 - [x] 1.1 RED `test/pricing-v2-guard.test.ts`: `satisfies PricingApi`; `tsc` rejects `client.model.list` mocks; `gpt-5.6-sol` formula; `method_missing` ≠ empty.
 - [x] 1.2 GREEN `src/tokenmeter/pricing.ts`: `Pick<OpencodeClient,"v2">` structural `Parameters<OpencodeClient["v2"]["model"]["list"]>`; `v2.model.list`; visible `method_missing`; no `onPricingFirstFill`; never add `invalidateAllUsage`.
-- [ ] 1.3 RED `test/pricing-first-fill.test.ts` + `cost-fallback.test.ts` → typed `v2.model.list`. GREEN `tokenmeter.tsx` subscribe then `loadPricing`; `scheduleForcedReconcile` / `onPricingFirstFill`; drop `store.ts` `invalidateAllUsage`; revert dirty `docs/adr/0007-*.md`. First-fill — **deferred to PR1B** (see Unit 1B). `typecheck`; `test:dist`; grep no probe/`client.model.list`.
+- [x] 1.3 RED `test/pricing-first-fill.test.ts` + `cost-fallback.test.ts` → typed `v2.model.list`. GREEN `tokenmeter.tsx` subscribe then `loadPricing`; `scheduleForcedReconcile` / `onPricingFirstFill`; drop `store.ts` `invalidateAllUsage`; revert dirty `docs/adr/0007-*.md`. First-fill — **completed in PR1B** (Unit 1B base=PR1A `01b-first-fill`). `typecheck`; `test:dist`; grep no probe/`client.model.list`.
 
 ## Phase 2: PR2 schema (≤300)
 
