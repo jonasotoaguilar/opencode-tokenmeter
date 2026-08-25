@@ -50,8 +50,8 @@ Apply PR1A. Dirty worktree ≠ baseline. Skills: sdd-apply, chained-pr, stacked-
 
 ## Phase 3: PR3 modules (≤350)
 
-- [ ] 3.1 RED mixed report+estimate; cache restart; edit/remove/compact/unknown → that id; two-process loser repairs no deltas; hash change estimated N=8 conc.1; same hash/deleted skip.
-- [ ] 3.2 GREEN `src/tokenmeter/repair.ts` + `session-events.ts` unwired; empty/trunc lastGood; never missing-delete/`busy`/`io`; no dual-write.
+- [x] 3.1 RED mixed report+estimate; cache restart; edit/remove/compact/unknown → that id; two-process loser repairs no deltas; hash change estimated N=8 conc.1; same hash/deleted skip.
+- [x] 3.2 GREEN `src/tokenmeter/repair.ts` + `session-events.ts` unwired; empty/trunc lastGood; never missing-delete/`busy`/`io`; no dual-write.
 
 ## Phase 4: PR4 cutover (≤280)
 
