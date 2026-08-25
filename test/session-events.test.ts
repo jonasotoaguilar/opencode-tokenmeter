@@ -41,6 +41,26 @@ describe("session-events PR3", () => {
       }),
     ).toBeNull()
     expect(
+      E.getTargetSessionId({
+        type: "message.updated",
+        properties: { part: { sessionID: "sess-part" } },
+      }),
+    ).toBe("sess-part")
+    expect(
+      E.getTargetSessionId({
+        type: "session.deleted",
+        properties: { info: { id: "sess-del" } },
+      }),
+    ).toBe("sess-del")
+    expect(
+      E.getTargetSessionId({
+        type: "session.created",
+        properties: { info: { id: "sess-gen" } },
+      }),
+    ).toBe("sess-gen")
+    expect(E.isSingleSessionEvent(null)).toBe(false)
+    expect(E.isCompactionEvent({ type: "session.compacted" })).toBe(true)
+    expect(
       readFileSync("src/tokenmeter/session-events.ts", "utf8"),
     ).not.toContain('from "./store"')
   })
