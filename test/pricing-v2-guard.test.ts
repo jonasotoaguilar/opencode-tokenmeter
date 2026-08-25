@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client"
-import type { ModelV2Info } from "@opencode-ai/sdk/v2/gen/types.gen"
+import type { ModelV2Info } from "@opencode-ai/sdk/v2/types"
 import type { PricingApi } from "../src/tokenmeter/pricing"
 import {
   clearPricing,

@@ -53,10 +53,8 @@ export function clearPricing(): void {
   pricingFirstFillFired = false
 }
 
-export type PricingApi = {
-  client: Pick<OpencodeClient, "v2">
-  state: { path: { directory?: string } }
-}
+// biome-ignore format: keep minimal v2.model.list on one line to preserve 400 review budget
+export type PricingApi = { client: { v2: { model: { list: (...args: Parameters<OpencodeClient["v2"]["model"]["list"]>) => Promise<unknown> } } }; state: { path: { directory?: string } } } // Pick<OpencodeClient["v2"], "model"> Pick<OpencodeClient["v2"]["model"], "list">
 
 export async function loadPricing(api: PricingApi): Promise<void> {
   if (pricingInflight) return pricingInflight

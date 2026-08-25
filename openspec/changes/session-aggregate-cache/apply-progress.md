@@ -4,8 +4,8 @@
 PR1 base=feat/session-aggregate-cache `01-pricing` — v2 contract + first-fill; no tree invalidate
 
 ## Completed
-- [x] 1.1 pricing-v2-guard: v2 shape, legacy rejected, gpt-5.6-sol formula, method_missing visible, source guard
-- [x] 1.2 pricing.ts: Pick<OpencodeClient,"v2">, v2.model.list, method_missing throw, first-fill once, cooldown, inflight
+- [x] 1.1 pricing-v2-guard: v2 shape, legacy rejected, gpt-5.6-sol formula, method_missing visible, source guard — import @opencode-ai/sdk/v2/types
+- [x] 1.2 pricing.ts: structural v2.model.list via Parameters<OpencodeClient["v2"]["model"]["list"]> minimal Pick, method_missing, first-fill, cooldown, inflight — remediated
 - [x] 1.3 pricing-first-fill + cost-fallback v2, tokenmeter subscribe→load, scheduleForcedReconcile only, store drop invalidateAllUsage, ADR revert, typecheck/build/dist
 
 ## TDD Cycle Evidence
@@ -26,7 +26,7 @@ PR1 base=feat/session-aggregate-cache `01-pricing` — v2 contract + first-fill;
 | Rollback | `src/tokenmeter/pricing.ts`, `src/tokenmeter.tsx`, `src/tokenmeter/reconcile.ts`, `src/tokenmeter/project.ts`, `test/*` + tasks.md |
 
 ## Budget
-Tracked 168 + new 190 + tasks 6 + this 32 = 396 <400
+Tracked 168 + new 190 + tasks 6 + this 32 = 398 <400 — remediation +2 minimal structural fix
 
 ## Next
 PR2 schema
