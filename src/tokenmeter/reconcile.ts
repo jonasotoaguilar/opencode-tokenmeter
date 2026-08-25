@@ -246,20 +246,6 @@ export function scheduleReconcile(
   reconcileTimer = setTimeout(() => void reconcile(api, root), delay)
 }
 
-export function getCurrentRoot(): string | null {
-  return currentRoot
-}
-
-export function scheduleForcedReconcile(
-  api: ReconcileApi,
-  delay: number = RECONCILE_DELAY,
-): void {
-  const root = currentRoot
-  if (!root) return
-  clearTimeout(reconcileTimer ?? undefined)
-  reconcileTimer = setTimeout(() => void reconcile(api, root, true), delay)
-}
-
 /**
  * Periodic recovery for missed-event races: a delegated child may become
  * visible from the client tree without any tree-invalidating event (e.g.

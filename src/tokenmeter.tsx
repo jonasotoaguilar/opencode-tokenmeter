@@ -65,7 +65,7 @@ import { handleProjectMilestone } from "./tokenmeter/milestone"
 import { UsagePanel } from "./tokenmeter/panel"
 import { SessionPromptRight } from "./tokenmeter/panel/footer"
 import { showSettingsDialog } from "./tokenmeter/panel/settings-dialog"
-import { loadPricing, onPricingFirstFill } from "./tokenmeter/pricing"
+import { loadPricing } from "./tokenmeter/pricing"
 import {
   disposeProjectRefresh,
   projectSnapshot,
@@ -77,7 +77,6 @@ import {
   disposeReconcile,
   IDLE_DELAY,
   RECONCILE_DELAY,
-  scheduleForcedReconcile,
   scheduleReconcile,
 } from "./tokenmeter/reconcile"
 import {
@@ -113,12 +112,6 @@ const tui: TuiPlugin = async (api) => {
     // The toggle-sections shortcut preference loads before the toggle layer
     // registers, so the startup binding reflects the persisted choice.
     loadToggleShortcut(api)
-    // Pricing first-fill recovery: when the initial pricing is empty, Session publishes safe-zero.
-    // The first non-empty fill schedules a targeted forced reconcile for the current Session tree exactly once.
-    // Listener is registered before the first load so the empty→non-empty transition is not missed.
-    const disposePricingFirstFill = onPricingFirstFill(() => {
-      scheduleForcedReconcile(api, RECONCILE_DELAY)
-    })
     // Warm the OpenAI pricing cache from host SDK `v2.model.list` (fail-contained).
     // Reuses Unit1–3 pricing helpers; never throws; ensures deleted-session
     // monetary resolution can estimate payload-only sessions when provider/model
@@ -284,7 +277,6 @@ const tui: TuiPlugin = async (api) => {
     // disposeProjectRefresh in the lifecycle below.
     startProjectPolling(api)
     api.lifecycle.onDispose(() => {
-      disposePricingFirstFill()
       disposeReconcile()
       disposeProjectRefresh()
       unregisterPalette()
