@@ -42,10 +42,11 @@ Apply PR1A. Dirty worktree ≠ baseline. Skills: sdd-apply, chained-pr, stacked-
 - [x] 1.2 GREEN `src/tokenmeter/pricing.ts`: `Pick<OpencodeClient,"v2">` structural `Parameters<OpencodeClient["v2"]["model"]["list"]>`; `v2.model.list`; visible `method_missing`; no `onPricingFirstFill`; never add `invalidateAllUsage`.
 - [x] 1.3 RED `test/pricing-first-fill.test.ts` + `cost-fallback.test.ts` → typed `v2.model.list`. GREEN `tokenmeter.tsx` subscribe then `loadPricing`; `scheduleForcedReconcile` / `onPricingFirstFill`; drop `store.ts` `invalidateAllUsage`; revert dirty `docs/adr/0007-*.md`. First-fill — **completed in PR1B** (Unit 1B base=PR1A `01b-first-fill`). `typecheck`; `test:dist`; grep no probe/`client.model.list`.
 
-## Phase 2: PR2 schema (≤300)
+## Phase 2: PR2 schema/repository split (≤300 each)
 
 - [x] 2.1 RED `test/session-totals.test.ts`: PR2A schema — fresh/legacy/idempotent/one-row/two-conn/fingerprint/uninvoked/no-additive — 7 pass (CAS/busy/delete → PR2B)
-- [ ] 2.2 GREEN `src/tokenmeter/session-totals.ts`+types: DDL; `migrateSessionTotals` WAL/`user_version=1` drop `projects`/`tombstones`; `casReplace`/`read`/`sumProject`/`readTree`/`markDeleted`/`listPricingRepair`; SHA-256 `id:cost:tokens`. Not called from `db.ts`.
+- [x] 2.2 PR2B CAS — `src/tokenmeter/session-totals.ts` `CasResult` + `casReplace` absolute expected-revision replace (insert at 0 → rev1, match bump, duplicate `unchanged` no bump, conflict/parallel loser returns stored no additive delta) — strict-TDD — 4 CAS tests + no-additive SQL, uninvoked
+- [ ] 2.3 PR2C aggregates/deletion/repair-query — `sumProject`/`readTree`/`markDeleted`/`listPricingRepair` + project aggregate/deletion/pricing repair tests — deferred
 
 ## Phase 3: PR3 modules (≤350)
 

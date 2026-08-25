@@ -136,3 +136,149 @@ export function readSessionTotals(
   })
   return isFail(r) ? r : (r as SessionTotals | null)
 }
+export type CasResult =
+  | { ok: true; row: SessionTotals; unchanged?: true }
+  | { ok: false; reason: "conflict"; stored: SessionTotals }
+  | Fail
+export function casReplace(
+  dbPath: string | null,
+  projectId: string,
+  sessionId: string,
+  expectedRevision: number,
+  t: {
+    costReported: number
+    costEstimated: number
+    input: number
+    output: number
+    reasoning: number
+    cacheRead: number
+    cacheWrite: number
+    cache: number
+    context: number
+    fingerprint: string
+    pricingVersion: string
+    updatedAt: number
+  },
+): CasResult {
+  const r = withDb(dbPath, (db) => {
+    db.exec(TABLE_SQL)
+    db.exec(INDEX_SQL)
+    const tx = db.transaction(() => {
+      const row = db
+        .query(
+          "SELECT * FROM session_totals WHERE project_id = ? AND session_id = ?",
+        )
+        .get(projectId, sessionId) as Record<string, unknown> | null
+      if (!row) {
+        if (expectedRevision !== 0) {
+          return { _conflict: true, stored: null as unknown as SessionTotals }
+        }
+        db.query(
+          "INSERT INTO session_totals (project_id, session_id, cost_reported, cost_estimated, input, output, reasoning, cache_read, cache_write, cache, context, revision, fingerprint, pricing_version, is_deleted, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(
+          projectId,
+          sessionId,
+          t.costReported,
+          t.costEstimated,
+          t.input,
+          t.output,
+          t.reasoning,
+          t.cacheRead,
+          t.cacheWrite,
+          t.cache,
+          t.context,
+          1,
+          t.fingerprint,
+          t.pricingVersion,
+          0,
+          t.updatedAt,
+          null,
+        )
+        const inserted = db
+          .query(
+            "SELECT * FROM session_totals WHERE project_id = ? AND session_id = ?",
+          )
+          .get(projectId, sessionId) as Record<string, unknown>
+        return { ok: true as const, row: mapRow(inserted) }
+      }
+      const stored = mapRow(row)
+      if (stored.revision !== expectedRevision) {
+        return { _conflict: true, stored }
+      }
+      const same =
+        stored.costReported === t.costReported &&
+        stored.costEstimated === t.costEstimated &&
+        stored.input === t.input &&
+        stored.output === t.output &&
+        stored.reasoning === t.reasoning &&
+        stored.cacheRead === t.cacheRead &&
+        stored.cacheWrite === t.cacheWrite &&
+        stored.cache === t.cache &&
+        stored.context === t.context &&
+        stored.fingerprint === t.fingerprint &&
+        stored.pricingVersion === t.pricingVersion
+      if (same) {
+        return { ok: true as const, row: stored, unchanged: true as const }
+      }
+      const nextRev = stored.revision + 1
+      db.query(
+        "UPDATE session_totals SET cost_reported = ?, cost_estimated = ?, input = ?, output = ?, reasoning = ?, cache_read = ?, cache_write = ?, cache = ?, context = ?, fingerprint = ?, pricing_version = ?, updated_at = ?, revision = ? WHERE project_id = ? AND session_id = ?",
+      ).run(
+        t.costReported,
+        t.costEstimated,
+        t.input,
+        t.output,
+        t.reasoning,
+        t.cacheRead,
+        t.cacheWrite,
+        t.cache,
+        t.context,
+        t.fingerprint,
+        t.pricingVersion,
+        t.updatedAt,
+        nextRev,
+        projectId,
+        sessionId,
+      )
+      const updated = db
+        .query(
+          "SELECT * FROM session_totals WHERE project_id = ? AND session_id = ?",
+        )
+        .get(projectId, sessionId) as Record<string, unknown>
+      return { ok: true as const, row: mapRow(updated) }
+    })
+    const result = tx.immediate() as unknown as Record<string, unknown>
+    if (result && "_conflict" in result) {
+      const stored = (result as { stored: SessionTotals | null }).stored
+      if (!stored) {
+        return {
+          ok: false as const,
+          reason: "conflict" as const,
+          stored: {
+            projectId,
+            sessionId,
+            costReported: 0,
+            costEstimated: 0,
+            input: 0,
+            output: 0,
+            reasoning: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cache: 0,
+            context: 0,
+            revision: 0,
+            fingerprint: "",
+            pricingVersion: "",
+            isDeleted: false,
+            updatedAt: 0,
+            deletedAt: null,
+          },
+        }
+      }
+      return { ok: false as const, reason: "conflict" as const, stored }
+    }
+    return result as CasResult
+  })
+  if (isFail(r)) return r
+  return r as CasResult
+}

@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  casReplace,
   computeFingerprint,
   migrateSessionTotals,
   readSessionTotals,
@@ -251,5 +252,127 @@ describe("session totals PR2A", () => {
     expect(src).toContain("BEGIN IMMEDIATE")
     expect(src).toContain("PRAGMA user_version")
     expect(src).toContain("PRAGMA busy_timeout = 5000")
+  })
+})
+describe("session totals PR2B CAS", () => {
+  const totalsA = {
+    costReported: 1.23,
+    costEstimated: 0.45,
+    input: 10,
+    output: 20,
+    reasoning: 5,
+    cacheRead: 2,
+    cacheWrite: 3,
+    cache: 5,
+    context: 40,
+    fingerprint: "fp-a",
+    pricingVersion: "hv1",
+    updatedAt: 100,
+  }
+  const totalsB = {
+    costReported: 2.0,
+    costEstimated: 1.0,
+    input: 15,
+    output: 25,
+    reasoning: 6,
+    cacheRead: 4,
+    cacheWrite: 1,
+    cache: 5,
+    context: 51,
+    fingerprint: "fp-b",
+    pricingVersion: "hv1",
+    updatedAt: 200,
+  }
+  test("casReplace inserts at expected 0 with revision 1", () => {
+    const { d, p } = tmp()
+    try {
+      expect(migrateSessionTotals(p).ok).toBe(true)
+      const r = casReplace(p, "proj-a", "sess-1", 0, totalsA)
+      expect(r.ok).toBe(true)
+      if (r.ok) {
+        expect(r.row.revision).toBe(1)
+        expect(r.row.costReported).toBe(1.23)
+        expect(r.row.costEstimated).toBe(0.45)
+        expect(r.row.fingerprint).toBe("fp-a")
+        expect(r.row.projectId).toBe("proj-a")
+        expect(r.row.sessionId).toBe("sess-1")
+      }
+      const read = readSessionTotals(p, "proj-a", "sess-1")
+      expect(read && "revision" in read && read.revision).toBe(1)
+    } finally {
+      clean(d)
+    }
+  })
+  test("casReplace match commits bump and duplicate unchanged", () => {
+    const { d, p } = tmp()
+    try {
+      expect(migrateSessionTotals(p).ok).toBe(true)
+      expect(casReplace(p, "proj-a", "sess-1", 0, totalsA).ok).toBe(true)
+      const r2 = casReplace(p, "proj-a", "sess-1", 1, totalsB)
+      expect(r2.ok).toBe(true)
+      if (r2.ok) expect(r2.row.revision).toBe(2)
+      const dup = casReplace(p, "proj-a", "sess-1", 2, totalsB)
+      expect(dup.ok).toBe(true)
+      if (dup.ok) {
+        expect((dup as { unchanged?: true }).unchanged).toBe(true)
+        expect(dup.row.revision).toBe(2)
+      }
+      const read = readSessionTotals(p, "proj-a", "sess-1") as unknown as {
+        revision: number
+      }
+      expect(read.revision).toBe(2)
+    } finally {
+      clean(d)
+    }
+  })
+  test("casReplace conflict returns stored and does not store deltas", () => {
+    const { d, p } = tmp()
+    try {
+      expect(migrateSessionTotals(p).ok).toBe(true)
+      expect(casReplace(p, "proj-a", "sess-1", 0, totalsA).ok).toBe(true)
+      expect(casReplace(p, "proj-a", "sess-1", 1, totalsB).ok).toBe(true)
+      const miss = casReplace(p, "proj-a", "sess-1", 1, totalsA)
+      expect(miss.ok).toBe(false)
+      if (!miss.ok && "reason" in miss) expect(miss.reason).toBe("conflict")
+      if (!miss.ok && "stored" in miss)
+        expect((miss as { stored: { revision: number } }).stored.revision).toBe(
+          2,
+        )
+      const read = readSessionTotals(p, "proj-a", "sess-1") as unknown as {
+        costReported: number
+        revision: number
+      }
+      expect(read.costReported).toBe(2.0)
+      expect(read.revision).toBe(2)
+      const src = readFileSync("src/tokenmeter/session-totals.ts", "utf8")
+      expect(src).not.toMatch(/SET\s+cost_reported\s*=\s*cost_reported\s*\+/)
+      expect(src).not.toMatch(/cost\s*=\s*cost\s*\+/)
+    } finally {
+      clean(d)
+    }
+  })
+  test("casReplace parallel loser repairs no deltas", () => {
+    const { d, p } = tmp()
+    try {
+      expect(migrateSessionTotals(p).ok).toBe(true)
+      expect(casReplace(p, "proj-a", "sess-1", 0, totalsA).ok).toBe(true)
+      const w1 = casReplace(p, "proj-a", "sess-1", 1, totalsB)
+      expect(w1.ok).toBe(true)
+      const w2 = casReplace(p, "proj-a", "sess-1", 1, {
+        ...totalsA,
+        fingerprint: "fp-a2",
+        updatedAt: 300,
+      })
+      expect(w2.ok).toBe(false)
+      if (!w2.ok && "reason" in w2) expect(w2.reason).toBe("conflict")
+      const read = readSessionTotals(p, "proj-a", "sess-1") as unknown as {
+        costReported: number
+        fingerprint: string
+      }
+      expect(read.costReported).toBe(2.0)
+      expect(read.fingerprint).toBe("fp-b")
+    } finally {
+      clean(d)
+    }
   })
 })
