@@ -46,9 +46,11 @@
  * instead of stacking ticks, and disposal clears it.
  */
 
+import { projectDbPath } from "./db"
 import { buildGroups } from "./groups"
 import { usageOf } from "./math"
 import { loadPricing } from "./pricing"
+import { readTree } from "./session-totals"
 import {
   clearRehydrate,
   getStatus,
@@ -78,14 +80,12 @@ export type ReconcileApi = {
       children(params: { sessionID: string }): Promise<{ data?: SessionInfo[] }>
       get(params: { sessionID: string }): Promise<{ data?: SessionInfo }>
     }
-    v2?: {
-      model?: {
-        list?(params?: unknown): Promise<unknown>
-      }
+    project?: {
+      current(params: { directory: string }): Promise<{ data?: { id: string } }>
     }
   }
   state: {
-    path?: { directory?: string }
+    path?: { directory?: string; state?: string }
     session: {
       status(sessionID: string): { type?: SessionStatusType } | undefined
     }
@@ -101,6 +101,95 @@ let currentRoot: string | null = null
 let reconcileTimer: ReturnType<typeof setTimeout> | null = null
 let maintenanceTimer: ReturnType<typeof setInterval> | null = null
 let reconcileSeq = 0
+
+async function publishCached(api: ReconcileApi, rootID: string): Promise<void> {
+  try {
+    const stateDir = (
+      api as unknown as { state?: { path?: { state?: string } } }
+    )?.state?.path?.state as string | undefined
+    const directory = (
+      api as unknown as { state?: { path?: { directory?: string } } }
+    )?.state?.path?.directory as string | undefined
+    if (!stateDir || !directory) return
+    const dbPath = projectDbPath(stateDir)
+    if (!dbPath) return
+    let projectID: string | undefined
+    try {
+      const r = await (
+        api as unknown as {
+          client?: {
+            project?: {
+              current?: (p: unknown) => Promise<{ data?: { id?: string } }>
+            }
+          }
+        }
+      )?.client?.project?.current?.({
+        directory: directory,
+      } as unknown as never)
+      projectID = (r as { data?: { id?: string } } | undefined)?.data?.id
+    } catch {}
+    if (!projectID) return
+    const ids = await discoverTree(api, rootID)
+    const rows = readTree(dbPath, projectID, ids) as unknown
+    if (!rows || (rows as { ok?: boolean }).ok === false) return
+    const list = rows as Array<{
+      costReported: number
+      costEstimated: number
+      input: number
+      output: number
+      reasoning: number
+      cacheRead: number
+      cacheWrite: number
+      cache: number
+    }>
+    if (!list.length) return
+    let cost = 0
+    let totalTokens = 0
+    let input = 0
+    let output = 0
+    let reasoning = 0
+    let cacheRead = 0
+    let cacheWrite = 0
+    let cache = 0
+    for (const r of list) {
+      cost += r.costReported + r.costEstimated
+      const ctx = r.input + r.output + r.reasoning + r.cacheRead + r.cacheWrite
+      totalTokens += ctx
+      input += r.input
+      output += r.output
+      reasoning += r.reasoning
+      cacheRead += r.cacheRead
+      cacheWrite += r.cacheWrite
+      cache += r.cache
+    }
+    const runningOf = (sid: string) => {
+      const s = (
+        api as unknown as {
+          state?: {
+            session?: { status?: (id: string) => { type?: string } | undefined }
+          }
+        }
+      )?.state?.session?.status?.(sid)?.type
+      return s === "busy" || s === "retry"
+    }
+    const groups = buildGroups(ids, rootID, runningOf)
+    const snap = {
+      rootID,
+      cost,
+      totalTokens,
+      input,
+      output,
+      reasoning,
+      cacheRead,
+      cacheWrite,
+      cache,
+      delegations: ids.length - 1,
+      agents: groups.length,
+      groups,
+    }
+    if (list.length) setSnapshot(snap as unknown as UsageSnapshot)
+  } catch {}
+}
 
 /**
  * Fetches the FULL message list from the authoritative client. The host's
@@ -153,6 +242,7 @@ export async function reconcile(
   force = false,
 ): Promise<void> {
   const seq = ++reconcileSeq
+  await publishCached(api, rootID)
   try {
     await loadPricing(api as unknown as Parameters<typeof loadPricing>[0])
   } catch {}
@@ -275,9 +365,9 @@ function maintenanceTick(api: ReconcileApi): void {
 export function activateRoot(api: ReconcileApi, rootID: string): void {
   currentRoot = rootID
   clearTimeout(reconcileTimer ?? undefined)
-  // A route change replaces the maintenance timer instead of stacking ticks.
   if (maintenanceTimer) clearInterval(maintenanceTimer)
   maintenanceTimer = setInterval(() => maintenanceTick(api), MAINTENANCE_DELAY)
+  void publishCached(api, rootID)
   void reconcile(api, rootID, true)
 }
 

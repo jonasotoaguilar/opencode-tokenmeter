@@ -37,19 +37,15 @@
  * that root and its descendant tree instead of trusting a previously-loaded
  *  map. The Project section is debounce-refreshed on the same cadence (route
  *  changes and message/session/status/project events), resolved from the
- *  client project + session.list endpoints; its own failure
- *  leaves the Project placeholder and never breaks the Session panel. Project
- *  usage = authoritative live session.list sum + a persisted deleted-session
- *  aggregate in the plugin-owned SQLite store (tokenmeter.sqlite under
- *  api.state.path.state — never api.kv, which concurrent TUIs would
- *  clobber): session.deleted records the delete payload's usage (or the
- *  last known observed usage) into that aggregate BEFORE the refresh,
- *  atomically and exactly once per session across processes, and passes the
- *  deleted session's projectID as a refresh hint, so the Project section
- *  keeps its total even if project.current() is momentarily unresolved
- *  right after the delete. A bounded ~2 s polling timer refreshes Project on
- *  top of the event-driven fast path so a sibling OpenCode process working
- *  in the same project appears in this sidebar. The coins total is each
+ *  local SQLite SUM of session_totals (including retained deleted rows);
+ *  its own failure leaves the Project placeholder and never breaks the
+ *  Session panel. Project totals are the authoritative SQLite SUM per
+ *  project_id, with session.deleted marking the row is_deleted so totals
+ *  survive deletion and restart. A projectIDHint preserves the project
+ *  context when project.current() is momentarily unresolved after a delete.
+ *  A bounded ~2 s SQLite polling timer refreshes Project on top of the
+ *  event-driven fast path so a sibling OpenCode process appears promptly.
+ *  The coins total is each
  *  session's complete
  *  per-session TOKEN SPEND (Σ input + Σ output + Σ reasoning + Σ
  *  cache.read + Σ cache.write across ALL assistant messages, reconstructing
@@ -60,7 +56,7 @@
 /** @jsxImportSource @opentui/solid */
 import type { TuiPlugin } from "@opencode-ai/plugin/tui"
 import { createEffect, createRoot } from "solid-js"
-import { projectDbPath, recordDeletedSession } from "./tokenmeter/db"
+import { projectDbPath } from "./tokenmeter/db"
 import { handleProjectMilestone } from "./tokenmeter/milestone"
 import { UsagePanel } from "./tokenmeter/panel"
 import { SessionPromptRight } from "./tokenmeter/panel/footer"
@@ -80,6 +76,7 @@ import {
   scheduleForcedReconcile,
   scheduleReconcile,
 } from "./tokenmeter/reconcile"
+import { markDeleted, migrateSessionTotals } from "./tokenmeter/session-totals"
 import {
   cycleSubagents,
   loadSettings,
@@ -93,7 +90,6 @@ import {
 import {
   forgetSession,
   invalidateUsage,
-  observedSessionUsage,
   removeMessageUsage,
   setStatus,
   upsertMessageUsage,
@@ -113,6 +109,14 @@ const tui: TuiPlugin = async (api) => {
     // The toggle-sections shortcut preference loads before the toggle layer
     // registers, so the startup binding reflects the persisted choice.
     loadToggleShortcut(api)
+    try {
+      migrateSessionTotals(
+        projectDbPath(
+          (api as unknown as { state?: { path?: { state?: string } } }).state
+            .path.state,
+        ),
+      )
+    } catch {}
     // Pricing first-fill recovery: when the initial pricing is empty, Session publishes safe-zero.
     // The first non-empty fill schedules a targeted forced reconcile for the current Session tree exactly once.
     // Listener is registered before the first load so the empty to non-empty transition is not missed.
@@ -203,27 +207,31 @@ const tui: TuiPlugin = async (api) => {
         refreshAll(RECONCILE_DELAY)
       }),
       api.event.on("session.deleted", (e) => {
-        const info = e.properties.info
-        // Record the deleted session's final usage into the plugin-owned
-        // SQLite aggregate BEFORE the refresh: payload fields (authoritative
-        // server fields) merged per-component with the plugin's observed
-        // usage, captured before the store forgets the session. The write is
-        // atomic and exactly-once per session across processes (tombstone
-        // admission), so deleting never changes the project total and a
-        // duplicate/cascade event never inflates it. No kv readiness gate:
-        // SQLite is owned by the plugin, not the host kv store.
-        const observed = observedSessionUsage(info?.id)
-        recordDeletedSession(
-          projectDbPath(api.state.path.state),
-          info,
-          observed,
-        )
-        forgetSession(info?.id)
-        // Pass the deleted session's projectID as a refresh hint: right after
-        // a delete the context may not resolve project.current() yet, and the
-        // refresh keeps the hinted projectID so it still sums the live list
-        // plus the (already updated) deleted aggregate — no error flash.
-        refreshAll(RECONCILE_DELAY, info?.projectID)
+        const info = e.properties.info as unknown as {
+          id?: string
+          sessionID?: string
+          projectID?: string
+        }
+        const sid = info?.id ?? info?.sessionID
+        const pid = info?.projectID
+        if (sid && pid) {
+          try {
+            markDeleted(
+              projectDbPath(
+                (
+                  api as unknown as {
+                    state: { path: { state: string } }
+                  }
+                ).state.path.state,
+              ),
+              pid,
+              sid,
+              Date.now(),
+            )
+          } catch {}
+        }
+        forgetSession(sid)
+        refreshAll(RECONCILE_DELAY, pid)
       }),
       api.event.on("session.status", (e) => {
         const status = e.properties.status

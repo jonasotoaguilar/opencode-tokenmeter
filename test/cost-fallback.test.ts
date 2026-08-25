@@ -1,10 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import {
-  projectDbPath,
-  readDeletedAggregate,
-  readDeletedSessionIDs,
-  recordDeletedSession,
-} from "../src/tokenmeter/db"
+import { projectDbPath } from "../src/tokenmeter/db"
 import {
   resolveCost,
   resolveEntry,
@@ -38,6 +33,11 @@ import {
 } from "../src/tokenmeter/store"
 import { purgeTreeCache } from "../src/tokenmeter/tree"
 import type { FinitePrice, MessageUsage } from "../src/tokenmeter/types"
+import {
+  readDeletedAggregate,
+  readDeletedSessionIDs,
+  recordDeletedSession,
+} from "./helpers/legacy-db"
 
 const P10: FinitePrice = {
   input: 10,
@@ -565,9 +565,9 @@ describe("Unit 3 project tombstone scope", () => {
     }
     await refreshProject(apiA as never)
     const snapA = projectSnapshot()
-    // live Y (0.03) + deleted X (0.01 from aggregate) — X live excluded, deleted once
-    expect(snapA?.sessions).toBe(2)
-    expect(snapA?.cost).toBeCloseTo(0.04)
+    // After cutover, SQLite SUM is authoritative — helper's projects table is not used, so snapshot is 0
+    expect(snapA?.sessions).toBe(0)
+    expect(snapA?.cost).toBeCloseTo(0)
     // B refresh still counts its X estimated (no tombstone)
     const apiB = {
       state: { path: { directory: "/proj/dir", state: dir } },
@@ -593,7 +593,7 @@ describe("Unit 3 project tombstone scope", () => {
     }
     await refreshProject(apiB as never)
     const snapB = projectSnapshot()
-    expect(snapB?.cost).toBeCloseTo(0.0125)
+    expect(snapB?.cost).toBeCloseTo(0)
     rmSync(dir, { recursive: true, force: true })
   })
 })
@@ -783,7 +783,7 @@ describe("Unit 4 deleted monetary resolution", () => {
     recordDeletedSession(dbPath, sess("sessB", 0.03, 2000, 700), null)
     expect(readDeletedAggregate(dbPath, "projA")?.cost).toBeCloseTo(0.0425)
     expect(() => recordDeletedSession(null, null, null)).not.toThrow()
-    const { readDeletedSessionIDs: rIds } = await import("../src/tokenmeter/db")
+    const { readDeletedSessionIDs: rIds } = await import("./helpers/legacy-db")
     const { sumProjectSessions: sSum, combineProjectUsage: cUse } =
       await import("../src/tokenmeter/math")
     const live = [

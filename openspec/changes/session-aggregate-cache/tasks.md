@@ -55,8 +55,8 @@ Apply PR1A. Dirty worktree ≠ baseline. Skills: sdd-apply, chained-pr, stacked-
 
 ## Phase 4: PR4 cutover (≤280)
 
-- [ ] 4.1 RED paint=cache before RPC; Project SUM incl deleted/peer; tree/agent=tree IDs; 2s SQLite SUM; 0 `session.list` 10000; clean-break grep `history.v4|recordDeletedSession|readDeleted|PROJECT_SESSION_LIMIT|invalidateAllUsage|client.model.list`.
-- [ ] 4.2 GREEN `db.ts` `withDb` migrate; wire `tokenmeter.tsx` `project.ts` `reconcile.ts` `math.ts` `tree.ts` `groups.ts`; same candidate delete old path; `session.deleted`→`markDeleted`; no shim.
+- [x] 4.1 RED paint=cache before RPC; Project SUM incl deleted/peer; tree/agent=tree IDs; 2s SQLite SUM; 0 `session.list` 10000; clean-break grep `history.v4|recordDeletedSession|readDeleted|PROJECT_SESSION_LIMIT|invalidateAllUsage|client.model.list`.
+- [x] 4.2 GREEN `db.ts` `withDb` migrate; wire `tokenmeter.tsx` `project.ts` `reconcile.ts` `math.ts` `tree.ts` `groups.ts`; same candidate delete old path; `session.deleted`→`markDeleted`; no shim.
 
 ## Phase 5: PR5 docs (≤200)
 

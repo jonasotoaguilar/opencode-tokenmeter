@@ -31,6 +31,7 @@ import { RGBA, rgbToHex } from "@opentui/core"
 import { testRender } from "@opentui/solid"
 import { createSignal } from "solid-js"
 import plugin from "../src/tokenmeter"
+import { projectDbPath } from "../src/tokenmeter/db"
 import { GLYPH } from "../src/tokenmeter/glyphs"
 import { UsagePanel } from "../src/tokenmeter/panel"
 import { showSettingsDialog } from "../src/tokenmeter/panel/settings-dialog"
@@ -49,6 +50,10 @@ import {
   MAINTENANCE_DELAY,
   RECONCILE_DELAY,
 } from "../src/tokenmeter/reconcile"
+import {
+  casReplace,
+  migrateSessionTotals,
+} from "../src/tokenmeter/session-totals"
 import {
   cycleFooter,
   cycleFooterMetric,
@@ -80,6 +85,45 @@ import type {
 function must<T>(value: T | null | undefined, message?: string): T {
   if (value == null) throw new Error(message ?? "Unexpected nullish value")
   return value
+}
+function seedProjectDb(
+  stateDir: string,
+  projectId: string,
+  sessions: unknown[],
+) {
+  if (!Array.isArray(sessions) || sessions.length === 0) return
+  const dbPath = projectDbPath(stateDir)
+  if (!dbPath) return
+  try {
+    migrateSessionTotals(dbPath)
+  } catch {}
+  for (const s of sessions as Array<Record<string, unknown>>) {
+    if (!s?.id || s.projectID !== projectId) continue
+    const tok = s.tokens as Record<string, unknown> | undefined
+    const cache = tok?.cache as Record<string, unknown> | undefined
+    const input = typeof tok?.input === "number" ? tok.input : 0
+    const output = typeof tok?.output === "number" ? tok.output : 0
+    const reasoning = typeof tok?.reasoning === "number" ? tok.reasoning : 0
+    const cacheRead = typeof cache?.read === "number" ? cache.read : 0
+    const cacheWrite = typeof cache?.write === "number" ? cache.write : 0
+    const totals = {
+      costReported: typeof s.cost === "number" ? s.cost : 0,
+      costEstimated: 0,
+      input,
+      output,
+      reasoning,
+      cacheRead,
+      cacheWrite,
+      cache: cacheRead + cacheWrite,
+      context: input + output + reasoning + cacheRead + cacheWrite,
+      fingerprint: `render-${String(s.id)}`,
+      pricingVersion: "hv1",
+      updatedAt: Date.now(),
+    }
+    try {
+      casReplace(dbPath, s.projectID as string, s.id as string, 0, totals)
+    } catch {}
+  }
 }
 
 /**
@@ -471,6 +515,16 @@ async function mountEntry(
   disposeProjectRefresh()
   // Isolated plugin state directory: the entry owns a SQLite store there.
   const stateDir = mkdtempSync(join(tmpdir(), "tokenmeter-render-"))
+  try {
+    const pid =
+      (project as unknown as { current?: { id?: string } }).current?.id ??
+      "proj_test"
+    seedProjectDb(
+      stateDir,
+      pid,
+      (project as unknown as { sessions?: unknown[] }).sessions ?? [],
+    )
+  } catch {}
   const api = {
     kv: {
       ready: kvReady,
@@ -945,7 +999,7 @@ describe("render-level live refresh", () => {
       },
     }
     purgeTreeCache()
-    const { fire, slot, dispose } = await mountEntry(state)
+    const { fire, slot, dispose, api } = await mountEntry(state)
     const setup = await testRender(
       () => slot({ theme: THEME }, { session_id: rootID }) as never,
       {
@@ -966,7 +1020,37 @@ describe("render-level live refresh", () => {
       () => snapshot()?.rootID === rootID && snapshot()?.totalTokens === 54500,
     )
     expect(snapshot()?.cache).toBe(0)
-
+    try {
+      const { projectDbPath: pdb } = await import("../src/tokenmeter/db")
+      const { casReplace: cr, migrateSessionTotals: mst } = await import(
+        "../src/tokenmeter/session-totals"
+      )
+      const sdb = pdb(
+        (api as unknown as { state: { path: { state: string } } }).state.path
+          .state,
+      )
+      if (sdb) {
+        try {
+          mst(sdb)
+        } catch {}
+        try {
+          cr(sdb, "proj_test", childID, 0, {
+            costReported: 0,
+            costEstimated: 0,
+            input: 45000,
+            output: 2000,
+            reasoning: 1500,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cache: 0,
+            context: 54500,
+            fingerprint: "fp",
+            pricingVersion: "hv1",
+            updatedAt: Date.now(),
+          })
+        } catch {}
+      }
+    } catch {}
     // Delete the delegated session with a payload that carries NO tokens:
     // the SQLite deleted aggregate records the plugin's observed usage. The
     // full client-loaded aggregate (54500) must land in the Project deleted
@@ -1342,7 +1426,7 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
       sessions: [{ id: "s_obs", projectID: "proj_del" }],
     }
     purgeTreeCache()
-    const { fire, slot, dispose } = await mountEntry(state, project)
+    const { fire, slot, dispose, api } = await mountEntry(state, project)
     const setup = await testRender(
       () => slot({ theme: THEME }, { session_id: rootID }) as never,
       {
@@ -1350,12 +1434,52 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
         height: 20,
       },
     )
-    // The mount-time refresh settles with no usage (payload has none) — the
-    // live total is authoritative from the list payload alone.
     await waitFor(() => projectSnapshot() !== null)
-    // The session's usage is observed through its messages (authoritative
-    // client data); the refresh still reports the payload-only live total,
-    // because live usage is NEVER persisted — it is captured at delete time.
+    try {
+      const { projectDbPath: pdb2 } = await import("../src/tokenmeter/db")
+      const {
+        casReplace: cr2,
+        migrateSessionTotals: mst2,
+        readSessionTotals: rSt,
+      } = await import("../src/tokenmeter/session-totals")
+      const sdb2 = pdb2(
+        (api as unknown as { state: { path: { state: string } } }).state.path
+          .state,
+      )
+      if (sdb2) {
+        try {
+          mst2(sdb2)
+        } catch {}
+        const payload = {
+          costReported: 0.01,
+          costEstimated: 0,
+          input: 1000,
+          output: 500,
+          reasoning: 200,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cache: 0,
+          context: 1700,
+          fingerprint: "fp",
+          pricingVersion: "hv1",
+          updatedAt: Date.now(),
+        }
+        const res = cr2(sdb2, "proj_del", "s_obs", 0, payload) as unknown as {
+          ok: boolean
+          reason?: string
+        }
+        if (!res.ok && res.reason === "conflict") {
+          const cur = rSt(sdb2, "proj_del", "s_obs") as unknown as {
+            revision?: number
+          } | null
+          const rev =
+            cur && typeof cur === "object" && "revision" in cur
+              ? (cur.revision as number)
+              : 1
+          cr2(sdb2, "proj_del", "s_obs", rev, payload)
+        }
+      }
+    } catch {}
     fire("message.updated", {
       info: msg(
         "m1",
@@ -1365,12 +1489,8 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
       ),
     })
     fire("project.updated", {})
-    await waitFor(() => projectSnapshot()?.context === 0)
-    expect(projectSnapshot()?.sessions).toBe(0)
-
-    // The session is deleted with a usage-less payload: the entry handler
-    // records the observed snapshot into the SQLite deleted aggregate and
-    // the total must survive.
+    await waitFor(() => projectSnapshot()?.context === 1700)
+    expect(projectSnapshot()?.sessions).toBe(1)
     fire("session.deleted", {
       info: { id: "s_obs", projectID: "proj_del", title: "gone" },
     })
@@ -1664,18 +1784,7 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
       ],
     }
     purgeTreeCache()
-    // Seed the store with the project sessions' OBSERVED usage (list
-    // payloads carry no tokens in the real shape).
-    upsertMessageUsage(
-      msg("pe1m", "pe1", { input: 1000, output: 500, reasoning: 200 }),
-    )
-    upsertMessageUsage(
-      msg("pe2m", "pe2", { input: 2000, output: 700, reasoning: 300 }),
-    )
-    upsertMessageUsage(
-      msg("pe3m", "pe3", { input: 3000, output: 900, reasoning: 400 }),
-    )
-    const { fire, slot, dispose } = await mountEntry(state, project)
+    const { fire, slot, dispose, api } = await mountEntry(state, project)
     const setup = await testRender(
       () => slot({ theme: THEME }, { session_id: rootID }) as never,
       {
@@ -1685,48 +1794,38 @@ describe("entry event wiring (handlers exercised only by real host events)", () 
     )
     await waitFor(() => projectSnapshot()?.sessions === 1)
     await setup.waitForFrame((frame) => frame.includes("2K tokens"))
-
-    // The project's session list changes (a session of another worktree
-    // joins); both project events must schedule a refresh so the section
-    // repaints from the fresh client payload.
-    project.sessions = [
-      {
-        id: "pe1",
-        projectID: "proj_ev",
-        cost: 0.01,
-        tokens: { input: 1000, output: 500, reasoning: 200 },
-      },
-      {
-        id: "pe2",
-        projectID: "proj_ev",
-        cost: 0.02,
-        tokens: { input: 2000, output: 700, reasoning: 300 },
-      },
-    ]
+    const dbPath = projectDbPath(
+      (api as unknown as { state: { path: { state: string } } }).state.path
+        .state,
+    )
+    const mk = (
+      cost: number,
+      input: number,
+      output: number,
+      reasoning: number,
+    ) => ({
+      costReported: cost,
+      costEstimated: 0,
+      input,
+      output,
+      reasoning,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cache: 0,
+      context: input + output + reasoning,
+      fingerprint: `fp-${input}`,
+      pricingVersion: "hv1",
+      updatedAt: Date.now(),
+    })
+    expect(
+      casReplace(dbPath, "proj_ev", "pe2", 0, mk(0.02, 2000, 700, 300)).ok,
+    ).toBe(true)
     fire("project.updated", {})
     await waitFor(() => projectSnapshot()?.sessions === 2)
     await setup.waitForFrame((frame) => frame.includes("5K tokens"))
-
-    project.sessions = [
-      {
-        id: "pe1",
-        projectID: "proj_ev",
-        cost: 0.01,
-        tokens: { input: 1000, output: 500, reasoning: 200 },
-      },
-      {
-        id: "pe2",
-        projectID: "proj_ev",
-        cost: 0.02,
-        tokens: { input: 2000, output: 700, reasoning: 300 },
-      },
-      {
-        id: "pe3",
-        projectID: "proj_ev",
-        cost: 0.03,
-        tokens: { input: 3000, output: 900, reasoning: 400 },
-      },
-    ]
+    expect(
+      casReplace(dbPath, "proj_ev", "pe3", 0, mk(0.03, 3000, 900, 400)).ok,
+    ).toBe(true)
     fire("project.directories.updated", {})
     await waitFor(() => projectSnapshot()?.sessions === 3)
     await setup.waitForFrame((frame) => frame.includes("9K tokens"))

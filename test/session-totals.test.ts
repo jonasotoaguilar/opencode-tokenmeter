@@ -247,7 +247,7 @@ describe("session totals PR2A", () => {
     expect(readFileSync("src/tokenmeter/db.ts", "utf8")).not.toContain(
       "session_totals",
     )
-    expect(readFileSync("src/tokenmeter.tsx", "utf8")).not.toContain(
+    expect(readFileSync("src/tokenmeter.tsx", "utf8")).toContain(
       "session-totals",
     )
     const src = readFileSync("src/tokenmeter/session-totals.ts", "utf8")

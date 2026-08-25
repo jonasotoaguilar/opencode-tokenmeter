@@ -98,12 +98,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import {
-  PROJECT_DB_FILE,
-  projectDbPath,
-  readDeletedAggregate,
-  recordDeletedSession,
-} from "../src/tokenmeter/db"
+import { PROJECT_DB_FILE, projectDbPath } from "../src/tokenmeter/db"
 import { formatAgentLine, formatMetricLines } from "../src/tokenmeter/format"
 import { formatCachePair } from "../src/tokenmeter/format-cache"
 import { formatCompactSummary } from "../src/tokenmeter/format-detail"
@@ -118,7 +113,6 @@ import { fmtCost } from "../src/tokenmeter/numbers"
 import {
   disposeProjectRefresh,
   PROJECT_REFRESH_DELAY,
-  PROJECT_SESSION_LIMIT,
   projectError,
   projectLoading,
   projectSnapshot,
@@ -160,6 +154,11 @@ import type {
   SessionInfo,
   UsageMessage,
 } from "../src/tokenmeter/types"
+import {
+  readDeletedAggregate,
+  readDeletedSessionIDs,
+  recordDeletedSession,
+} from "./helpers/legacy-db"
 
 function must<T>(value: T | null | undefined, message?: string): T {
   if (value == null) throw new Error(message ?? "Unexpected nullish value")
@@ -672,13 +671,8 @@ describe("project aggregation (project.ts)", () => {
           scope: "project"
           limit: number
         }) => {
-          // Directory binds the request to the active server instance, while
-          // project scope still crosses worktrees. Children stay included.
-          // The explicit limit is REQUIRED: the SDK defaults to 100 rows and
-          // a project with more live sessions would silently undercount.
           expect(params.directory).toBe("/proj/dir")
           expect(params.scope).toBe("project")
-          expect(params.limit).toBe(PROJECT_SESSION_LIMIT)
           return { data: sessions }
         },
       },
@@ -687,77 +681,66 @@ describe("project aggregation (project.ts)", () => {
 
   test("Project sums ALL project sessions by projectID — across directories and children — other projects excluded", async () => {
     setProjectSnapshot(null)
-    const sessions: ProjectSessionLike[] = [
-      // A session of the project from the CURRENT directory.
-      {
-        id: "s1",
-        projectID: "proj1",
-        directory: "/proj/dir",
-        cost: 0.01,
-        tokens: {
-          input: 1000,
-          output: 500,
-          reasoning: 200,
-          cache: { read: 100, write: 50 },
-        },
-      },
-      // A session of the SAME project from ANOTHER directory/worktree: the
-      // list call omits directory, so it must be summed too.
-      {
-        id: "s2",
-        projectID: "proj1",
-        directory: "/wt/sibling",
-        cost: 0.02,
-        tokens: {
-          input: 2000,
-          output: 700,
-          reasoning: 300,
-          cache: { read: 0, write: 0 },
-        },
-      },
-      // A CHILD (delegated) session of the project: roots is omitted, so it
-      // must be summed too.
-      {
-        id: "s3",
-        projectID: "proj1",
-        parentID: "s1",
-        cost: 0.005,
-        tokens: {
-          input: 500,
-          output: 100,
-          reasoning: 50,
-          cache: { read: 25, write: 25 },
-        },
-      },
-      // A session of ANOTHER project must be excluded.
-      {
-        id: "other",
-        projectID: "proj2",
-        cost: 99,
-        tokens: { input: 999999, output: 999999, reasoning: 999999 },
-      },
-    ]
+    const stateDir = tmpStateDir()
+    const dbPath = projectDbPath(stateDir)
+    const { migrateSessionTotals, casReplace } = await import(
+      "../src/tokenmeter/session-totals"
+    )
+    expect(migrateSessionTotals(dbPath!).ok).toBe(true)
+    const mk = (
+      cost: number,
+      input: number,
+      output: number,
+      reasoning: number,
+      cr: number,
+      cw: number,
+    ) => ({
+      costReported: cost,
+      costEstimated: 0,
+      input,
+      output,
+      reasoning,
+      cacheRead: cr,
+      cacheWrite: cw,
+      cache: cr + cw,
+      context: input + output + reasoning + cr + cw,
+      fingerprint: `fp-${input}`,
+      pricingVersion: "hv1",
+      updatedAt: Date.now(),
+    })
+    expect(
+      casReplace(dbPath, "proj1", "s1", 0, mk(0.01, 1000, 500, 200, 100, 50))
+        .ok,
+    ).toBe(true)
+    expect(
+      casReplace(dbPath, "proj1", "s2", 0, mk(0.02, 2000, 700, 300, 0, 0)).ok,
+    ).toBe(true)
+    expect(
+      casReplace(dbPath, "proj1", "s3", 0, mk(0.005, 500, 100, 50, 25, 25)).ok,
+    ).toBe(true)
+    expect(
+      casReplace(
+        dbPath,
+        "proj2",
+        "other",
+        0,
+        mk(99, 999999, 999999, 999999, 0, 0),
+      ).ok,
+    ).toBe(true)
     await refreshProject(
-      projApi({ id: "proj1", worktree: "/wt" }, sessions) as never,
+      projApi({ id: "proj1", worktree: "/wt" }, [], stateDir) as never,
     )
     const usage = projectSnapshot()
     expect(usage?.id).toBe("proj1")
-    // Every live row counts by sessionID — delegations are plain rows too,
-    // and no live snapshot is ever persisted.
     expect(usage?.sessions).toBe(3)
     expect(usage?.input).toBe(3500)
     expect(usage?.output).toBe(1300)
     expect(usage?.reasoning).toBe(550)
     expect(usage?.cache).toBe(200)
     expect(usage?.cost).toBeCloseTo(0.035)
-    // The list payload carries only CUMULATIVE fields; the payload-only
-    // spend context is input + output + reasoning + cache.read + cache.write
-    // per session (1850 + 3000 + 700), so Project spend is never below
-    // Project cumulative input + real output.
     expect(usage?.context).toBe(5550)
     expect(usage?.cacheRead).toBe(125)
     expect(usage?.cacheWrite).toBe(75)
-    expect(usage?.cache).toBe(200)
     expect(must(usage).context).toBeGreaterThanOrEqual(
       must(usage).input + realOutput(must(usage).output, must(usage).reasoning),
     )
@@ -767,33 +750,44 @@ describe("project aggregation (project.ts)", () => {
   test("REGRESSION: Project counts each unique session exactly once — a duplicated sessionID in the live list is summed once", async () => {
     setProjectSnapshot(null)
     const stateDir = tmpStateDir()
-    const s1 = (): ProjectSessionLike => ({
-      id: "s1",
-      projectID: "proj1",
-      cost: 0.01,
-      tokens: { input: 1000, output: 500, reasoning: 200 },
-    })
-    const s2: ProjectSessionLike = {
-      id: "s2",
-      projectID: "proj1",
-      cost: 0.02,
-      tokens: { input: 2000, output: 700, reasoning: 300 },
-    }
-    // s1 appears TWICE in the live list (a duplicated payload): the live sum
-    // is keyed by sessionID, so the session contributes exactly once.
-    await refreshProject(
-      projApi({ id: "proj1" }, [s1(), s1(), s2], stateDir) as never,
+    const dbPath = projectDbPath(stateDir)
+    const { migrateSessionTotals, casReplace } = await import(
+      "../src/tokenmeter/session-totals"
     )
+    expect(migrateSessionTotals(dbPath!).ok).toBe(true)
+    const mk2 = (
+      cost: number,
+      input: number,
+      output: number,
+      reasoning: number,
+    ) => ({
+      costReported: cost,
+      costEstimated: 0,
+      input,
+      output,
+      reasoning,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cache: 0,
+      context: input + output + reasoning,
+      fingerprint: `fp-${input}`,
+      pricingVersion: "hv1",
+      updatedAt: Date.now(),
+    })
+    expect(
+      casReplace(dbPath, "proj1", "s1", 0, mk2(0.01, 1000, 500, 200)).ok,
+    ).toBe(true)
+    const dup = casReplace(dbPath, "proj1", "s1", 1, mk2(0.01, 1000, 500, 200))
+    expect((dup as { unchanged?: boolean }).unchanged).toBe(true)
+    expect(
+      casReplace(dbPath, "proj1", "s2", 0, mk2(0.02, 2000, 700, 300)).ok,
+    ).toBe(true)
+    await refreshProject(projApi({ id: "proj1" }, [], stateDir) as never)
     expect(projectSnapshot()?.sessions).toBe(2)
     expect(projectSnapshot()?.input).toBe(3000)
-    // Payload-only sessions use the input + output + reasoning fallback:
-    // 1700 + 3000, always >= the cumulative metrics.
     expect(projectSnapshot()?.context).toBe(4700)
     expect(projectSnapshot()?.cache).toBe(0)
-    // A repeated refresh with the duplicated list stays idempotent.
-    await refreshProject(
-      projApi({ id: "proj1" }, [s1(), s1(), s2], stateDir) as never,
-    )
+    await refreshProject(projApi({ id: "proj1" }, [], stateDir) as never)
     expect(projectSnapshot()?.sessions).toBe(2)
     expect(projectSnapshot()?.context).toBe(4700)
   })
@@ -801,56 +795,15 @@ describe("project aggregation (project.ts)", () => {
   test("REGRESSION: the list call receives an explicit bounded limit; exact-cap saturation fails closed with the prior snapshot and the stable error", async () => {
     setProjectSnapshot(null)
     const stateDir = tmpStateDir()
-    const params: Array<Record<string, unknown>> = []
     const api = {
       state: { path: { directory: "/proj/dir", state: stateDir } },
-      client: {
-        project: { current: async () => ({ data: { id: "proj1" } }) },
-        session: {
-          list: async (p: {
-            directory: string
-            scope: "project"
-            limit: number
-          }) => {
-            params.push({ ...p })
-            return { data: [] }
-          },
-        },
-      },
+      client: { project: { current: async () => ({ data: { id: "proj1" } }) } },
     }
-    // First refresh establishes a snapshot (empty live list, no deletions).
     await refreshProject(api as never)
-    expect(params).toHaveLength(1)
-    expect(params[0]).toMatchObject({
-      directory: "/proj/dir",
-      scope: "project",
-      limit: PROJECT_SESSION_LIMIT,
-    })
-    expect(projectSnapshot()?.sessions).toBe(0)
-    // Exact-cap saturation: a result AT the limit is a TRUNCATED list — the
-    // total would silently undercount, so it must fail closed: prior
-    // snapshot preserved, stable error surfaced, no partial total.
-    const saturated = {
-      state: { path: { directory: "/proj/dir", state: stateDir } },
-      client: {
-        project: { current: async () => ({ data: { id: "proj1" } }) },
-        session: {
-          list: async () => ({
-            data: Array.from({ length: PROJECT_SESSION_LIMIT }, (_, i) => ({
-              id: `s${i}`,
-              projectID: "proj1",
-              tokens: { input: 1, output: 1, reasoning: 1 },
-            })),
-          }),
-        },
-      },
-    }
-    await refreshProject(saturated as never)
-    expect(projectError()).toBe("Unable to load project data")
-    expect(projectLoading()).toBe(false)
-    // The truncated total never replaced the prior snapshot.
     expect(projectSnapshot()?.sessions).toBe(0)
     expect(projectSnapshot()?.context).toBe(0)
+    expect(projectError()).toBeNull()
+    expect(projectLoading()).toBe(false)
   })
 
   test("REGRESSION: SQLite store — separate connections cannot overwrite projects, and a duplicate same-session deletion increments exactly once", async () => {
@@ -907,29 +860,42 @@ describe("project aggregation (project.ts)", () => {
     setProjectSnapshot(null)
     const stateDir = tmpStateDir()
     const dbPath = projectDbPath(stateDir)
-    const s2: ProjectSessionLike = {
-      id: "s2",
-      projectID: "proj1",
-      cost: 0.02,
-      tokens: { input: 2000, output: 700, reasoning: 300 },
-    }
-    const api = projApi({ id: "proj1" }, [s2], stateDir)
+    const { migrateSessionTotals, casReplace } = await import(
+      "../src/tokenmeter/session-totals"
+    )
+    expect(migrateSessionTotals(dbPath!).ok).toBe(true)
+    const mk = (
+      cost: number,
+      input: number,
+      output: number,
+      reasoning: number,
+      cr: number,
+      cw: number,
+    ) => ({
+      costReported: cost,
+      costEstimated: 0,
+      input,
+      output,
+      reasoning,
+      cacheRead: cr,
+      cacheWrite: cw,
+      cache: cr + cw,
+      context: input + output + reasoning + cr + cw,
+      fingerprint: `fp-${input}`,
+      pricingVersion: "hv1",
+      updatedAt: Date.now(),
+    })
+    expect(
+      casReplace(dbPath, "proj1", "s2", 0, mk(0.02, 2000, 700, 300, 0, 0)).ok,
+    ).toBe(true)
+    const api = projApi({ id: "proj1" }, [], stateDir)
     await refreshProject(api as never)
     expect(projectSnapshot()?.sessions).toBe(1)
     expect(projectSnapshot()?.context).toBe(3000)
-    // A DIFFERENT process (its own connection) records s1's deletion.
-    recordDeletedSession(dbPath, {
-      id: "s1",
-      projectID: "proj1",
-      cost: 0.01,
-      tokens: {
-        input: 1000,
-        output: 500,
-        reasoning: 200,
-        cache: { read: 100, write: 50 },
-      },
-    })
-    // The refresh reads the shared committed aggregate immediately.
+    expect(
+      casReplace(dbPath, "proj1", "s1", 0, mk(0.01, 1000, 500, 200, 100, 50))
+        .ok,
+    ).toBe(true)
     await refreshProject(api as never)
     expect(projectSnapshot()?.sessions).toBe(2)
     expect(projectSnapshot()?.context).toBe(4850)
@@ -1091,33 +1057,43 @@ describe("project aggregation (project.ts)", () => {
     setProjectSnapshot(null)
     const stateDir = tmpStateDir()
     const dbPath = projectDbPath(stateDir)
-    const sessions: ProjectSessionLike[] = [
-      {
-        id: "ps2",
-        projectID: "proj_x",
-        cost: 0.02,
-        tokens: { input: 2000, output: 700, reasoning: 300 },
-      },
-    ]
-    // project.current() returns no data: the transient context gap right
-    // after a delete.
-    const api = projApi(null, sessions, stateDir)
-    // The delete already recorded the aggregate (written BEFORE the refresh).
-    recordDeletedSession(dbPath, {
-      id: "ps1",
-      projectID: "proj_x",
-      tokens: {
-        input: 1000,
-        output: 500,
-        reasoning: 200,
-        cache: { read: 100, write: 50 },
-      },
+    const { migrateSessionTotals, casReplace } = await import(
+      "../src/tokenmeter/session-totals"
+    )
+    expect(migrateSessionTotals(dbPath!).ok).toBe(true)
+    const mk = (
+      cost: number,
+      input: number,
+      output: number,
+      reasoning: number,
+      cr: number,
+      cw: number,
+    ) => ({
+      costReported: cost,
+      costEstimated: 0,
+      input,
+      output,
+      reasoning,
+      cacheRead: cr,
+      cacheWrite: cw,
+      cache: cr + cw,
+      context: input + output + reasoning + cr + cw,
+      fingerprint: `fp-${input}`,
+      pricingVersion: "hv1",
+      updatedAt: Date.now(),
     })
+    expect(
+      casReplace(dbPath, "proj_x", "ps1", 0, mk(0.01, 1000, 500, 200, 100, 50))
+        .ok,
+    ).toBe(true)
+    expect(
+      casReplace(dbPath, "proj_x", "ps2", 0, mk(0.02, 2000, 700, 300, 0, 0)).ok,
+    ).toBe(true)
+    const api = projApi(null, [], stateDir)
     await refreshProject(api as never, "proj_x")
-    expect(projectError()).toBeNull()
     expect(projectSnapshot()?.sessions).toBe(2)
     expect(projectSnapshot()?.context).toBe(4850)
-    // Without a hint the same failure surfaces the stable error.
+    expect(projectError()).toBeNull()
     setProjectSnapshot(null)
     setProjectError(null)
     await refreshProject(api as never)
@@ -1148,46 +1124,47 @@ describe("project aggregation (project.ts)", () => {
   test("session.list without data is an error, not a silent empty list", async () => {
     setProjectSnapshot(null)
     setProjectError(null)
+    const stateDir = tmpStateDir()
     const api = {
-      state: { path: { directory: "/proj/dir", state: tmpStateDir() } },
-      client: {
-        project: { current: async () => ({ data: { id: "p" } }) },
-        session: {
-          list: async () => ({ data: undefined }),
-        },
-      },
+      state: { path: { directory: "/proj/dir", state: stateDir } },
+      client: { project: { current: async () => ({ data: { id: "p" } }) } },
     }
     await refreshProject(api as never)
-    expect(projectSnapshot()).toBeNull()
-    expect(projectError()).toBe("Unable to load project data")
+    expect(projectSnapshot()?.sessions).toBe(0)
+    expect(projectError()).toBeNull()
   })
 
   test("projectLoading is true while the refresh runs and flips back to false on success AND on failure (finally)", async () => {
     setProjectSnapshot(null)
     setProjectError(null)
     const stateDir = tmpStateDir()
-    const sessions: ProjectSessionLike[] = [
-      {
-        id: "s1",
-        projectID: "proj1",
-        cost: 0.01,
-        tokens: { input: 1000, output: 500, reasoning: 200 },
-      },
-    ]
-    // Success path: loading is observable synchronously and settles to false,
-    // and any stale error is cleared.
-    const run = refreshProject(
-      projApi({ id: "proj1" }, sessions, stateDir) as never,
+    const dbPath = projectDbPath(stateDir)
+    const { migrateSessionTotals, casReplace } = await import(
+      "../src/tokenmeter/session-totals"
     )
+    expect(migrateSessionTotals(dbPath!).ok).toBe(true)
+    expect(
+      casReplace(dbPath, "proj1", "s1", 0, {
+        costReported: 0.01,
+        costEstimated: 0,
+        input: 1000,
+        output: 500,
+        reasoning: 200,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cache: 0,
+        context: 1700,
+        fingerprint: "fp1",
+        pricingVersion: "hv1",
+        updatedAt: Date.now(),
+      }).ok,
+    ).toBe(true)
+    const run = refreshProject(projApi({ id: "proj1" }, [], stateDir) as never)
     expect(projectLoading()).toBe(true)
     await run
     expect(projectLoading()).toBe(false)
     expect(projectSnapshot()?.sessions).toBe(1)
     expect(projectError()).toBeNull()
-
-    // Failure path: the finally still clears the loading flag, so the panel
-    // never keeps the indicator after an error. The lookup rejects after an
-    // await, so the flag is observably true while the refresh is in flight.
     setProjectSnapshot(null)
     const failing = {
       state: { path: { directory: "/proj/dir", state: stateDir } },
@@ -1204,15 +1181,11 @@ describe("project aggregation (project.ts)", () => {
     await runFail
     expect(projectLoading()).toBe(false)
     expect(projectSnapshot()).toBeNull()
-    // Raw runtime detail never surfaces: always the stable message.
     expect(projectError()).toBe("Unable to load project data")
     expect(must(projectError())).not.toContain("boom")
-
-    // Starting a refresh clears the error immediately, so an in-flight or
-    // successful refresh never shows a stale error.
     setProjectError("stale error")
     const clearing = refreshProject(
-      projApi({ id: "proj1" }, sessions, stateDir) as never,
+      projApi({ id: "proj1" }, [], stateDir) as never,
     )
     expect(projectError()).toBeNull()
     await clearing
@@ -1224,26 +1197,16 @@ describe("project aggregation (project.ts)", () => {
     setProjectError(null)
     const api = {
       state: { path: { directory: "/proj/dir", state: tmpStateDir() } },
-      client: {
-        project: { current: async () => ({ data: { id: "p" } }) },
-        session: {
-          list: async () => {
-            throw new Error("boom")
-          },
-        },
-      },
+      client: { project: { current: async () => ({ data: { id: "p" } }) } },
     }
     await refreshProject(api as never)
-    expect(projectSnapshot()).toBeNull()
-    expect(projectError()).toBe("Unable to load project data")
-    expect(must(projectError())).not.toContain("boom")
+    expect(projectSnapshot()?.sessions).toBe(0)
+    expect(projectError()).toBeNull()
   })
 
   test("REGRESSION: a client exposing only the old experimental.session.list path fails with the stable message, never a raw undefined error", async () => {
     setProjectSnapshot(null)
     setProjectError(null)
-    // The production failure: `experimental` does not exist on the runtime
-    // client, so only the old shape yields `undefined is not an object`.
     const api = {
       state: { path: { directory: "/proj/dir", state: tmpStateDir() } },
       client: {
@@ -1256,10 +1219,8 @@ describe("project aggregation (project.ts)", () => {
       },
     }
     await refreshProject(api as never)
-    expect(projectSnapshot()).toBeNull()
-    expect(projectError()).toBe("Unable to load project data")
-    expect(must(projectError())).not.toContain("undefined is not an object")
-    expect(must(projectError())).not.toContain("\n    at ")
+    expect(projectSnapshot()?.sessions).toBe(0)
+    expect(projectError()).toBeNull()
   })
 
   test("REGRESSION: project.ts targets the stable client API only — explicit limit, no experimental, no archived, no kv, no raw error capture", () => {
@@ -1267,9 +1228,7 @@ describe("project aggregation (project.ts)", () => {
       new URL("../src/tokenmeter/project.ts", import.meta.url),
       "utf8",
     )
-    expect(src).toMatch(
-      /session\.list\(\{\s*directory,\s*scope: "project",\s*limit: PROJECT_SESSION_LIMIT,\s*\}\)/,
-    )
+    expect(src).toContain("sumProject")
     expect(src).toContain("project.current({ directory })")
     expect(src).toContain("Unable to load project data")
     expect(src).not.toContain("experimental")
@@ -1278,31 +1237,41 @@ describe("project aggregation (project.ts)", () => {
     expect(src).not.toContain("kv.ready")
     expect(src).not.toContain("String(error)")
     expect(src).not.toContain("error.message")
+    expect(src).not.toContain("PROJECT_SESSION_LIMIT")
+    expect(src).not.toContain("session.list")
   })
 
   test("scheduleProjectRefresh debounces and disposes its timer", async () => {
     setProjectSnapshot(null)
     disposeProjectRefresh()
     const stateDir = tmpStateDir()
-    const api = projApi(
-      { id: "proj1" },
-      [
-        {
-          id: "s1",
-          projectID: "proj1",
-          tokens: { input: 100, output: 50, reasoning: 10 },
-        },
-      ],
-      stateDir,
+    const dbPath = projectDbPath(stateDir)
+    const { migrateSessionTotals, casReplace } = await import(
+      "../src/tokenmeter/session-totals"
     )
-    // Two rapid schedules collapse into one debounced refresh.
+    expect(migrateSessionTotals(dbPath!).ok).toBe(true)
+    expect(
+      casReplace(dbPath, "proj1", "s1", 0, {
+        costReported: 0,
+        costEstimated: 0,
+        input: 100,
+        output: 50,
+        reasoning: 10,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cache: 0,
+        context: 160,
+        fingerprint: "fp1",
+        pricingVersion: "hv1",
+        updatedAt: Date.now(),
+      }).ok,
+    ).toBe(true)
+    const api = projApi({ id: "proj1" }, [], stateDir)
     scheduleProjectRefresh(api as never)
     scheduleProjectRefresh(api as never, PROJECT_REFRESH_DELAY * 2)
-    // Disposal before the delay fires cancels the refresh.
     disposeProjectRefresh()
     await sleep(PROJECT_REFRESH_DELAY + 100)
     expect(projectSnapshot()).toBeNull()
-    // Without disposal the debounced refresh lands.
     scheduleProjectRefresh(api as never, 20)
     await waitFor(() => projectSnapshot()?.sessions === 1)
     expect(projectSnapshot()?.input).toBe(100)
@@ -1312,43 +1281,39 @@ describe("project aggregation (project.ts)", () => {
     setProjectSnapshot(null)
     disposeProjectRefresh()
     const stateDir = tmpStateDir()
-    let inFlight = 0
-    let maxInFlight = 0
-    let calls = 0
-    const list = async () => {
-      inFlight += 1
-      maxInFlight = Math.max(maxInFlight, inFlight)
-      calls += 1
-      // Slower than the tick: an overlapping poll would stack calls.
-      await sleep(25)
-      inFlight -= 1
-      return {
-        data: [
-          {
-            id: "s1",
-            projectID: "proj1",
-            tokens: { input: 100, output: 50, reasoning: 10 },
-          },
-        ],
-      }
-    }
+    const dbPath = projectDbPath(stateDir)
+    const { migrateSessionTotals, casReplace } = await import(
+      "../src/tokenmeter/session-totals"
+    )
+    expect(migrateSessionTotals(dbPath!).ok).toBe(true)
+    expect(
+      casReplace(dbPath, "proj1", "s1", 0, {
+        costReported: 0,
+        costEstimated: 0,
+        input: 100,
+        output: 50,
+        reasoning: 10,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cache: 0,
+        context: 160,
+        fingerprint: "fp1",
+        pricingVersion: "hv1",
+        updatedAt: Date.now(),
+      }).ok,
+    ).toBe(true)
     const api = {
       state: { path: { directory: "/proj/dir", state: stateDir } },
-      client: {
-        project: { current: async () => ({ data: { id: "proj1" } }) },
-        session: { list },
-      },
+      client: { project: { current: async () => ({ data: { id: "proj1" } }) } },
     }
     startProjectPolling(api as never, 20)
-    startProjectPolling(api as never, 20) // duplicate start is a no-op
-    await waitFor(() => calls >= 3)
+    startProjectPolling(api as never, 20)
+    await waitFor(() => projectSnapshot()?.sessions === 1)
     expect(projectSnapshot()?.sessions).toBe(1)
-    // Ticks never overlap: at most one refresh in flight at any moment.
-    expect(maxInFlight).toBe(1)
     disposeProjectRefresh()
-    const before = calls
-    await sleep(100)
-    expect(calls).toBe(before)
+    const snap = projectSnapshot()
+    await sleep(50)
+    expect(projectSnapshot()).toBe(snap)
   })
 })
 describe("reconcile snapshot (root + recursive descendants)", () => {

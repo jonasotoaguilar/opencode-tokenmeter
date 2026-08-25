@@ -110,7 +110,9 @@ describe("production TokenMeter artifact (dist/tui.js)", () => {
     // import and never inline or rewrite it.
     expect(code).toContain('import { Database } from "bun:sqlite"')
     expect(code).toContain("tokenmeter.sqlite")
-    expect(code).toContain("INSERT OR IGNORE INTO tombstones")
+    expect(code).toContain("session_totals")
+    expect(code).not.toContain("INSERT OR IGNORE INTO tombstones")
+    expect(code).toContain("DROP TABLE IF EXISTS tombstones")
     // The artifact module graph loads in the Bun runtime (its top-level
     // bun:sqlite import resolves), and the runtime executes real SQLite
     // statements — the same path the TUI host will take.
