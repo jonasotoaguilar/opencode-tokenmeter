@@ -46,7 +46,7 @@ Apply PR1A. Dirty worktree ≠ baseline. Skills: sdd-apply, chained-pr, stacked-
 
 - [x] 2.1 RED `test/session-totals.test.ts`: PR2A schema — fresh/legacy/idempotent/one-row/two-conn/fingerprint/uninvoked/no-additive — 7 pass (CAS/busy/delete → PR2B)
 - [x] 2.2 PR2B CAS — `src/tokenmeter/session-totals.ts` `CasResult` + `casReplace` absolute expected-revision replace (insert at 0 → rev1, match bump, duplicate `unchanged` no bump, conflict/parallel loser returns stored no additive delta) — strict-TDD — 4 CAS tests + no-additive SQL, uninvoked
-- [ ] 2.3 PR2C aggregates/deletion/repair-query — `sumProject`/`readTree`/`markDeleted`/`listPricingRepair` + project aggregate/deletion/pricing repair tests — deferred
+- [x] 2.3 PR2C aggregates/deletion/repair-query — `src/tokenmeter/session-totals.ts` `sumProject`/`readTree`/`markDeleted`/`listPricingRepair` + `ProjectTotals`/`MarkDeletedResult` — strict-TDD — 6 tests: deleted retention idempotent+missing, SUM includes deleted+peer cost=reported+estimated, one-IN/empty tree, stale pricing filter excludes deleted/same-version — uninvoked
 
 ## Phase 3: PR3 modules (≤350)
 

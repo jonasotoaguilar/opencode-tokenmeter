@@ -140,6 +140,23 @@ export type CasResult =
   | { ok: true; row: SessionTotals; unchanged?: true }
   | { ok: false; reason: "conflict"; stored: SessionTotals }
   | Fail
+export type MarkDeletedResult =
+  | { ok: true; row: SessionTotals }
+  | { ok: false; reason: "missing" }
+  | Fail
+export type ProjectTotals = {
+  costReported: number
+  costEstimated: number
+  cost: number
+  input: number
+  output: number
+  reasoning: number
+  cacheRead: number
+  cacheWrite: number
+  cache: number
+  context: number
+  sessions: number
+}
 export function casReplace(
   dbPath: string | null,
   projectId: string,
@@ -281,4 +298,115 @@ export function casReplace(
   })
   if (isFail(r)) return r
   return r as CasResult
+}
+export function sumProject(
+  dbPath: string | null,
+  projectId: string,
+): ProjectTotals | Fail {
+  const r = withDb(dbPath, (db) => {
+    db.exec(TABLE_SQL)
+    db.exec(INDEX_SQL)
+    const row = db
+      .query(
+        "SELECT COALESCE(SUM(cost_reported),0) as cost_reported, COALESCE(SUM(cost_estimated),0) as cost_estimated, COALESCE(SUM(input),0) as input, COALESCE(SUM(output),0) as output, COALESCE(SUM(reasoning),0) as reasoning, COALESCE(SUM(cache_read),0) as cache_read, COALESCE(SUM(cache_write),0) as cache_write, COALESCE(SUM(cache),0) as cache, COALESCE(SUM(context),0) as context, COUNT(*) as sessions FROM session_totals WHERE project_id = ?",
+      )
+      .get(projectId) as {
+      cost_reported: number
+      cost_estimated: number
+      input: number
+      output: number
+      reasoning: number
+      cache_read: number
+      cache_write: number
+      cache: number
+      context: number
+      sessions: number
+    }
+    return {
+      costReported: row.cost_reported,
+      costEstimated: row.cost_estimated,
+      cost: row.cost_reported + row.cost_estimated,
+      input: row.input,
+      output: row.output,
+      reasoning: row.reasoning,
+      cacheRead: row.cache_read,
+      cacheWrite: row.cache_write,
+      cache: row.cache,
+      context: row.context,
+      sessions: row.sessions,
+    } as ProjectTotals
+  })
+  return isFail(r) ? r : (r as ProjectTotals)
+}
+export function readTree(
+  dbPath: string | null,
+  projectId: string,
+  sessionIds: string[],
+): SessionTotals[] | Fail {
+  if (!sessionIds.length) return []
+  const r = withDb(dbPath, (db) => {
+    db.exec(TABLE_SQL)
+    db.exec(INDEX_SQL)
+    const placeholders = sessionIds.map(() => "?").join(",")
+    const rows = db
+      .query(
+        `SELECT * FROM session_totals WHERE project_id = ? AND session_id IN (${placeholders})`,
+      )
+      .all(projectId, ...sessionIds) as Record<string, unknown>[]
+    return rows.map(mapRow)
+  })
+  return isFail(r) ? r : (r as SessionTotals[])
+}
+export function markDeleted(
+  dbPath: string | null,
+  projectId: string,
+  sessionId: string,
+  deletedAt: number,
+): MarkDeletedResult {
+  const r = withDb(dbPath, (db) => {
+    db.exec(TABLE_SQL)
+    db.exec(INDEX_SQL)
+    const tx = db.transaction(() => {
+      const row = db
+        .query(
+          "SELECT * FROM session_totals WHERE project_id = ? AND session_id = ?",
+        )
+        .get(projectId, sessionId) as Record<string, unknown> | null
+      if (!row) return { _missing: true }
+      const stored = mapRow(row)
+      if (stored.isDeleted) return { ok: true as const, row: stored }
+      db.query(
+        "UPDATE session_totals SET is_deleted = 1, deleted_at = ? WHERE project_id = ? AND session_id = ?",
+      ).run(deletedAt, projectId, sessionId)
+      const updated = db
+        .query(
+          "SELECT * FROM session_totals WHERE project_id = ? AND session_id = ?",
+        )
+        .get(projectId, sessionId) as Record<string, unknown>
+      return { ok: true as const, row: mapRow(updated) }
+    })
+    const result = tx.immediate() as unknown as Record<string, unknown>
+    if (result && "_missing" in result)
+      return { ok: false as const, reason: "missing" as const }
+    return result as MarkDeletedResult
+  })
+  if (isFail(r)) return r
+  return r as MarkDeletedResult
+}
+export function listPricingRepair(
+  dbPath: string | null,
+  projectId: string,
+  pricingHash: string,
+): SessionTotals[] | Fail {
+  const r = withDb(dbPath, (db) => {
+    db.exec(TABLE_SQL)
+    db.exec(INDEX_SQL)
+    const rows = db
+      .query(
+        "SELECT * FROM session_totals WHERE project_id = ? AND is_deleted = 0 AND cost_estimated > 0 AND pricing_version != ?",
+      )
+      .all(projectId, pricingHash) as Record<string, unknown>[]
+    return rows.map(mapRow)
+  })
+  return isFail(r) ? r : (r as SessionTotals[])
 }

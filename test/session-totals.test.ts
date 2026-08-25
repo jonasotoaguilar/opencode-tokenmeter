@@ -7,8 +7,12 @@ import { join } from "node:path"
 import {
   casReplace,
   computeFingerprint,
+  listPricingRepair,
+  markDeleted,
   migrateSessionTotals,
   readSessionTotals,
+  readTree,
+  sumProject,
 } from "../src/tokenmeter/session-totals"
 
 function tmp() {
@@ -374,5 +378,163 @@ describe("session totals PR2B CAS", () => {
     } finally {
       clean(d)
     }
+  })
+  test("markDeleted retains totals idempotent", () => {
+    const { d, p } = tmp()
+    try {
+      expect(migrateSessionTotals(p).ok).toBe(true)
+      expect(casReplace(p, "proj-a", "sess-1", 0, totalsA).ok).toBe(true)
+      const del1 = markDeleted(p, "proj-a", "sess-1", 999)
+      expect(del1.ok).toBe(true)
+      if (del1.ok) {
+        expect(del1.row.isDeleted).toBe(true)
+        expect(del1.row.deletedAt).toBe(999)
+        expect(del1.row.costReported).toBe(1.23)
+        expect(del1.row.costEstimated).toBe(0.45)
+      }
+      const del2 = markDeleted(p, "proj-a", "sess-1", 1000)
+      expect(del2.ok).toBe(true)
+      if (del2.ok) {
+        expect(del2.row.deletedAt).toBe(999)
+        expect(del2.row.costReported).toBe(1.23)
+      }
+      const read = readSessionTotals(p, "proj-a", "sess-1") as unknown as {
+        isDeleted: boolean
+        deletedAt: number
+      }
+      expect(read.isDeleted).toBe(true)
+      expect(read.deletedAt).toBe(999)
+    } finally {
+      clean(d)
+    }
+  })
+  test("markDeleted missing returns missing", () => {
+    const { d, p } = tmp()
+    try {
+      expect(migrateSessionTotals(p).ok).toBe(true)
+      const r = markDeleted(p, "proj-a", "nope", 1)
+      expect(r.ok).toBe(false)
+      if (!r.ok) expect((r as { reason: string }).reason).toBe("missing")
+    } finally {
+      clean(d)
+    }
+  })
+  test("sumProject includes deleted and peer rows", () => {
+    const { d, p } = tmp()
+    try {
+      expect(migrateSessionTotals(p).ok).toBe(true)
+      expect(casReplace(p, "proj-a", "sess-1", 0, totalsA).ok).toBe(true)
+      expect(casReplace(p, "proj-a", "sess-2", 0, totalsB).ok).toBe(true)
+      expect(
+        casReplace(p, "proj-b", "sess-9", 0, {
+          ...totalsA,
+          costReported: 99,
+          fingerprint: "fp-x",
+        }).ok,
+      ).toBe(true)
+      expect(markDeleted(p, "proj-a", "sess-2", 500).ok).toBe(true)
+      const sum = sumProject(p, "proj-a")
+      expect(sum && "cost" in sum).toBe(true)
+      if (sum && "cost" in sum) {
+        expect(sum.costReported).toBe(1.23 + 2.0)
+        expect(sum.costEstimated).toBe(0.45 + 1.0)
+        expect(sum.cost).toBe(1.23 + 2.0 + 0.45 + 1.0)
+        expect(sum.input).toBe(10 + 15)
+        expect(sum.sessions).toBe(2)
+      }
+      const sumB = sumProject(p, "proj-b") as unknown as {
+        costReported: number
+      }
+      expect(sumB.costReported).toBe(99)
+    } finally {
+      clean(d)
+    }
+  })
+  test("readTree one IN filters tree IDs", () => {
+    const { d, p } = tmp()
+    try {
+      expect(migrateSessionTotals(p).ok).toBe(true)
+      expect(casReplace(p, "proj-a", "sess-1", 0, totalsA).ok).toBe(true)
+      expect(casReplace(p, "proj-a", "sess-2", 0, totalsB).ok).toBe(true)
+      expect(
+        casReplace(p, "proj-a", "sess-3", 0, {
+          ...totalsA,
+          costReported: 5,
+          fingerprint: "fp-c",
+        }).ok,
+      ).toBe(true)
+      const rows = readTree(p, "proj-a", ["sess-1", "sess-3"])
+      expect(Array.isArray(rows)).toBe(true)
+      if (Array.isArray(rows)) {
+        expect(rows).toHaveLength(2)
+        const ids = rows.map((r) => r.sessionId).sort()
+        expect(ids).toEqual(["sess-1", "sess-3"])
+        expect(rows.find((r) => r.sessionId === "sess-1")?.costReported).toBe(
+          1.23,
+        )
+      }
+      const empty = readTree(p, "proj-a", [])
+      expect(Array.isArray(empty) && (empty as unknown[]).length).toBe(0)
+    } finally {
+      clean(d)
+    }
+  })
+  test("listPricingRepair filters estimated stale only", () => {
+    const { d, p } = tmp()
+    try {
+      expect(migrateSessionTotals(p).ok).toBe(true)
+      expect(
+        casReplace(p, "proj-a", "sess-1", 0, {
+          ...totalsA,
+          pricingVersion: "hv1",
+          costEstimated: 0.5,
+        }).ok,
+      ).toBe(true)
+      expect(
+        casReplace(p, "proj-a", "sess-2", 0, {
+          ...totalsA,
+          pricingVersion: "hv2",
+          costEstimated: 0.5,
+          fingerprint: "fp2",
+        }).ok,
+      ).toBe(true)
+      expect(
+        casReplace(p, "proj-a", "sess-3", 0, {
+          ...totalsA,
+          pricingVersion: "hv1",
+          costEstimated: 0,
+          fingerprint: "fp3",
+        }).ok,
+      ).toBe(true)
+      expect(
+        casReplace(p, "proj-a", "sess-4", 0, {
+          ...totalsA,
+          pricingVersion: "hv1",
+          costEstimated: 0.5,
+          fingerprint: "fp4",
+        }).ok,
+      ).toBe(true)
+      expect(markDeleted(p, "proj-a", "sess-4", 1).ok).toBe(true)
+      const stale = listPricingRepair(p, "proj-a", "hv2")
+      expect(Array.isArray(stale)).toBe(true)
+      if (Array.isArray(stale)) {
+        const ids = stale.map((r) => r.sessionId).sort()
+        expect(ids).toEqual(["sess-1"])
+      }
+      const none = listPricingRepair(p, "proj-a", "hv1")
+      expect(Array.isArray(none) && (none as unknown[]).length).toBe(1)
+      if (Array.isArray(none)) expect(none[0]?.sessionId).toBe("sess-2")
+    } finally {
+      clean(d)
+    }
+  })
+  test("repository no additive SQL and uninvoked", () => {
+    const src = readFileSync("src/tokenmeter/session-totals.ts", "utf8")
+    expect(src).not.toMatch(/cost_reported\s*=\s*cost_reported\s*\+/)
+    expect(src).not.toMatch(/cost_estimated\s*=\s*cost_estimated\s*\+/)
+    expect(src).not.toMatch(/input\s*=\s*input\s*\+/)
+    expect(readFileSync("src/tokenmeter/db.ts", "utf8")).not.toContain(
+      "session_totals",
+    )
   })
 })
