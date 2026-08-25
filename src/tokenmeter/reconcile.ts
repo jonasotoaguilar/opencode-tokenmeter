@@ -78,7 +78,11 @@ export type ReconcileApi = {
       children(params: { sessionID: string }): Promise<{ data?: SessionInfo[] }>
       get(params: { sessionID: string }): Promise<{ data?: SessionInfo }>
     }
-    model?: { list(params?: unknown): Promise<unknown> }
+    v2?: {
+      model?: {
+        list?(params?: unknown): Promise<unknown>
+      }
+    }
   }
   state: {
     path?: { directory?: string }
@@ -240,6 +244,20 @@ export function scheduleReconcile(
   if (!root) return
   clearTimeout(reconcileTimer ?? undefined)
   reconcileTimer = setTimeout(() => void reconcile(api, root), delay)
+}
+
+export function getCurrentRoot(): string | null {
+  return currentRoot
+}
+
+export function scheduleForcedReconcile(
+  api: ReconcileApi,
+  delay: number = RECONCILE_DELAY,
+): void {
+  const root = currentRoot
+  if (!root) return
+  clearTimeout(reconcileTimer ?? undefined)
+  reconcileTimer = setTimeout(() => void reconcile(api, root, true), delay)
 }
 
 /**

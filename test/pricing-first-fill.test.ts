@@ -1,0 +1,42 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { clearPricing, getPricing, loadPricing, onPricingFirstFill } from "../src/tokenmeter/pricing";
+import { disposeProjectRefresh, refreshProject } from "../src/tokenmeter/project";
+import { activateRoot, disposeReconcile, RECONCILE_DELAY, scheduleForcedReconcile } from "../src/tokenmeter/reconcile";
+import { forgetSession, setSnapshot, snapshot } from "../src/tokenmeter/store";
+import { purgeTreeCache } from "../src/tokenmeter/tree";
+import type { FinitePrice } from "../src/tokenmeter/types";
+const price5x15: FinitePrice = { input: 5, output: 15, cache: { read: 0, write: 0 } };
+const tierData = { data: [{ providerID: "openai", id: "gpt-4o", cost: [{ tier: { type: "context" }, input: 1, output: 1, cache: { read: 1, write: 1 } }] }] };
+const goodData = { data: [{ providerID: "openai", id: "gpt-4o", cost: [{ input: 5, output: 15, cache: { read: 0, write: 0 } }] }] };
+const waitFor = async (c: () => boolean, t = 2000) => { const s = Date.now(); while (!c()) { if (Date.now() - s > t) throw new Error("waitFor timeout"); await new Promise((r) => setTimeout(r, 5)); } };
+describe("pricing first-fill PR1", () => {
+  beforeEach(() => { clearPricing(); setSnapshot(null); purgeTreeCache(); disposeReconcile(); disposeProjectRefresh(); forgetSession("s-pricing-root"); });
+  afterEach(() => { clearPricing(); setSnapshot(null); purgeTreeCache(); disposeReconcile(); disposeProjectRefresh(); forgetSession("s-pricing-root"); });
+  test("empty→non-empty schedules once", async () => {
+    const root = "s-pricing-root"; let calls = 0;
+    const sessApi = { client: { session: { messages: async ({ sessionID }: { sessionID: string }) => ({ data: [{ info: { id: "m1", sessionID, role: "assistant", cost: 0, providerID: "openai", modelID: "gpt-4o", tokens: { input: 1000, output: 500, reasoning: 0, cache: { read: 0, write: 0 } } } }] }), children: async () => ({ data: [] }), get: async () => ({ data: undefined }), }, v2: { model: { list: async () => { calls++; return calls === 1 ? tierData : goodData; } } }, }, state: { path: { directory: "/tmp/test-pricing-sess" }, session: { status: () => undefined } }, };
+    const dir = mkdtempSync(join(tmpdir(), "tokenmeter-pff-"));
+    const projApi = { state: { path: { directory: "/tmp/test-pricing-proj", state: dir } }, client: { project: { current: async () => ({ data: { id: "proj-pff" } }) }, session: { list: async () => ({ data: [{ id: root, projectID: "proj-pff", cost: 0, tokens: { input: 1000, output: 500, reasoning: 0 }, model: { id: "gpt-4o", providerID: "openai" } }] }) }, v2: { model: { list: async () => goodData } }, }, };
+    let sched = 0; const disp = onPricingFirstFill(() => { sched++; scheduleForcedReconcile(sessApi as never, RECONCILE_DELAY); });
+    activateRoot(sessApi as never, root); await waitFor(() => snapshot()?.rootID === root);
+    expect(snapshot()?.cost).toBe(0); expect(sched).toBe(0);
+    await refreshProject(projApi as never); expect(getPricing("openai:gpt-4o")).toEqual(price5x15);
+    await waitFor(() => (snapshot()?.cost ?? 0) > 0); expect(snapshot()?.cost).toBeCloseTo(0.0125); expect(sched).toBe(1);
+    const before = sched; await loadPricing(projApi as never); await refreshProject(projApi as never); await new Promise((r) => setTimeout(r, RECONCILE_DELAY + 50)); expect(sched).toBe(before);
+    disp(); rmSync(dir, { recursive: true, force: true });
+  });
+  test("wiring and disposal", async () => {
+    const src = await Bun.file(new URL("../src/tokenmeter.tsx", import.meta.url)).text();
+    expect(src).toContain("onPricingFirstFill"); expect(src).toContain("scheduleForcedReconcile"); expect(src).not.toContain("invalidateAllUsage");
+    expect(src.indexOf("onPricingFirstFill")).toBeLessThan(src.indexOf("loadPricing(api"));
+    clearPricing(); let c: number[] = []; const d = onPricingFirstFill(() => c.push(1)); d();
+    await loadPricing({ state: { path: { directory: "/tmp/x" } }, client: { v2: { model: { list: async () => goodData } } } } as never); expect(c.length).toBe(0);
+    clearPricing(); c = []; const d2 = onPricingFirstFill(() => c.push(1));
+    await loadPricing({ state: { path: { directory: "/tmp/x" } }, client: { v2: { model: { list: async () => tierData } } } } as never); expect(c.length).toBe(0);
+    await loadPricing({ state: { path: { directory: "/tmp/x" } }, client: { v2: { model: { list: async () => goodData } } } } as never); expect(c.length).toBe(1);
+    d2();
+  });
+});

@@ -1,3 +1,4 @@
+import type { OpencodeClient } from "@opencode-ai/sdk/v2/client"
 import type { FinitePrice } from "./types"
 
 export type {
@@ -12,22 +13,49 @@ export function getPricing(key: string): FinitePrice | undefined {
   return pricingMap.get(key)
 }
 export function setPricing(map: Map<string, FinitePrice>): void {
+  const prevSize = pricingMap.size
   pricingMap.clear()
   for (const [k, v] of map) pricingMap.set(k, v)
+  notifyPricingFirstFill(prevSize, pricingMap.size)
 }
 let pricingInflight: Promise<void> | null = null
 let pricingLastFailure = 0
 const PRICING_COOLDOWN_MS = 2000
 
+let pricingFirstFillFired = false
+const pricingFirstFillListeners = new Set<() => void>()
+
+export function onPricingFirstFill(cb: () => void): () => void {
+  if (pricingFirstFillFired) return () => {}
+  pricingFirstFillListeners.add(cb)
+  return () => {
+    pricingFirstFillListeners.delete(cb)
+  }
+}
+
+function notifyPricingFirstFill(prevSize: number, nextSize: number): void {
+  if (pricingFirstFillFired) return
+  if (prevSize !== 0 || nextSize === 0) return
+  pricingFirstFillFired = true
+  const cbs = [...pricingFirstFillListeners]
+  pricingFirstFillListeners.clear()
+  for (const cb of cbs) {
+    try {
+      cb()
+    } catch {}
+  }
+}
+
 export function clearPricing(): void {
   pricingMap.clear()
   pricingLastFailure = 0
   pricingInflight = null
+  pricingFirstFillFired = false
 }
 
 export type PricingApi = {
-  client?: { model?: { list?(params?: unknown): Promise<unknown> } }
-  state?: { path?: { directory?: string } }
+  client: Pick<OpencodeClient, "v2">
+  state: { path: { directory?: string } }
 }
 
 export async function loadPricing(api: PricingApi): Promise<void> {
@@ -38,20 +66,21 @@ export async function loadPricing(api: PricingApi): Promise<void> {
     now - pricingLastFailure < PRICING_COOLDOWN_MS
   )
     return
-  const fn = api?.client?.model?.list as
-    | ((p: unknown) => Promise<unknown>)
-    | undefined
+  const v2Model = (
+    api as unknown as { client?: { v2?: { model?: { list?: unknown } } } }
+  )?.client?.v2?.model
+  const fn = v2Model?.list as ((p: unknown) => Promise<unknown>) | undefined
   const directoryValue = api?.state?.path?.directory
-  if (typeof fn !== "function") return
-  const modelObj = api?.client?.model
+  if (typeof fn !== "function") {
+    pricingLastFailure = Date.now()
+    throw new Error("method_missing: api.client.v2.model.list is not available")
+  }
+  const prevSize = pricingMap.size
   pricingInflight = (async () => {
     try {
-      const res = await (fn as (p: unknown) => Promise<unknown>).call(
-        modelObj,
-        {
-          location: { directory: directoryValue },
-        },
-      )
+      const res = await (fn as (p: unknown) => Promise<unknown>).call(v2Model, {
+        location: { directory: directoryValue },
+      })
       const data = (res as Record<string, unknown> | null | undefined)?.data
       if (!Array.isArray(data)) {
         pricingLastFailure = Date.now()
@@ -70,6 +99,7 @@ export async function loadPricing(api: PricingApi): Promise<void> {
       pricingMap.clear()
       for (const [k, v] of next) pricingMap.set(k, v)
       pricingLastFailure = 0
+      notifyPricingFirstFill(prevSize, pricingMap.size)
     } catch {
       pricingLastFailure = Date.now()
     } finally {

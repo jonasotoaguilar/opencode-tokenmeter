@@ -107,8 +107,10 @@ export type ProjectApi = {
         limit: number
       }): Promise<{ data?: ProjectSessionLike[] }>
     }
-    model?: {
-      list?(params?: unknown): Promise<unknown>
+    v2?: {
+      model?: {
+        list?(params?: unknown): Promise<unknown>
+      }
     }
   }
 }
