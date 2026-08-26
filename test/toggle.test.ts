@@ -117,7 +117,9 @@ describe("toggle layer registration (shortcut.ts)", () => {
     const dispose = registerToggleLayer(api)
     const active = km.activeLayers()
     expect(active).toHaveLength(1)
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees layer
     const layer = active[0]!
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees command
     const command = layer.commands[0]!
     expect(command.name).toBe(TOGGLE_COMMAND_NAME)
     expect(command.namespace).toBe("palette")
@@ -142,6 +144,7 @@ describe("toggle layer registration (shortcut.ts)", () => {
   test("the registered command's run toggles the sections when invoked (palette path)", () => {
     const { api, km } = freshApi()
     const dispose = registerToggleLayer(api)
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees layer and command
     const run = km.activeLayers()[0]!.commands[0]!.run as () => void
     run()
     expect(anySectionExpanded()).toBe(true)
@@ -154,17 +157,20 @@ describe("toggle layer registration (shortcut.ts)", () => {
     const { api, km } = freshApi({ [TOGGLE_SHORTCUT_KV_KEY]: "ctrl+m" })
     expect(toggleShortcut()).toBe("ctrl+m")
     registerToggleLayer(api)
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees binding
     expect(km.activeLayers()[0]!.bindings[0]!.key).toBe("ctrl+m")
     // Off persists across startup: no binding, command still present.
     const off = freshApi({ [TOGGLE_SHORTCUT_KV_KEY]: "off" })
     expect(toggleShortcut()).toBe("off")
     registerToggleLayer(off.api)
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees layer
     expect(off.km.activeLayers()[0]!.bindings).toEqual([])
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees command
     expect(off.km.activeLayers()[0]!.commands[0]!.name).toBe(
       TOGGLE_COMMAND_NAME,
     )
     // Malformed value resolves to the default.
-    const bad = freshApi({ [TOGGLE_SHORTCUT_KV_KEY]: "ctrl+z" })
+    freshApi({ [TOGGLE_SHORTCUT_KV_KEY]: "ctrl+z" })
     expect(toggleShortcut()).toBe("ctrl+e")
   })
 })
@@ -246,6 +252,7 @@ describe("shortcut preference cycling (shortcut.ts)", () => {
     // The old layer was disposed: exactly one layer remains, rebound.
     const active = km.activeLayers()
     expect(active).toHaveLength(1)
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees active
     expect(active[0]!.bindings).toEqual([
       {
         key: "ctrl+shift+e",
@@ -254,10 +261,12 @@ describe("shortcut preference cycling (shortcut.ts)", () => {
         preventDefault: true,
       },
     ])
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees command
     expect(active[0]!.commands[0]!.name).toBe(TOGGLE_COMMAND_NAME)
 
     cycleToggleShortcut(api)
     expect(toggleShortcut()).toBe("ctrl+m")
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees presence
     expect(km.activeLayers()[0]!.bindings[0]!.key).toBe("ctrl+m")
   })
 
@@ -275,7 +284,9 @@ describe("shortcut preference cycling (shortcut.ts)", () => {
     })
     const active = km.activeLayers()
     expect(active).toHaveLength(1)
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees active
     expect(active[0]!.bindings).toEqual([])
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees presence
     expect(active[0]!.commands[0]!.name).toBe(TOGGLE_COMMAND_NAME)
   })
 
@@ -294,6 +305,7 @@ describe("shortcut preference cycling (shortcut.ts)", () => {
     })
     const active = km.activeLayers()
     expect(active).toHaveLength(1)
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees presence
     expect(active[0]!.bindings).toEqual([
       {
         key: "ctrl+e",
@@ -302,6 +314,7 @@ describe("shortcut preference cycling (shortcut.ts)", () => {
         preventDefault: true,
       },
     ])
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees presence
     expect(active[0]!.commands[0]!.name).toBe(TOGGLE_COMMAND_NAME)
   })
 
@@ -311,6 +324,7 @@ describe("shortcut preference cycling (shortcut.ts)", () => {
     cycleToggleShortcut(api)
     expect(toggleShortcut()).toBe("ctrl+shift+e")
     expect(kv.sets).toEqual([])
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees presence
     expect(km.activeLayers()[0]!.bindings[0]!.key).toBe("ctrl+shift+e")
   })
 
@@ -330,6 +344,7 @@ describe("shortcut preference cycling (shortcut.ts)", () => {
     const second = registerToggleLayer(api)
     const active = km.activeLayers()
     expect(active).toHaveLength(1)
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees presence
     expect(active[0]!.bindings[0]!.key).toBe("ctrl+e")
     first()
     second()

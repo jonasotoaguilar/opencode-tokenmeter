@@ -626,12 +626,14 @@ describe("remediation Tokens restart and recover", () => {
         modelID: "gpt-4o",
         tokens: { input: 1000, output: 500 },
       }) as unknown as import("../src/tokenmeter/types").UsageMessage
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees usage
     const b = usageOf(m(0))!
     expect(b.cost).toBe(0)
     expect(b.source).toBe("reported")
     usageMap(sid).set("m1", b)
     expect(observedSessionUsage(sid)?.cost).toBe(0)
     setPricing(new Map([["openai:gpt-4o", price]]))
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees usage
     const e = usageOf(m(0))!
     expect(e.cost).toBeCloseTo(0.0125)
     expect(e.source).toBe("estimated")
@@ -639,9 +641,11 @@ describe("remediation Tokens restart and recover", () => {
     expect(observedSessionUsage(sid)?.cost).toBeCloseTo(0.0125)
     usageMap(sid).set("m1", e)
     expect(observedSessionUsage(sid)?.cost).toBeCloseTo(0.0125)
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees usage
     const r = usageOf(m(0.01))!
     usageMap(sid).set("m1", r)
     expect(observedSessionUsage(sid)?.cost).toBeCloseTo(0.01)
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees usage
     const z = usageOf(m(0))!
     usageMap(sid).set("m1", z)
     expect(observedSessionUsage(sid)?.cost).toBeCloseTo(0.01)

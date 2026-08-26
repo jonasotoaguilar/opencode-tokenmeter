@@ -36,7 +36,7 @@
  *
  * Refresh triggers: route changes and message/session/status/project events
  * schedule a debounced refresh (existing local fast path), and a single
- * bounded polling timer (PROJECT_POLL_DELAY ≈ 2 s) refreshes on top of it so
+ * bounded polling timer (PROJECT_POLL_DELAY ≈ 30 s) refreshes on top of it so
  * a SEPARATE OpenCode process working in the same project appears in this
  * TUI's sidebar. The poll never overlaps an in-flight refresh, is started at
  * most once per plugin, and is disposed through the same lifecycle as the
@@ -84,8 +84,8 @@ export const PROJECT_REFRESH_DELAY = 300
  */
 export const PROJECT_SESSION_LIMIT = 10_000
 
-/** Polling cadence for cross-process Project freshness (~2 s). */
-export const PROJECT_POLL_DELAY = 2000
+/** Polling cadence for cross-process Project freshness (~30 s). */
+export const PROJECT_POLL_DELAY = 30_000
 
 /** Stable user-facing message for every Project refresh failure. */
 export const PROJECT_ERROR_MESSAGE = "Unable to load project data"
@@ -202,7 +202,7 @@ export function scheduleProjectRefresh(
 /**
  * Starts the single bounded polling timer that refreshes Project on top of
  * the local event-driven fast path, so another OpenCode process working in
- * the same project shows up in this TUI's sidebar within ~2 s. Started at
+ * the same project shows up in this TUI's sidebar within ~30 s. Started at
  * most once per plugin (duplicate starts are no-ops) and never overlaps an
  * in-flight refresh; cleared by disposeProjectRefresh.
  */
