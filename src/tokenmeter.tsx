@@ -68,7 +68,6 @@ import { showSettingsDialog } from "./tokenmeter/panel/settings-dialog"
 import { loadPricing } from "./tokenmeter/pricing"
 import {
   disposeProjectRefresh,
-  projectSnapshot,
   scheduleProjectRefresh,
   startProjectPolling,
   subscribeProjectSnapshot,

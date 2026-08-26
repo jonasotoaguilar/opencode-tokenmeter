@@ -2999,7 +2999,7 @@ describe("settings dialog (DialogSelect menu)", () => {
     const render = stack[index]?.render
     if (typeof render !== "function")
       throw new Error("renderDialog: no dialog element")
-    return testRender(render as never, { width: 60, height: 20 })
+    return testRender(render as never, { width: 60, height: 30 })
   }
 
   test("opens a DialogSelect with one option per preference showing the current value", async () => {
@@ -3020,24 +3020,36 @@ describe("settings dialog (DialogSelect menu)", () => {
     expect(frame).toContain("Summary: session")
     expect(frame).toContain("Subagents: collapsed")
     expect(frame).toContain("Shortcut: Ctrl+E")
+    expect(frame).toContain("TokenMeter: on")
+    expect(frame).toContain("Project: on")
+    expect(frame).toContain("Session: on")
+    expect(frame).toContain("Subagents: on")
     // The single Settings command's options are grouped into the native
-    // category subsections `Sidebar`, `Project` and `Footer` (installed
-    // `TuiDialogSelectOption.category`), each header rendered once before
-    // its contiguous run of options.
+    // category subsections `Sidebar`, `Visibility`, `Project` and `Footer`
+    // (installed `TuiDialogSelectOption.category`), each header rendered
+    // once before its contiguous run of options. Visibility holds the four
+    // presentation-only toggles (sidebar/project/session/subagents).
     expect(frame).toContain("Sidebar")
+    expect(frame).toContain("Visibility")
     expect(frame).toContain("Project")
     expect(frame).toContain("Footer")
     const options = dialogProps[0]?.options ?? []
-    expect(options).toHaveLength(12)
+    expect(options).toHaveLength(17)
     expect(options.slice(0, 5).every((opt) => opt.category === "Sidebar")).toBe(
       true,
     )
-    expect(options.slice(5, 6).every((opt) => opt.category === "Project")).toBe(
-      true,
-    )
-    expect(options.slice(6).every((opt) => opt.category === "Footer")).toBe(
-      true,
-    )
+    expect(
+      options.slice(5, 9).every((opt) => opt.category === "Visibility"),
+    ).toBe(true)
+    expect(
+      options.slice(9, 10).every((opt) => opt.category === "Project"),
+    ).toBe(true)
+    expect(
+      options.slice(10, 16).every((opt) => opt.category === "Footer"),
+    ).toBe(true)
+    expect(options[16]?.value).toBe("__close")
+    expect(options[16]?.category).toBe("────────")
+    expect(options[16]?.title).toBe("× Close")
     dispose()
   }, 20000)
 
@@ -3283,7 +3295,7 @@ describe("palette command (keymap.registerLayer seam)", () => {
       throw new Error("palette dialog render missing")
     const dialogSetup = await testRender(render as never, {
       width: 60,
-      height: 20,
+      height: 30,
     })
     await waitForFrameDriven(dialogSetup, (frame) =>
       frame.includes("TokenMeter Settings"),
