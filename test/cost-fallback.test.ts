@@ -235,7 +235,7 @@ describe("Unit 1B store identity", () => {
 
 const pricingApi = (list: () => Promise<unknown>) => ({
   state: { path: { directory: "/tmp/test" } },
-  client: { model: { list } },
+  client: { v2: { model: { list } } },
 })
 
 describe("Unit 2 adapter+reconcile", () => {
@@ -411,16 +411,20 @@ describe("Unit 2 adapter+reconcile", () => {
           children: async () => ({ data: [] }),
           get: async () => ({ data: undefined }),
         },
-        model: {
-          list: async () => ({
-            data: [
-              {
-                providerID: "openai",
-                id: "gpt-4o-mini",
-                cost: [{ input: 5, output: 15, cache: { read: 0, write: 0 } }],
-              },
-            ],
-          }),
+        v2: {
+          model: {
+            list: async () => ({
+              data: [
+                {
+                  providerID: "openai",
+                  id: "gpt-4o-mini",
+                  cost: [
+                    { input: 5, output: 15, cache: { read: 0, write: 0 } },
+                  ],
+                },
+              ],
+            }),
+          },
         },
       },
       state: {
@@ -542,16 +546,20 @@ describe("Unit 3 project tombstone scope", () => {
         session: {
           list: async () => ({ data: liveA }),
         },
-        model: {
-          list: async () => ({
-            data: [
-              {
-                providerID: "openai",
-                id: "gpt-4o",
-                cost: [{ input: 5, output: 15, cache: { read: 0, write: 0 } }],
-              },
-            ],
-          }),
+        v2: {
+          model: {
+            list: async () => ({
+              data: [
+                {
+                  providerID: "openai",
+                  id: "gpt-4o",
+                  cost: [
+                    { input: 5, output: 15, cache: { read: 0, write: 0 } },
+                  ],
+                },
+              ],
+            }),
+          },
         },
       },
     }
@@ -566,16 +574,20 @@ describe("Unit 3 project tombstone scope", () => {
       client: {
         project: { current: async () => ({ data: { id: "projB" } }) },
         session: { list: async () => ({ data: liveB }) },
-        model: {
-          list: async () => ({
-            data: [
-              {
-                providerID: "openai",
-                id: "gpt-4o",
-                cost: [{ input: 5, output: 15, cache: { read: 0, write: 0 } }],
-              },
-            ],
-          }),
+        v2: {
+          model: {
+            list: async () => ({
+              data: [
+                {
+                  providerID: "openai",
+                  id: "gpt-4o",
+                  cost: [
+                    { input: 5, output: 15, cache: { read: 0, write: 0 } },
+                  ],
+                },
+              ],
+            }),
+          },
         },
       },
     }

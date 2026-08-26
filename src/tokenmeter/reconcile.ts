@@ -78,7 +78,11 @@ export type ReconcileApi = {
       children(params: { sessionID: string }): Promise<{ data?: SessionInfo[] }>
       get(params: { sessionID: string }): Promise<{ data?: SessionInfo }>
     }
-    model?: { list(params?: unknown): Promise<unknown> }
+    v2?: {
+      model?: {
+        list?(params?: unknown): Promise<unknown>
+      }
+    }
   }
   state: {
     path?: { directory?: string }

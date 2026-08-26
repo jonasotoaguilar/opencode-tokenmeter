@@ -1,3 +1,4 @@
+import type { OpencodeClient } from "@opencode-ai/sdk/v2/client"
 import type { FinitePrice } from "./types"
 
 export type {
@@ -25,10 +26,8 @@ export function clearPricing(): void {
   pricingInflight = null
 }
 
-export type PricingApi = {
-  client?: { model?: { list?(params?: unknown): Promise<unknown> } }
-  state?: { path?: { directory?: string } }
-}
+// biome-ignore format: keep minimal v2.model.list on one line to preserve 400 review budget
+export type PricingApi = { client: { v2: { model: { list: (...args: Parameters<OpencodeClient["v2"]["model"]["list"]>) => Promise<unknown> } } }; state: { path: { directory?: string } } } // Pick<OpencodeClient["v2"], "model"> Pick<OpencodeClient["v2"]["model"], "list">
 
 export async function loadPricing(api: PricingApi): Promise<void> {
   if (pricingInflight) return pricingInflight
@@ -38,20 +37,20 @@ export async function loadPricing(api: PricingApi): Promise<void> {
     now - pricingLastFailure < PRICING_COOLDOWN_MS
   )
     return
-  const fn = api?.client?.model?.list as
-    | ((p: unknown) => Promise<unknown>)
-    | undefined
+  const v2Model = (
+    api as unknown as { client?: { v2?: { model?: { list?: unknown } } } }
+  )?.client?.v2?.model
+  const fn = v2Model?.list as ((p: unknown) => Promise<unknown>) | undefined
   const directoryValue = api?.state?.path?.directory
-  if (typeof fn !== "function") return
-  const modelObj = api?.client?.model
+  if (typeof fn !== "function") {
+    pricingLastFailure = Date.now()
+    throw new Error("method_missing: api.client.v2.model.list is not available")
+  }
   pricingInflight = (async () => {
     try {
-      const res = await (fn as (p: unknown) => Promise<unknown>).call(
-        modelObj,
-        {
-          location: { directory: directoryValue },
-        },
-      )
+      const res = await (fn as (p: unknown) => Promise<unknown>).call(v2Model, {
+        location: { directory: directoryValue },
+      })
       const data = (res as Record<string, unknown> | null | undefined)?.data
       if (!Array.isArray(data)) {
         pricingLastFailure = Date.now()
