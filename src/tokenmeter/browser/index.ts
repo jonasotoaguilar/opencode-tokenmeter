@@ -21,6 +21,10 @@ export {
 } from "./directories"
 export { isSafeDirectory } from "./is-safe-directory"
 export { loadBrowserProjects } from "./projects"
+export {
+  fetchSessionsForBrowse,
+  fetchSessionsForProject,
+} from "./session-source"
 export { withTimeout } from "./timeout"
 export type {
   BrowserApi,
