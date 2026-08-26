@@ -1,3 +1,9 @@
+/**
+ * Message fetching and provider/model grouping helpers.
+ * Keeps token extraction and short-label logic isolated from
+ * the session detail orchestration.
+ */
+
 import type { BrowserApi } from "./types"
 
 export function shortLabel(id: string): string {

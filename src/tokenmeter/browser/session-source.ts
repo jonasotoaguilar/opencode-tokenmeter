@@ -1,3 +1,9 @@
+/**
+ * Browser session sources.
+ * Prefers v2.session.list({project}) without directory; falls back
+ * to safe directory pagination only for project detail paths.
+ */
+
 import type { ProjectSessionLike } from "../types"
 import { BROWSER_SESSION_LIMIT, FETCH_TIMEOUT_MS, PAGE_SIZE } from "./constants"
 import { withTimeout } from "./timeout"

@@ -1,3 +1,9 @@
+/**
+ * Session info fetching for browser session detail.
+ * Resolves the current session identity and hydrates session payloads
+ * via state.session.get, client.session.get, or session.list fallback.
+ */
+
 import type { BrowserApi } from "./types"
 
 const num = (v: unknown): number =>
