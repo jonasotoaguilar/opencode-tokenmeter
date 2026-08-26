@@ -13,7 +13,14 @@ export {
   FETCH_TIMEOUT_MS,
   PAGE_SIZE,
 } from "./constants"
+export {
+  resolveBrowseDirectory,
+  resolveDirectory,
+  resolveSafeDirectory,
+  resolveSafeWorktree,
+} from "./directories"
 export { isSafeDirectory } from "./is-safe-directory"
+export { loadBrowserProjects } from "./projects"
 export { withTimeout } from "./timeout"
 export type {
   BrowserApi,
