@@ -30,7 +30,7 @@
  * Completed sessions (session.status idle / session.idle) are invalidated so
  * the next reconcile rehydrates their usage from the client messages — the
  * panel repaints without being remounted. session.created purges the whole
- * tree cache (parentID can be absent), and a 2s maintenance timer on the
+ * tree cache (parentID can be absent), and a 30s maintenance timer on the
  * active root re-discovers the child tree, so a delegated session that
  * became visible without any tree-invalidating event still lands in the
  * snapshot. Activating a root (route change or panel mount) force-refreshes
@@ -47,7 +47,7 @@
  *  atomically and exactly once per session across processes, and passes the
  *  deleted session's projectID as a refresh hint, so the Project section
  *  keeps its total even if project.current() is momentarily unresolved
- *  right after the delete. A bounded ~2 s polling timer refreshes Project on
+ *  right after the delete. A bounded ~30s polling timer refreshes Project on
  *  top of the event-driven fast path so a sibling OpenCode process working
  *  in the same project appears in this sidebar. The coins total is each
  *  session's complete
@@ -71,6 +71,7 @@ import {
   projectSnapshot,
   scheduleProjectRefresh,
   startProjectPolling,
+  subscribeProjectSnapshot,
 } from "./tokenmeter/project"
 import {
   activateRoot,
@@ -262,21 +263,16 @@ const tui: TuiPlugin = async (api) => {
         scheduleProjectRefresh(api, RECONCILE_DELAY)
       }
     })
-    // Project milestone watcher: consumes the authoritative Project snapshot
-    // (live list + deleted SQLite aggregate) as the single source of truth.
-    // Emits at most one toast for the highest newly reached order-of-magnitude
-    // milestone (1M, 10M …). Baselines silently on startup so history does not
-    // burst, isolates per project, and deduplicates across polls/refreshes.
-    createEffect(() => {
-      const snap = projectSnapshot()
+    const disposeMilestone = subscribeProjectSnapshot((snap) => {
       if (snap) handleProjectMilestone(api, snap)
     })
-    // Single bounded polling timer (~2 s) for Project freshness across
+    // Single bounded polling timer (~30 s) for Project freshness across
     // sibling OpenCode processes working in the same project. Started once
     // per plugin, never overlaps an in-flight refresh, and is cleared by
     // disposeProjectRefresh in the lifecycle below.
     startProjectPolling(api)
     api.lifecycle.onDispose(() => {
+      disposeMilestone()
       disposeReconcile()
       disposeProjectRefresh()
       unregisterPalette()
