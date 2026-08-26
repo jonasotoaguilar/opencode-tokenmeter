@@ -152,6 +152,14 @@ export function UsagePanel(props) {
   const chevron = () =>
     props.subagentsPref() === "expanded" ? GLYPH.collapse : GLYPH.expand
 
+  // One wheel/touchpad tick = one collapsed agent (2 rows). The ScrollBox
+  // wheel path uses scrollAcceleration, not the scrollbar's scrollStep, so a
+  // fixed multiplier of 2 is the smallest supported declarative option.
+  const subagentsScrollAccel = {
+    tick: () => 2,
+    reset() {},
+  }
+
   // Single shared layout derivation for viewport height and scroll
   // overflow: `overflow = totalRows > 4`, `height = min(totalRows, 4)`.
   // One collapsed group is 2 rows, expanded compact is 4 (header + 3
@@ -256,6 +264,7 @@ export function UsagePanel(props) {
                         width={inner()}
                         height={subagentsLayout().height}
                         scrollY={subagentsLayout().overflow}
+                        scrollAcceleration={subagentsScrollAccel}
                         verticalScrollbarOptions={{
                           visible: subagentsLayout().overflow,
                         }}
