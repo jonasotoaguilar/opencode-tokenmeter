@@ -37,6 +37,20 @@ export type FinitePrice = {
   input: number
   output: number
   cache: { read: number; write: number }
+  /**
+   * Optional long-context tier parsed from models.dev when a deterministic
+   * threshold and rates are supplied (e.g. gpt-5.6-sol tier size 272000 from
+   * https://models.dev/api.json, verified 2026-08-26 against
+   * https://developers.openai.com/api/docs/pricing). When present, estimateCost
+   * uses tier rates for input >= threshold; otherwise standard rates apply.
+   * Never hard-coded — threshold absent from payload means no tier.
+   */
+  tier?: {
+    threshold: number
+    input: number
+    output: number
+    cache: { read: number; write: number }
+  }
 }
 
 export type MonetarySource = "reported" | "estimated"
