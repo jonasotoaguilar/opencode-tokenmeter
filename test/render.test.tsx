@@ -50,6 +50,7 @@ import {
   cycleFooterMetric,
   cycleNumbers,
   cycleSubagents,
+  cycleVisibility,
   SETTINGS_KV_KEY,
   SUBAGENTS_KV_KEY,
   settings,
@@ -3219,6 +3220,200 @@ describe("settings dialog (DialogSelect menu)", () => {
     expect(settings().numbers).toBe("compact")
     expect(settings().collapsedSummary).toBe("session")
     expect(subagentsPref()).toBe("collapsed")
+    dispose()
+  }, 20000)
+
+  test("visibility rows cycle without recreating the dialog and persist the whole object", async () => {
+    const rootID = "ses_dialog_visibility"
+    purgeTreeCache()
+    dialogProps.length = 0
+    const { api, dialog, kvWrites, dispose } = await mountEntry(
+      state(rootID),
+      {},
+      false,
+    )
+    showSettingsDialog(api)
+    const setup = await renderDialog(dialog.stack)
+    await waitForFrameDriven(setup, (frame) => frame.includes("TokenMeter: on"))
+    expect(setup.captureCharFrame()).toContain("Project: on")
+    expect(setup.captureCharFrame()).toContain("Session: on")
+    expect(setup.captureCharFrame()).toContain("Subagents: on")
+    const props0 = dialogProps[0]
+    const sidebarOpt = props0?.options.find(
+      (o) => o.value === "visibility.sidebar",
+    )
+    const projectOpt = props0?.options.find(
+      (o) => o.value === "visibility.project",
+    )
+    if (!sidebarOpt || !projectOpt)
+      throw new Error("visibility options missing")
+    // Cycle sidebar: TokenMeter on -> off, whole-object write, same dialog.
+    props0?.onSelect?.(sidebarOpt)
+    expect(settings().visibility.sidebar).toBe(false)
+    expect(dialog.replaces()).toBe(1)
+    expect(kvWrites.filter((k) => k === SETTINGS_KV_KEY)).toHaveLength(1)
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes("TokenMeter: off"),
+    )
+    expect(setup.captureCharFrame()).not.toContain("TokenMeter: on")
+    // Project visibility independent.
+    props0?.onSelect?.(projectOpt)
+    expect(settings().visibility.project).toBe(false)
+    expect(settings().visibility.sidebar).toBe(false)
+    await waitForFrameDriven(setup, (frame) => frame.includes("Project: off"))
+    expect(dialog.replaces()).toBe(1)
+    expect(dialogProps).toHaveLength(1)
+    dispose()
+  }, 20000)
+})
+
+describe("visibility (sidebar and section gating, presentation-only)", () => {
+  test("hidden sidebar makes the slot return null while the store still reconciles", async () => {
+    const rootID = "ses_vis_sidebar"
+    const s: MutableApi = {
+      sessions: {
+        [rootID]: [
+          msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+        ],
+      },
+      children: {},
+      metas: { [rootID]: { id: rootID, title: "Root" } },
+    }
+    purgeTreeCache()
+    const { slot, setRoute, dispose } = await mountEntry(s, {}, true, {
+      visibility: {
+        sidebar: false,
+        project: true,
+        session: true,
+        subagents: true,
+      },
+    })
+    // Entry-level gating: sidebar_content returns null when sidebar hidden.
+    expect(slot({ theme: THEME }, { session_id: rootID })).toBeNull()
+    // Data collection still runs at the entry level even though the panel is hidden.
+    // The route effect drives activation even without a mounted panel.
+    setRoute({ name: "session", params: { sessionID: rootID } })
+    await waitFor(() => snapshot()?.rootID === rootID)
+    expect(snapshot()?.totalTokens).toBe(41000)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("section visibility hides only its section — Project, Session and Subagents independent, no height reserved", async () => {
+    const rootID = "ses_vis_sections"
+    const childID = "ses_vis_sections_child"
+    const s: MutableApi = {
+      sessions: {
+        [rootID]: [
+          msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+        ],
+        [childID]: [msg("c1", childID, { input: 2000, output: 100 }, 0.001)],
+      },
+      children: { [rootID]: [{ id: childID, agent: "general" }] },
+      metas: {
+        [rootID]: { id: rootID, title: "Root" },
+        [childID]: { id: childID, agent: "general" },
+      },
+    }
+    const project: ProjectState = {
+      current: { id: "proj_vis", worktree: "/wt" },
+      sessions: [
+        {
+          id: "ps1",
+          projectID: "proj_vis",
+          cost: 0.01,
+          tokens: { input: 1000, output: 500, reasoning: 200 },
+        },
+      ],
+    }
+    purgeTreeCache()
+    upsertMessageUsage(
+      msg("pm1", "ps1", { input: 1000, output: 500, reasoning: 200 }, 0.01),
+    )
+    const { slot, api, dispose } = await mountEntry(s, project, true)
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      { width: 60, height: 20 },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitFor(() => projectSnapshot() !== null)
+    await waitForFrameDriven(
+      setup,
+      (frame) => frame.includes("Project") && frame.includes("Session"),
+    )
+    expect(setup.captureCharFrame()).toContain("Subagents")
+
+    // Hide Project: its heading disappears, Session and Subagents stay.
+    cycleVisibility(api, "project")
+    await waitForFrameDriven(
+      setup,
+      (frame) => !frame.includes("Project") && frame.includes("Session"),
+    )
+    expect(setup.captureCharFrame()).not.toContain("Project")
+    expect(setup.captureCharFrame()).toContain("Session")
+    expect(setup.captureCharFrame()).toContain("Subagents")
+
+    // Hide Session: only Subagents remains.
+    cycleVisibility(api, "session")
+    await waitForFrameDriven(
+      setup,
+      (frame) => !frame.includes("Session") && frame.includes("Subagents"),
+    )
+    expect(setup.captureCharFrame()).not.toContain("Session")
+
+    // Hide Subagents: heading disappears even though groups exist; Project still hidden, Session hidden.
+    cycleVisibility(api, "subagents")
+    await waitForFrameDriven(setup, (frame) => !frame.includes("Subagents"))
+    expect(setup.captureCharFrame()).not.toContain("Subagents")
+    expect(setup.captureCharFrame()).not.toContain("↳ general")
+    // Data still collected: snapshot groups remain.
+    expect(snapshot()?.groups.length).toBe(1)
+
+    // Restore Session: it reappears reactively on the same mounted panel.
+    cycleVisibility(api, "session")
+    await waitForFrameDriven(setup, (frame) => frame.includes("Session"))
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("Subagents visibility is independent of the expanded/collapsed disclosure", async () => {
+    const rootID = "ses_vis_subagents_disc"
+    const childID = "ses_vis_sub_child"
+    const s: MutableApi = {
+      sessions: {
+        [rootID]: [
+          msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+        ],
+        [childID]: [msg("c1", childID, { input: 2000, output: 100 }, 0.001)],
+      },
+      children: { [rootID]: [{ id: childID, agent: "general" }] },
+      metas: {
+        [rootID]: { id: rootID, title: "Root" },
+        [childID]: { id: childID, agent: "general" },
+      },
+    }
+    purgeTreeCache()
+    const { slot, api, dispose } = await mountEntry(s, {}, false)
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      { width: 60, height: 20 },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitForFrameDriven(setup, (frame) => frame.includes("Subagents"))
+    expect(setup.captureCharFrame()).toContain("▶ Subagents")
+    // Expand via the durable disclosure (collapsed -> expanded) while visible.
+    cycleSubagents(api)
+    await waitForFrameDriven(setup, (frame) => frame.includes("▼ Subagents"))
+    expect(subagentsPref()).toBe("expanded")
+    // Hide the section: heading disappears but the disclosure preference stays expanded.
+    cycleVisibility(api, "subagents")
+    await waitForFrameDriven(setup, (frame) => !frame.includes("Subagents"))
+    expect(subagentsPref()).toBe("expanded")
+    // Show again: it restores as expanded (▼), not collapsed.
+    cycleVisibility(api, "subagents")
+    await waitForFrameDriven(setup, (frame) => frame.includes("▼ Subagents"))
+    expect(subagentsPref()).toBe("expanded")
+    disposeReconcile()
     dispose()
   }, 20000)
 })
