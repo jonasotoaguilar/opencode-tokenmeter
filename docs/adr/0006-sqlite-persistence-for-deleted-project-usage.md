@@ -85,7 +85,7 @@ journal mode, busy timeout, `synchronous = NORMAL`), runs one transaction,
 and closes — every process reads the latest committed state and writers
 queue instead of clobbering.
 
-A single bounded polling timer (~2 s) per plugin refreshes Project on top of
+A single bounded polling timer (~30 s) per plugin refreshes Project on top of
 the local event-driven fast path, so another OpenCode process working in the
 same project appears in the sibling sidebar promptly. The poll never
 overlaps an in-flight refresh, starts at most once, and is disposed through
@@ -108,7 +108,7 @@ high-waters; the in-run per-component high-water in the store is unchanged.
   fails closed instead of showing a partial total.
 - One aggregate per project keeps deleted history bounded (no per-session
   token snapshots).
-- A sibling TUI's deletions appear within ~2 s via the polling timer.
+- A sibling TUI's deletions appear within ~30 s via the polling timer.
 
 ### Negative
 
@@ -157,7 +157,7 @@ Simplest, but restarts and sibling processes lose deleted usage. Rejected.
    IGNORE; no-usage deletes never consume a tombstone).
 3. [x] Project refresh: explicit 10_000 list limit, cap-saturation fail-closed,
    live sum + deleted aggregate, no history writes.
-4. [x] Single ~2 s polling timer with in-flight/duplicate/dispose guards.
+4. [x] Single ~30 s polling timer with in-flight/duplicate/dispose guards.
 5. [x] Regression coverage: explicit limit + cap saturation; two independent
    connections (isolation, exactly-once, immediate visibility, refresh over
    shared aggregate); recursive child+parent deletion; no-usage tombstone
