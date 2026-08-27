@@ -82,6 +82,7 @@ import {
 import {
   cycleSubagents,
   loadSettings,
+  settings,
   subagentsPref,
 } from "./tokenmeter/settings"
 import {
@@ -285,6 +286,7 @@ const tui: TuiPlugin = async (api) => {
         sidebar_content(ctx, props) {
           const sessionID = props?.session_id ?? ctx?.session_id
           if (!sessionID) return null
+          if (!settings().visibility.sidebar) return null
           const width = clampSidebarWidth(
             resolveSidebarWidth(props) ?? resolveSidebarWidth(ctx),
           )
