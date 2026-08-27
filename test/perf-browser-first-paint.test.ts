@@ -8,22 +8,28 @@ import { NAV } from "../src/tokenmeter/browser/constants"
 import { showProjectDetail } from "../src/tokenmeter/browser/project-dialog"
 import { showBrowserDialog } from "../src/tokenmeter/browser/projects-dialog"
 import { showSessionDetail } from "../src/tokenmeter/browser/session-dialog"
+import { clearPricing } from "../src/tokenmeter/pricing"
+import { __setPricingFetchForTest, clearRemotePricing } from "../src/tokenmeter/pricing-remote"
 
+function stubPricing(){ clearPricing(); clearRemotePricing(); __setPricingFetchForTest((async () => ({ ok: true, json: async () => ({}) } as unknown as Response)) as unknown as typeof fetch) }
 function delay<T>(ms: number, v: T): Promise<T> { return new Promise((r) => setTimeout(() => r(v), ms)) }
 
-function makePerfHarness(N = 28, probeMs = 100, listMs = 8, curMs = 8, extras: Partial<{ emptyWorktreeFor: string; noSessionFor: string }> = {}) {
+function ensureGit(p:string){ try{ const {mkdirSync}=require("node:fs") as typeof import("node:fs"); const {join}=require("node:path") as typeof import("node:path"); mkdirSync(join(p,".git"),{recursive:true})}catch{} }
+function makePerfHarness(N = 28, probeMs = 100, listMs = 8, curMs = 8, extras: Partial<{ emptyWorktreeFor: string; noSessionFor: string }> = {}) { stubPricing();
   const stateDir = mkdtempSync(join(tmpdir(), "perf-state-"))
   const hostDir = mkdtempSync(join(tmpdir(), "perf-host-"))
+  ensureGit(hostDir)
   const worktrees: string[] = []
   const projects: Array<{ id: string; name: string; worktree: string; time: { created: number; updated: number } }> = []
   for (let i = 0; i < N; i++) {
     const wt = mkdtempSync(join(tmpdir(), `perf-wt-${i}-`))
+    ensureGit(wt)
     worktrees.push(wt)
     const worktree = extras.emptyWorktreeFor === `proj-${i.toString().padStart(2, "0")}` ? "/nope-xyz" : wt
     projects.push({ id: `proj-${i.toString().padStart(2, "0")}`, name: `proj-${i}`, worktree, time: { created: 1_700_000_000_000 + i * 1000, updated: 1_700_000_100_000 + i * 1000 } })
   }
   const currentID = projects[0]!.id
-  let listCalls = 0, curCalls = 0, dirCalls = 0, sessCalls = 0
+  let listCalls = 0, curCalls = 0, v2Calls = 0
   type Cap = { title: string; options: Array<{ title: string; value: string; category?: string }>; onSelect?: (o: { title: string; value: string }) => void }
   const caps: Array<{ t: number; cap: Cap }> = []
   let replaceCount = 0
@@ -38,24 +44,15 @@ function makePerfHarness(N = 28, probeMs = 100, listMs = 8, curMs = 8, extras: P
       project: {
         list: async () => { listCalls++; return delay(listMs, { data: projects } as never) },
         current: async () => { curCalls++; return delay(curMs, { data: { id: currentID } } as never) },
-        directories: async () => { dirCalls++; return { data: [] } as never },
       },
       session: {
-        list: async (p: Record<string, unknown>) => {
-          sessCalls++
-          await delay(probeMs, null)
-          const d = p.directory as string
-          if (extras.noSessionFor && d === worktrees[Number.parseInt(extras.noSessionFor.split("-")[1] ?? "1", 10)]) return { data: [] } as never
-          if (d && worktrees.includes(d)) return { data: [{ id: `s-${d.slice(-4)}` }] } as never
-          if (d === hostDir) return { data: [{ id: "s-host" }] } as never
-          return { data: [] } as never
-        },
+        list: async () => ({ data: [] } as never),
         get: async (p: Record<string, unknown>) => ({ data: { id: p.sessionID, projectID: currentID, title: "one", time: { created: 1, updated: 2 }, tokens: { input: 10, output: 5 }, cost: 0.1, model: { providerID: "openai", id: "gpt-4o" } } } as never),
         messages: async () => ({ data: [] } as never),
         children: async () => ({ data: [] } as never),
       },
       model: { list: async () => ({ data: [] }) },
-      v2: { model: { list: async () => ({ data: [] }) }, session: { list: async () => ({ data: [] }) } },
+      v2: { model: { list: async () => ({ data: [] }) }, session: { list: async (p: Record<string, unknown>) => { v2Calls++; await delay(probeMs, null); const pid = p.project as string; if (extras.noSessionFor && pid === extras.noSessionFor) return { data: [] } as never; if (pid && projects.some(pr => pr.id === pid)) { const wt = projects.find(pr => pr.id === pid)?.worktree; if (wt === "/nope-xyz") return { data: [] } as never; return { data: [{ id: `s-${pid.slice(-4)}` }] } as never } return { data: [] } as never } } },
     },
     route: { current: { params: { sessionID: "s1" } } },
     currentSessionID: "s1",
@@ -93,11 +90,13 @@ function makePerfHarness(N = 28, probeMs = 100, listMs = 8, curMs = 8, extras: P
     return v
   }
   const getCaps = () => caps
-  return { api, get, getCaps, hostDir, stateDir, worktrees, projects, currentID, counts: () => ({ listCalls, curCalls, dirCalls, sessCalls, replaceCount, clearCount, onCloseCalls }), start: () => start, resetStart: () => { start = performance.now() }, cleanup() { for (const d of [stateDir, hostDir, ...worktrees]) try { rmSync(d, { recursive: true, force: true }) } catch {} } }
+  return { api, get, getCaps, hostDir, stateDir, worktrees, projects, currentID, counts: () => ({ listCalls, curCalls, v2Calls, replaceCount, clearCount, onCloseCalls }), start: () => start, resetStart: () => { start = performance.now() }, cleanup() { for (const d of [stateDir, hostDir, ...worktrees]) try { rmSync(d, { recursive: true, force: true }) } catch {} } }
 }
 
 describe("perf P0: Usage first paint", () => {
-  test("provisional usable ≤100ms, final ≤900ms, unchanged 58 calls", async () => {
+  // Baseline (main, legacy): 58 calls (list 1 + current 1 + directories 28 + session.list(directory) 28), first usable 18.8ms after P0, settlement ≤900ms, 3 replaces.
+  // Candidate (V2): 30 calls (list 1 + current 1 + v2.session.list({project,limit:1}) 28), provisional ≤100ms, final ≤900ms, same replaces.
+  test("provisional usable ≤100ms, final ≤900ms, 30 V2 calls", async () => {
     const h = makePerfHarness(28, 100, 8, 8)
     const start = performance.now()
     h.resetStart()
@@ -130,9 +129,8 @@ describe("perf P0: Usage first paint", () => {
     const c = h.counts()
     expect(c.listCalls).toBe(1)
     expect(c.curCalls).toBe(1)
-    expect(c.dirCalls).toBe(28)
-    expect(c.sessCalls).toBe(28)
-    expect(c.listCalls + c.curCalls + c.dirCalls + c.sessCalls).toBe(58)
+    expect(c.v2Calls).toBe(28)
+    expect(c.listCalls + c.curCalls + c.v2Calls).toBe(30)
     expect(h.get().options.some((o: { value: string }) => o.value === "/")).toBe(false)
     h.cleanup()
   })
@@ -187,16 +185,23 @@ describe("perf P0: Usage first paint", () => {
     h.cleanup()
   })
 
-  test("provisional uses only safe worktree evidence, background adds/removes correctly", async () => {
-    // One project with unsafe worktree should not appear provisionally, and empty-session project filtered finally
+  test("provisional uses only eligible worktree evidence (git, not HOME child), background V2 filters empty", async () => {
+    stubPricing();
+    // One project with unsafe worktree, one with missing .git, and empty-session project filtered finally; eligible requires .git and not direct HOME child.
     const stateDir = mkdtempSync(join(tmpdir(), "perf-state-"))
     const hostDir = mkdtempSync(join(tmpdir(), "perf-host-"))
+    ensureGit(hostDir)
     const good = mkdtempSync(join(tmpdir(), "perf-good-"))
+    ensureGit(good)
     const empty = mkdtempSync(join(tmpdir(), "perf-empty-"))
+    ensureGit(empty)
+    const noGit = mkdtempSync(join(tmpdir(), "perf-nogit-"))
+    // no .git for noGit -> ineligible
     const projects = [
       { id: "proj-good", name: "good", worktree: good, time: { created: 1, updated: 10 } },
       { id: "proj-unsafe", name: "bad", worktree: "/", time: { created: 1, updated: 9 } },
       { id: "proj-empty", name: "empty", worktree: empty, time: { created: 1, updated: 8 } },
+      { id: "proj-nogit", name: "nogit", worktree: noGit, time: { created: 1, updated: 7 } },
     ]
     type Cap = { title: string; options: Array<{ title: string; value: string; category?: string }>; onSelect?: (o: never) => void }
     let captured: Cap | null = null
@@ -207,16 +212,9 @@ describe("perf P0: Usage first paint", () => {
         project: {
           list: async () => ({ data: projects } as never),
           current: async () => ({ data: { id: "proj-good" } } as never),
-          directories: async () => ({ data: [] } as never),
         },
-        session: {
-          list: async (p: Record<string, unknown>) => {
-            const d = p.directory as string
-            if (d === good) return { data: [{ id: "s1" }] } as never
-            if (d === empty) return { data: [] } as never
-            return { data: [] } as never
-          },
-        },
+        session: { list: async () => ({ data: [] } as never) },
+        v2: { session: { list: async (p: Record<string, unknown>) => { const pid = p.project as string; if (pid === "proj-good") return { data: [{ id: "s1" }] } as never; if (pid === "proj-empty") return { data: [] } as never; if (pid === "proj-nogit") return { data: [{ id: "s1" }] } as never; return { data: [] } as never } } },
       },
       ui: { dialog: { replace(r: () => unknown, c?: () => void) { stack.splice(0, stack.length, { render: r, onClose: c }) }, clear() { stack.splice(0, stack.length) } }, DialogSelect: (props: Cap) => { captured = props; return null as never }, toast() {} },
     } as never
@@ -233,12 +231,13 @@ describe("perf P0: Usage first paint", () => {
     // Do not assert strict empty provisional presence if timing races; instead check final filtering
     await delay(500, null)
     const fin = get()
-    // final should have filtered empty-session project out, still not unsafe
+    // final should have filtered empty-session project out, still not unsafe/nogit (nogit ineligible never appears)
     expect(fin.options.some(o => o.value === "proj-good")).toBe(true)
     expect(fin.options.some(o => o.value === "proj-empty")).toBe(false)
     expect(fin.options.some(o => o.value === "proj-unsafe")).toBe(false)
+    expect(fin.options.some(o => o.value === "proj-nogit")).toBe(false)
     expect(fin.title).toBe("TokenMeter: Browse Usage (1)")
-    for (const d of [stateDir, hostDir, good, empty]) try { rmSync(d, { recursive: true, force: true }) } catch {}
+    for (const d of [stateDir, hostDir, good, empty, noGit]) try { rmSync(d, { recursive: true, force: true }) } catch {}
   })
 
   test("no unhandled rejection and no extra replace loops (≤3 replaces)", async () => {
