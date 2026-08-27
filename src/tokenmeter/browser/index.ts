@@ -23,6 +23,8 @@ export { isSafeDirectory } from "./is-safe-directory"
 export type { BrowserProjectDetail, BrowserSession } from "./project-detail"
 export { loadProjectDetail } from "./project-detail"
 export { loadBrowserProjects } from "./projects"
+export type { ModelGroup, ProviderGroup, SessionDetail } from "./session-detail"
+export { loadSessionDetail } from "./session-detail"
 export {
   fetchSessionsForBrowse,
   fetchSessionsForProject,
