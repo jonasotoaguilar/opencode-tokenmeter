@@ -116,12 +116,24 @@ function buildBrowserOptions(
   return { title: t, options: o }
 }
 
+let browserGen = 0
+let activeBrowserGen = 0
+
 export function showBrowserDialog(api: BrowserDialogApi): void {
+  const myGen = ++browserGen
+  activeBrowserGen = myGen
   let closed = false
   const close = () => {
     if (closed) return
     closed = true
+    activeBrowserGen = 0
     api.ui.dialog.clear()
+  }
+  const isActive = (): boolean => !closed && activeBrowserGen === myGen
+  const deactivate = (): void => {
+    if (closed) return
+    closed = true
+    activeBrowserGen = 0
   }
   const render = (
     loading: boolean,
@@ -141,7 +153,10 @@ export function showBrowserDialog(api: BrowserDialogApi): void {
           }
           if (x.value.startsWith("__")) return
           const sel = data?.find((r) => r.id === x.value)
-          if (sel) showProjectDetail(api, sel.id)
+          if (sel) {
+            deactivate()
+            showProjectDetail(api, sel.id)
+          }
         }}
       />
     )
@@ -215,6 +230,39 @@ export function showBrowserDialog(api: BrowserDialogApi): void {
           worktree: (proj as { worktree?: string }).worktree,
         })
       }
+      // Provisional safe list using only synchronous worktree/host evidence.
+      // Never shows an unsafe root/home path; background probes will add/remove.
+      const provisionalSafe: BrowserRow[] = rowsRaw
+        .filter((row) => {
+          if (typeof row.worktree === "string" && isSafeDirectory(row.worktree))
+            return true
+          if (row.isCurrent) {
+            try {
+              const host = (
+                api as unknown as { state: { path: { directory: string } } }
+              ).state.path.directory as string
+              if (isSafeDirectory(host)) return true
+            } catch {}
+          }
+          return false
+        })
+        .map((row) => ({
+          id: row.id,
+          label: row.label,
+          lastActive: row.lastActive,
+          isCurrent: row.isCurrent,
+        }))
+      const curProv = provisionalSafe.filter((r) => r.isCurrent)
+      const restProv = provisionalSafe
+        .filter((r) => !r.isCurrent)
+        .sort((a, b) => b.lastActive - a.lastActive)
+      const provisionalOrdered = [...curProv, ...restProv]
+      if (isActive()) {
+        api.ui.dialog.replace(
+          () => render(false, null, provisionalOrdered),
+          close,
+        )
+      }
       const filtered: BrowserRow[] = []
       await withConcurrency(rowsRaw, BROWSER_CONCURRENCY, async (row) => {
         let dir: string | null = null
@@ -243,20 +291,20 @@ export function showBrowserDialog(api: BrowserDialogApi): void {
           lastActive: row.lastActive,
           isCurrent: row.isCurrent,
         })
-      })
+      }).catch(() => {})
       const curRows = filtered.filter((r) => r.isCurrent)
       const rest = filtered
         .filter((r) => !r.isCurrent)
         .sort((a, b) => b.lastActive - a.lastActive)
       const ordered = [...curRows, ...rest]
-      if (closed) return
+      if (!isActive()) return
       api.ui.dialog.replace(() => render(false, null, ordered), close)
     } catch {
-      if (closed) return
+      if (!isActive()) return
       api.ui.dialog.replace(
         () => render(false, "Unable to load projects", []),
         close,
       )
     }
-  })()
+  })().catch(() => {})
 }
