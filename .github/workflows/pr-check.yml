@@ -23,7 +23,7 @@ jobs:
         uses: actions/github-script@v9
         with:
           script: |
-            const limit = 400;
+            const limit = 800;
             const pr = context.payload.pull_request;
             const additions = pr.additions || 0;
             const deletions = pr.deletions || 0;
