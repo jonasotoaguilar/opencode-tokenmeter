@@ -52,8 +52,37 @@ import { combineProjectUsage, sumProjectSessions } from "./math"
 import { loadPricing } from "./pricing"
 import type { ProjectSessionLike, ProjectUsage } from "./types"
 
-export const [projectSnapshot, setProjectSnapshot] =
+const [projectSnapshot, _setProjectSnapshot] =
   createSignal<ProjectUsage | null>(null)
+
+export { projectSnapshot }
+
+const snapshotListeners = new Set<(snap: ProjectUsage | null) => void>()
+
+export function subscribeProjectSnapshot(
+  listener: (snap: ProjectUsage | null) => void,
+): () => void {
+  snapshotListeners.add(listener)
+  return () => snapshotListeners.delete(listener)
+}
+
+function notifyProjectSnapshot(snap: ProjectUsage | null): void {
+  for (const listener of snapshotListeners) {
+    try {
+      listener(snap)
+    } catch {}
+  }
+}
+
+export function setProjectSnapshot(value: ProjectUsage | null): void {
+  _setProjectSnapshot(value)
+  notifyProjectSnapshot(value)
+}
+
+/** Test-only: clears all snapshot listeners (used to isolate wiring tests). */
+export function __clearSnapshotListenersForTest(): void {
+  snapshotListeners.clear()
+}
 
 /**
  * True while a refreshProject run is awaiting the API/list/ledger work, false
@@ -166,9 +195,10 @@ export async function refreshProject(
     // the stable error instead of showing a partial total.
     if (sessions.length >= PROJECT_SESSION_LIMIT)
       throw new Error(PROJECT_ERROR_MESSAGE)
-    const projectSessions = sessions.filter(
-      (session) => session?.projectID === projectID,
-    )
+    const projectSessions = sessions.filter((session) => {
+      const pid = (session as unknown as { projectID?: unknown })?.projectID
+      return pid == null || pid === "" || pid === projectID
+    })
     try {
       await loadPricing(api as unknown as Parameters<typeof loadPricing>[0])
     } catch {}
