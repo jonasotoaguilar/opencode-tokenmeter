@@ -12,6 +12,7 @@ import { BROWSER_CONCURRENCY, FETCH_TIMEOUT_MS, NAV } from "./constants"
 import { dirExists, iso } from "./dialog-shared"
 import { resolveBrowseDirectory } from "./directories"
 import { isSafeDirectory } from "./is-safe-directory"
+import { showProjectDetail } from "./project-dialog"
 import { withTimeout } from "./timeout"
 import type { BrowserDialogApi } from "./types"
 
@@ -139,7 +140,8 @@ export function showBrowserDialog(api: BrowserDialogApi): void {
             return
           }
           if (x.value.startsWith("__")) return
-          // Project detail navigation added in next layer (project-dialog)
+          const sel = data?.find((r) => r.id === x.value)
+          if (sel) showProjectDetail(api, sel.id)
         }}
       />
     )
