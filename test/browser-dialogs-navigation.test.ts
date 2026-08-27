@@ -1,20 +1,282 @@
-// biome-ignore-all lint/style/noNonNullAssertion: navigation harness
-// biome-ignore-all format: compact for 400 budget
+// navigation harness - expanded for V2/eligibility/close-guard fixes
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { NAV } from "../src/tokenmeter/browser/constants"
 import { showProjectDetail } from "../src/tokenmeter/browser/project-dialog"
 import { showBrowserDialog } from "../src/tokenmeter/browser/projects-dialog"
 import { showSessionDetail } from "../src/tokenmeter/browser/session-dialog"
+import { clearPricing } from "../src/tokenmeter/pricing"
+import {
+  __setPricingFetchForTest,
+  clearRemotePricing,
+} from "../src/tokenmeter/pricing-remote"
 
-function hostDialog(){let stack:{render:()=>unknown;onClose?:()=>void}[]=[];let rc=0,cc=0;let cap:any=null;let onCloseCalls=0;const dlg={replace(r:()=>unknown,c?:()=>void){rc++;stack=[{render:r,onClose:c}]},clear(){const closers=stack.map(s=>s.onClose).filter(Boolean) as (()=>void)[];const had=stack.length>0;stack=[];if(had)cc++;for(const fn of closers){try{onCloseCalls++;fn()}catch{}}},get depth(){return stack.length},get open(){return stack.length>0}} as any;const get=()=>{if(!stack[0])throw new Error("no render");(stack[0].render as ()=>unknown)();const v=cap!;cap=null;return v as {title:string;options:{title:string;value:string;category?:string}[];onSelect?:(v:any)=>void}};const capture=(p:any)=>{cap=p;return null as any};return {dlg,get,capture,rc:()=>rc,cc:()=>cc,onCloseCalls:()=>onCloseCalls,stack:()=>stack}}
-function mkBrowserHarness(){const dir=mkdtempSync(join(tmpdir(),"tm-nb-"));const host=mkdtempSync(join(tmpdir(),"tm-nh-"));const a=mkdtempSync(join(tmpdir(),"tm-na-"));const b=mkdtempSync(join(tmpdir(),"tm-nb2-"));const projects=[{id:"projA",name:"alpha",worktree:a,time:{created:1700000000000,updated:1700000005000}},{id:"projB",name:undefined,worktree:b,time:{created:1700000000000,updated:1700000008000}}];const hd=hostDialog();const map={[a]:[{id:"s1",title:"one",time:{created:1,updated:2},parentID:null,tokens:{input:10,output:5},cost:0.1,model:{providerID:"openai",id:"gpt-4o"}}],[b]:[{id:"s2",title:"two",time:{created:1,updated:3},parentID:null,tokens:{input:5,output:5},cost:0.05,model:{providerID:"openai",id:"gpt-4o"}}]} as Record<string,unknown[]>;const api={state:{path:{directory:host,state:dir}},client:{project:{list:async()=>({data:projects}) as never,current:async()=>({data:{id:"projA"}}) as never,directories:async()=>({data:[]}) as never},session:{list:async(p:Record<string,unknown>)=>{const d=p.directory as string;if(d&&(map as any)[d])return {data:(map as any)[d]} as never;return {data:[]} as never},get:async(p:Record<string,unknown>)=>({data:{id:p.sessionID,projectID:"projA",title:"one",time:{created:1,updated:2},tokens:{input:10,output:5},cost:0.1,model:{providerID:"openai",id:"gpt-4o"}}}) as never,messages:async()=>({data:[]}) as never,children:async()=>({data:[]}) as never},model:{list:async()=>({data:[]})},v2:{model:{list:async()=>({data:[]})},session:{list:async()=>({data:[]})}}},route:{current:{params:{sessionID:"s1"}}},currentSessionID:"s1",ui:{dialog:hd.dlg,DialogSelect:hd.capture,toast(){}}};return {api:api as never,hd,dir,host,a,b,cleanup(){for(const d of [dir,host,a,b])try{rmSync(d,{recursive:true,force:true})}catch{}}}}
-describe("browser dialog navigation (host-realistic)",()=>{
-test("after async final projects render, Enter/select on real project invokes project-detail via dialog.replace",async()=>{const h=mkBrowserHarness();showBrowserDialog(h.api);await new Promise(r=>setTimeout(r,120));const lo=h.hd.get();const opt=lo.options.find(o=>o.value==="projA")!;expect(opt).toBeDefined();expect(lo.title).toBe("TokenMeter: Browse Usage (2)");const before=h.hd.rc();lo.onSelect!({title:opt.title,value:opt.value} as any);await new Promise(r=>setTimeout(r,600));expect(h.hd.rc()).toBeGreaterThan(before);const after=h.hd.get();expect(after.title).not.toContain("Browse Usage");expect(after.options.some(o=>o.value==="__back"&&o.category===NAV)).toBe(true);expect(after.options.some(o=>o.value==="__close")).toBe(true);h.cleanup()})
-test("selecting visible Close calls dialog.clear exactly once and once-guard prevents duplicate",async()=>{const h=mkBrowserHarness();showBrowserDialog(h.api);await new Promise(r=>setTimeout(r,120));const lo=h.hd.get();const closeOpt=lo.options.find(o=>o.value==="__close")!;expect(closeOpt).toBeDefined();lo.onSelect!({title:closeOpt.title,value:"__close"} as any);expect(h.hd.cc()).toBe(1);expect(h.hd.onCloseCalls()).toBe(1);lo.onSelect!({title:closeOpt.title,value:"__close"} as any);expect(h.hd.cc()).toBe(1);expect(h.hd.onCloseCalls()).toBe(1);h.cleanup()})
-test("replace itself does not spuriously invoke previous onClose",async()=>{const h=mkBrowserHarness();showBrowserDialog(h.api);expect(h.hd.cc()).toBe(0);expect(h.hd.onCloseCalls()).toBe(0);await new Promise(r=>setTimeout(r,120));expect(h.hd.cc()).toBe(0);expect(h.hd.onCloseCalls()).toBe(0);h.cleanup()})
-test("Back from project detail returns to browser dialog",async()=>{const h=mkBrowserHarness();showProjectDetail(h.api,"projA");await new Promise(r=>setTimeout(r,600));const pd=h.hd.get();expect(pd.options.some(o=>o.value==="__back")).toBe(true);const before=h.hd.rc();pd.onSelect!({title:"",value:"__back"} as any);await new Promise(r=>setTimeout(r,300));expect(h.hd.rc()).toBeGreaterThan(before);const back=h.hd.get();expect(back.title).toContain("Browse Usage");h.cleanup()})
-test("Back and Close from session detail remain green",async()=>{const h=mkBrowserHarness();showSessionDetail(h.api,"s1","projA");await new Promise(r=>setTimeout(r,600));const sd=h.hd.get();expect(sd.options.some(o=>o.value==="__back")).toBe(true);const before=h.hd.rc();sd.onSelect!({title:"",value:"__back"} as any);await new Promise(r=>setTimeout(r,300));expect(h.hd.rc()).toBeGreaterThan(before);const proj=h.hd.get();expect(proj.options.some(o=>o.value==="__back")).toBe(true);const h2=mkBrowserHarness();showSessionDetail(h2.api,"s1","projA");await new Promise(r=>setTimeout(r,600));const sd2=h2.hd.get();sd2.onSelect!({title:"",value:"__close"} as any);expect(h2.hd.cc()).toBe(1);h.cleanup();h2.cleanup()})
+function ensureGit(p: string) {
+  try {
+    mkdirSync(join(p, ".git"), { recursive: true })
+  } catch {}
+}
+function stubPricing() {
+  try {
+    clearPricing()
+    clearRemotePricing()
+    __setPricingFetchForTest(
+      (async () =>
+        ({
+          ok: true,
+          json: async () => ({}),
+        }) as unknown as Response) as unknown as typeof fetch,
+    )
+  } catch {}
+}
+function hostDialog() {
+  let stack: Array<{ render: () => unknown; onClose?: () => void }> = []
+  let rc = 0,
+    cc = 0,
+    onCloseCalls = 0
+  let cap: any = null
+  const dlg = {
+    replace(r: () => unknown, c?: () => void) {
+      rc++
+      stack = [{ render: r, onClose: c }]
+    },
+    clear() {
+      const closers = stack
+        .map((s) => s.onClose)
+        .filter(Boolean) as (() => void)[]
+      const had = stack.length > 0
+      stack = []
+      if (had) cc++
+      for (const fn of closers) {
+        try {
+          onCloseCalls++
+          fn()
+        } catch {}
+      }
+    },
+    get depth() {
+      return stack.length
+    },
+    get open() {
+      return stack.length > 0
+    },
+  } as any
+  const get = () => {
+    if (!stack[0]) throw new Error("no render")
+    ;(stack[0].render as () => unknown)()
+    const v = cap!
+    cap = null
+    return v as {
+      title: string
+      options: Array<{ title: string; value: string; category?: string }>
+      onSelect?: (v: any) => void
+    }
+  }
+  const capture = (p: any) => {
+    cap = p
+    return null as any
+  }
+  return {
+    dlg,
+    get,
+    capture,
+    rc: () => rc,
+    cc: () => cc,
+    onCloseCalls: () => onCloseCalls,
+    stack: () => stack,
+  }
+}
+function mkBrowserHarness() {
+  stubPricing()
+  const dir = mkdtempSync(join(tmpdir(), "tm-nb-"))
+  const host = mkdtempSync(join(tmpdir(), "tm-nh-"))
+  ensureGit(host)
+  const a = mkdtempSync(join(tmpdir(), "tm-na-"))
+  ensureGit(a)
+  const b = mkdtempSync(join(tmpdir(), "tm-nb2-"))
+  ensureGit(b)
+  const projects = [
+    {
+      id: "projA",
+      name: "alpha",
+      worktree: a,
+      time: { created: 1700000000000, updated: 1700000005000 },
+    },
+    {
+      id: "projB",
+      name: undefined,
+      worktree: b,
+      time: { created: 1700000000000, updated: 1700000008000 },
+    },
+  ]
+  const hd = hostDialog()
+  const map: Record<string, unknown[]> = {
+    [a]: [
+      {
+        id: "s1",
+        title: "one",
+        time: { created: 1, updated: 2 },
+        parentID: null,
+        tokens: { input: 10, output: 5 },
+        cost: 0.1,
+        model: { providerID: "openai", id: "gpt-4o" },
+      },
+    ],
+    [b]: [
+      {
+        id: "s2",
+        title: "two",
+        time: { created: 1, updated: 3 },
+        parentID: null,
+        tokens: { input: 5, output: 5 },
+        cost: 0.05,
+        model: { providerID: "openai", id: "gpt-4o" },
+      },
+    ],
+  }
+  const projMap: Record<string, unknown[]> = { projA: map[a]!, projB: map[b]! }
+  const api = {
+    state: { path: { directory: host, state: dir } },
+    client: {
+      project: {
+        list: async () => ({ data: projects }) as never,
+        current: async () => ({ data: { id: "projA" } }) as never,
+      },
+      session: {
+        list: async (p: Record<string, unknown>) => {
+          const d = p.directory as string
+          if (d && (map as any)[d]) return { data: (map as any)[d] } as never
+          return { data: [] } as never
+        },
+        get: async (p: Record<string, unknown>) =>
+          ({
+            data: {
+              id: p.sessionID,
+              projectID: "projA",
+              title: "one",
+              time: { created: 1, updated: 2 },
+              tokens: { input: 10, output: 5 },
+              cost: 0.1,
+              model: { providerID: "openai", id: "gpt-4o" },
+            },
+          }) as never,
+        messages: async () => ({ data: [] }) as never,
+        children: async () => ({ data: [] }) as never,
+      },
+      model: { list: async () => ({ data: [] }) },
+      v2: {
+        model: { list: async () => ({ data: [] }) },
+        session: {
+          list: async (p: Record<string, unknown>) => {
+            const pid = p.project as string
+            if (pid && projMap[pid]) return { data: projMap[pid] } as never
+            const d = (p as any).directory as string
+            if (d && (map as any)[d]) return { data: (map as any)[d] } as never
+            return { data: [] } as never
+          },
+        },
+      },
+    },
+    route: { current: { params: { sessionID: "s1" } } },
+    currentSessionID: "s1",
+    ui: { dialog: hd.dlg, DialogSelect: hd.capture, toast() {} },
+  } as never
+  return {
+    api: api as never,
+    hd,
+    dir,
+    host,
+    a,
+    b,
+    cleanup() {
+      for (const d of [dir, host, a, b])
+        try {
+          rmSync(d, { recursive: true, force: true })
+        } catch {}
+    },
+  }
+}
+describe("browser dialog navigation (host-realistic)", () => {
+  test("after async final projects render, Enter/select on real project invokes project-detail via dialog.replace", async () => {
+    const h = mkBrowserHarness()
+    showBrowserDialog(h.api)
+    await new Promise((r) => setTimeout(r, 120))
+    const lo = h.hd.get()
+    const opt = lo.options.find((o) => o.value === "projA")!
+    expect(opt).toBeDefined()
+    expect(lo.title).toBe("TokenMeter: Browse Usage (2)")
+    const before = h.hd.rc()
+    lo.onSelect!({ title: opt.title, value: opt.value } as any)
+    await new Promise((r) => setTimeout(r, 600))
+    expect(h.hd.rc()).toBeGreaterThan(before)
+    const after = h.hd.get()
+    expect(after.title).not.toContain("Browse Usage")
+    expect(
+      after.options.some((o) => o.value === "__back" && o.category === NAV),
+    ).toBe(true)
+    expect(after.options.some((o) => o.value === "__close")).toBe(true)
+    h.cleanup()
+  })
+  test("selecting visible Close calls dialog.clear exactly once and once-guard prevents duplicate", async () => {
+    const h = mkBrowserHarness()
+    showBrowserDialog(h.api)
+    await new Promise((r) => setTimeout(r, 120))
+    const lo = h.hd.get()
+    const closeOpt = lo.options.find((o) => o.value === "__close")!
+    expect(closeOpt).toBeDefined()
+    lo.onSelect!({ title: closeOpt.title, value: "__close" } as any)
+    expect(h.hd.cc()).toBe(1)
+    expect(h.hd.onCloseCalls()).toBe(1)
+    lo.onSelect!({ title: closeOpt.title, value: "__close" } as any)
+    expect(h.hd.cc()).toBe(1)
+    expect(h.hd.onCloseCalls()).toBe(1)
+    h.cleanup()
+  })
+  test("replace itself does not spuriously invoke previous onClose", async () => {
+    const h = mkBrowserHarness()
+    showBrowserDialog(h.api)
+    expect(h.hd.cc()).toBe(0)
+    expect(h.hd.onCloseCalls()).toBe(0)
+    await new Promise((r) => setTimeout(r, 120))
+    expect(h.hd.cc()).toBe(0)
+    expect(h.hd.onCloseCalls()).toBe(0)
+    h.cleanup()
+  })
+  test("Back from project detail returns to browser dialog", async () => {
+    const h = mkBrowserHarness()
+    showProjectDetail(h.api, "projA")
+    await new Promise((r) => setTimeout(r, 600))
+    const pd = h.hd.get()
+    expect(pd.options.some((o) => o.value === "__back")).toBe(true)
+    const before = h.hd.rc()
+    pd.onSelect!({ title: "", value: "__back" } as any)
+    await new Promise((r) => setTimeout(r, 300))
+    expect(h.hd.rc()).toBeGreaterThan(before)
+    const back = h.hd.get()
+    expect(back.title).toContain("Browse Usage")
+    h.cleanup()
+  })
+  test("Back and Close from session detail remain green", async () => {
+    const h = mkBrowserHarness()
+    showSessionDetail(h.api, "s1", "projA")
+    await new Promise((r) => setTimeout(r, 600))
+    const sd = h.hd.get()
+    expect(sd.options.some((o) => o.value === "__back")).toBe(true)
+    const before = h.hd.rc()
+    sd.onSelect!({ title: "", value: "__back" } as any)
+    await new Promise((r) => setTimeout(r, 300))
+    expect(h.hd.rc()).toBeGreaterThan(before)
+    const proj = h.hd.get()
+    expect(proj.options.some((o) => o.value === "__back")).toBe(true)
+    const h2 = mkBrowserHarness()
+    showSessionDetail(h2.api, "s1", "projA")
+    await new Promise((r) => setTimeout(r, 600))
+    const sd2 = h2.hd.get()
+    sd2.onSelect!({ title: "", value: "__close" } as any)
+    expect(h2.hd.cc()).toBe(1)
+    h.cleanup()
+    h2.cleanup()
+  })
 })

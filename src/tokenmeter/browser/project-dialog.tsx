@@ -90,7 +90,7 @@ function buildProjectOptions(
     if (detail.sessions.length === 0) {
       o = [
         ...ov,
-        { title: "No sessions found", value: "__empty", category: "Others" },
+        { title: "No sessions found", value: "__empty", category: "Sessions" },
         { title: "← Back to projects", value: "__back", category: NAV },
         { title: "× Close", value: "__close", category: NAV },
       ]
@@ -101,7 +101,7 @@ function buildProjectOptions(
           title: `★ ${truncateToColumns(cur.title?.trim() ? cur.title!.trim() : cur.id, 24)}`,
           value: cur.id,
           description: cur.time.updated ? iso(cur.time.updated) : "—",
-          category: "Current",
+          category: "Current Session",
         })
       for (let i = 0; i < others.length; i++) {
         const s = others[i]!
@@ -114,17 +114,17 @@ function buildProjectOptions(
           description: s.time.updated ? iso(s.time.updated) : "—",
           category:
             i === 0 && !cur
-              ? "Others"
+              ? "Sessions"
               : rows.length === 0 || (cur && i === 0)
-                ? "Others"
+                ? "Sessions"
                 : undefined,
         })
       }
       if (!cur && rows.length > 0 && !rows[0]!.category)
-        rows[0]!.category = "Others"
+        rows[0]!.category = "Sessions"
       else if (cur && others.length > 0) {
         const idx = rows.findIndex((r) => others.some((x) => x.id === r.value))
-        if (idx >= 0) rows[idx]!.category = "Others"
+        if (idx >= 0) rows[idx]!.category = "Sessions"
       }
       o = [
         ...ov,

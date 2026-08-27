@@ -1,8 +1,9 @@
 /** @jsxImportSource @opentui/solid */
 /**
  * Projects list dialog.
- * First paint from project.list + current pin; async probe filters
- * to existing directories with a nonempty limit-1 session probe.
+ * First paint from project.list + current pin; provisional filters via
+ * sync eligibility (exists, directory, .git, not /, not HOME, not ~/foo);
+ * async probe filters to V2 limit-1 session presence (api.client.v2.session.list({project,limit:1})).
  * Title is count only; no Overview tokens/cost.
  */
 
@@ -10,28 +11,30 @@ import { textColumns, truncateToColumns } from "../text"
 import { createBrowserActivity } from "./browser-activity"
 import { withConcurrency } from "./concurrency"
 import { BROWSER_CONCURRENCY, FETCH_TIMEOUT_MS, NAV } from "./constants"
-import { dirExists, iso } from "./dialog-shared"
-import { resolveBrowseDirectory } from "./directories"
+import { iso } from "./dialog-shared"
+import { isEligibleProjectPath } from "./eligibility"
 import { isSafeDirectory } from "./is-safe-directory"
 import { showProjectDetail } from "./project-dialog"
 import { withTimeout } from "./timeout"
 import type { BrowserDialogApi } from "./types"
 
-function probeHasSessions(
+function probeHasSessionsV2(
   api: BrowserDialogApi,
-  directory: string,
+  projectID: string,
 ): Promise<boolean> {
-  if (!isSafeDirectory(directory)) return Promise.resolve(false)
+  const v2 = (
+    api as unknown as {
+      client: { v2?: { session?: { list?: unknown } } }
+    }
+  ).client.v2?.session
+  const fn = v2?.list as
+    | ((p: Record<string, unknown>) => Promise<unknown>)
+    | undefined
+  if (typeof fn !== "function") return Promise.resolve(false)
   return withTimeout(
-    (
-      api.client.session.list as (
-        p: Record<string, unknown>,
-      ) => Promise<unknown>
-    ).call(api.client.session, {
-      directory,
-      scope: "project",
-      limit: 1,
-    }) as Promise<{ data?: unknown }>,
+    fn.call(v2, { project: projectID, limit: 1 }) as Promise<{
+      data?: unknown
+    }>,
     FETCH_TIMEOUT_MS,
   )
     .then((res) => {
@@ -95,7 +98,7 @@ function buildBrowserOptions(
         title: `★ ${truncateToColumns(cur.label, 24)}`,
         value: cur.id,
         description: cur.lastActive ? iso(cur.lastActive) : "—",
-        category: "Current",
+        category: "Current Project",
       })
     for (let i = 0; i < others.length; i++) {
       const r = others[i]!
@@ -103,14 +106,14 @@ function buildBrowserOptions(
         title: truncateToColumns(r.label, 24),
         value: r.id,
         description: r.lastActive ? iso(r.lastActive) : "—",
-        category: i === 0 ? "Others" : undefined,
+        category: i === 0 ? "Projects" : undefined,
       })
     }
     if (!cur && list.length > 0 && !list[0]!.category)
-      list[0]!.category = "Others"
+      list[0]!.category = "Projects"
     else if (cur && others.length > 0) {
       const f = list.find((x) => others.some((o) => o.id === x.value))
-      if (f) f.category = "Others"
+      if (f) f.category = "Projects"
     }
     o = [...list, { title: "× Close", value: "__close", category: NAV }]
   }
@@ -215,28 +218,30 @@ export function showBrowserDialog(api: BrowserDialogApi): void {
           worktree: (proj as { worktree?: string }).worktree,
         })
       }
-      // Provisional safe list using only synchronous worktree/host evidence.
-      // Never shows an unsafe root/home path; background probes will add/remove.
-      const provisionalSafe: BrowserRow[] = rowsRaw
-        .filter((row) => {
-          if (typeof row.worktree === "string" && isSafeDirectory(row.worktree))
-            return true
-          if (row.isCurrent) {
-            try {
-              const host = (
-                api as unknown as { state: { path: { directory: string } } }
-              ).state.path.directory as string
-              if (isSafeDirectory(host)) return true
-            } catch {}
-          }
-          return false
-        })
-        .map((row) => ({
-          id: row.id,
-          label: row.label,
-          lastActive: row.lastActive,
-          isCurrent: row.isCurrent,
-        }))
+      // Provisional eligible list: sync filesystem eligibility (exists, directory, .git, not / or HOME or ~/foo).
+      // Invalid/deleted entries never flash.
+      const eligibleRows = rowsRaw.filter((row) => {
+        if (
+          typeof row.worktree === "string" &&
+          isEligibleProjectPath(row.worktree)
+        )
+          return true
+        if (row.isCurrent) {
+          try {
+            const host = (
+              api as unknown as { state: { path: { directory: string } } }
+            ).state.path.directory as string
+            if (isEligibleProjectPath(host)) return true
+          } catch {}
+        }
+        return false
+      })
+      const provisionalSafe: BrowserRow[] = eligibleRows.map((row) => ({
+        id: row.id,
+        label: row.label,
+        lastActive: row.lastActive,
+        isCurrent: row.isCurrent,
+      }))
       const curProv = provisionalSafe.filter((r) => r.isCurrent)
       const restProv = provisionalSafe
         .filter((r) => !r.isCurrent)
@@ -249,23 +254,10 @@ export function showBrowserDialog(api: BrowserDialogApi): void {
         )
       }
       const filtered: BrowserRow[] = []
-      await withConcurrency(rowsRaw, BROWSER_CONCURRENCY, async (row) => {
-        let dir: string | null = null
-        try {
-          dir = await resolveBrowseDirectory(
-            api,
-            row.id,
-            row.worktree,
-            currentID,
-          )
-        } catch {
-          dir = null
-        }
-        if (!dir || !isSafeDirectory(dir)) return
-        if (!dirExists(dir)) return
+      await withConcurrency(eligibleRows, BROWSER_CONCURRENCY, async (row) => {
         let has = false
         try {
-          has = await probeHasSessions(api, dir)
+          has = await probeHasSessionsV2(api, row.id)
         } catch {
           has = false
         }
