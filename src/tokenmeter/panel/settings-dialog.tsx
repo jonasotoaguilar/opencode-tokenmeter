@@ -31,6 +31,7 @@ import {
   cycleMilestones,
   cycleNumbers,
   cycleSubagents,
+  cycleVisibility,
   settings,
   subagentsPref,
 } from "../settings"
@@ -49,7 +50,13 @@ export type DialogSurface = {
     }
     DialogSelect: (props: {
       title: string
-      options: Array<{ title: string; value: string; category?: string }>
+      options: Array<{
+        title: string
+        value: string
+        category?: string
+        disabled?: boolean
+        description?: string
+      }>
       onSelect?: (option: { title: string; value: string }) => void
     }) => JSX.Element
   }
@@ -100,6 +107,26 @@ export function showSettingsDialog(api: DialogSurface): void {
             category: "Sidebar",
           },
           {
+            title: `TokenMeter: ${settings().visibility.sidebar ? "on" : "off"}`,
+            value: "visibility.sidebar",
+            category: "Visibility",
+          },
+          {
+            title: `Project: ${settings().visibility.project ? "on" : "off"}`,
+            value: "visibility.project",
+            category: "Visibility",
+          },
+          {
+            title: `Session: ${settings().visibility.session ? "on" : "off"}`,
+            value: "visibility.session",
+            category: "Visibility",
+          },
+          {
+            title: `Subagents: ${settings().visibility.subagents ? "on" : "off"}`,
+            value: "visibility.subagents",
+            category: "Visibility",
+          },
+          {
             title: `Milestones: ${settings().milestones ? "on" : "off"}`,
             value: "milestones",
             category: "Project",
@@ -134,14 +161,32 @@ export function showSettingsDialog(api: DialogSurface): void {
             value: "footer.total",
             category: "Footer",
           },
+          {
+            title: "× Close",
+            value: "__close",
+            category: "────────",
+          },
         ]}
         onSelect={(option) => {
+          if (option.value === "__close") {
+            close()
+            return
+          }
+          if (option.value.startsWith("__")) return
           if (option.value === "cache") cycleCache(api)
           else if (option.value === "numbers") cycleNumbers(api)
           else if (option.value === "collapsedSummary")
             cycleCollapsedSummary(api)
           else if (option.value === "subagents") cycleSubagents(api)
           else if (option.value === "shortcut") cycleToggleShortcut(api)
+          else if (option.value === "visibility.sidebar")
+            cycleVisibility(api, "sidebar")
+          else if (option.value === "visibility.project")
+            cycleVisibility(api, "project")
+          else if (option.value === "visibility.session")
+            cycleVisibility(api, "session")
+          else if (option.value === "visibility.subagents")
+            cycleVisibility(api, "subagents")
           else if (option.value === "footer") cycleFooter(api)
           else if (option.value === "footer.input")
             cycleFooterMetric(api, "input")

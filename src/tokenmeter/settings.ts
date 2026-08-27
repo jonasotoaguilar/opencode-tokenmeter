@@ -1,20 +1,7 @@
 /**
- * Plugin-owned settings model for the TokenMeter sidebar and footer.
- *
- * Mirrors `project.ts`: a small store-like module owning signals plus
- * persistence, with no render logic. One versioned kv object
- * (`tokenmeter.settings.v1`) holds the object-backed preferences — `cache`,
- * `numbers`, `collapsedSummary` and the `footer` boolean set — written as a
- * whole object on every change. The `subagents` preference lives in the
- * pre-existing `tokenmeter.sidebar.expanded` key (its durable source of
- * truth) and is never duplicated inside `settings.v1`. The unshipped legacy
- * view field is gone; the sanitizer ignores any stale value a pre-change
- * build may have stored.
- *
- * Durable writes are gated on `api.kv.ready`: when the kv store is not
- * ready the in-memory value still updates for the session, no write is
- * issued, and `persisted()` flips to `false` so callers never claim
- * durability they do not have.
+ * Plugin-owned settings model. One versioned kv object
+ * (`tokenmeter.settings.v1`) holds object-backed preferences; Subagents
+ * disclosure stays in `tokenmeter.sidebar.expanded`. Writes are ready-gated.
  */
 import { createSignal } from "solid-js"
 
@@ -41,12 +28,18 @@ export type FooterSettings = {
   total: boolean
 }
 
+/** Presentation-only sidebar visibility. Collection and toasts keep running. */
+export type VisibilityPref = "sidebar" | "project" | "session" | "subagents"
+
+export type VisibilitySettings = Record<VisibilityPref, boolean>
+
 export type Settings = {
   cache: CachePref
   numbers: NumbersPref
   collapsedSummary: CollapsedSummaryPref
   footer: FooterSettings
   milestones: boolean
+  visibility: VisibilitySettings
 }
 
 /** Versioned single-key kv object for the object-backed preferences. */
@@ -67,12 +60,20 @@ export const DEFAULT_FOOTER: FooterSettings = {
   total: false,
 }
 
+export const DEFAULT_VISIBILITY: VisibilitySettings = {
+  sidebar: true,
+  project: true,
+  session: true,
+  subagents: true,
+}
+
 export const DEFAULT_SETTINGS: Settings = {
   cache: "percentage",
   numbers: "compact",
   collapsedSummary: "session",
   footer: { ...DEFAULT_FOOTER },
   milestones: true,
+  visibility: { ...DEFAULT_VISIBILITY },
 }
 
 /** The kv surface settings needs; a structural subset of the plugin TuiKV. */
@@ -87,6 +88,7 @@ export type SettingsApi = {
 const [settings, setSettings] = createSignal<Settings>({
   ...DEFAULT_SETTINGS,
   footer: { ...DEFAULT_FOOTER },
+  visibility: { ...DEFAULT_VISIBILITY },
 })
 
 /** Subagents durable state: `true` (expanded) or `false` (collapsed). */
@@ -136,6 +138,25 @@ function sanitizeFooter(raw: unknown): FooterSettings {
   }
 }
 
+function sanitizeVisibility(raw: unknown): VisibilitySettings {
+  if (typeof raw !== "object" || raw === null) return { ...DEFAULT_VISIBILITY }
+  const candidate = raw as Record<string, unknown>
+  return {
+    sidebar: isBoolean(candidate.sidebar)
+      ? candidate.sidebar
+      : DEFAULT_VISIBILITY.sidebar,
+    project: isBoolean(candidate.project)
+      ? candidate.project
+      : DEFAULT_VISIBILITY.project,
+    session: isBoolean(candidate.session)
+      ? candidate.session
+      : DEFAULT_VISIBILITY.session,
+    subagents: isBoolean(candidate.subagents)
+      ? candidate.subagents
+      : DEFAULT_VISIBILITY.subagents,
+  }
+}
+
 /**
  * Resolves an unknown stored value to a valid Settings object: a missing or
  * non-object value yields all defaults; within an object, unknown enum
@@ -160,6 +181,7 @@ function sanitizeSettings(raw: unknown): Settings {
     milestones: isBoolean(candidate.milestones)
       ? candidate.milestones
       : DEFAULT_SETTINGS.milestones,
+    visibility: sanitizeVisibility(candidate.visibility),
   }
 }
 
@@ -262,5 +284,15 @@ export function cycleFooterMetric(
 /** Toggles Project milestone toasts on/off. */
 export function cycleMilestones(api: SettingsApi): void {
   setSettings({ ...settings(), milestones: !settings().milestones })
+  writeObject(api)
+}
+
+/** Toggles one visibility flag (sidebar/project/session/subagents). */
+export function cycleVisibility(api: SettingsApi, pref: VisibilityPref): void {
+  const next = !settings().visibility[pref]
+  setSettings({
+    ...settings(),
+    visibility: { ...settings().visibility, [pref]: next },
+  })
   writeObject(api)
 }

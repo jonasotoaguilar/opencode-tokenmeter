@@ -28,7 +28,9 @@ import {
   cycleFooterMetric,
   cycleNumbers,
   cycleSubagents,
+  cycleVisibility,
   DEFAULT_FOOTER,
+  DEFAULT_VISIBILITY,
   loadSettings,
   persisted,
   SETTINGS_KV_KEY,
@@ -67,6 +69,7 @@ const DEFAULTS = {
   collapsedSummary: "session",
   footer: { ...DEFAULT_FOOTER },
   milestones: true,
+  visibility: { ...DEFAULT_VISIBILITY },
 } as const
 
 describe("settings defaults and sanitization", () => {
@@ -81,6 +84,7 @@ describe("settings defaults and sanitization", () => {
       "footer",
       "milestones",
       "numbers",
+      "visibility",
     ])
     expect(persisted()).toBe(true)
   })
@@ -373,6 +377,7 @@ describe("footer settings (defaults, sanitization, independent toggles)", () => 
           collapsedSummary: "session",
           footer: { ...DEFAULT_FOOTER, enabled: false },
           milestones: true,
+          visibility: { ...DEFAULT_VISIBILITY },
         },
       },
     ])
@@ -401,6 +406,7 @@ describe("footer settings (defaults, sanitization, independent toggles)", () => 
       collapsedSummary: "session",
       footer: { ...DEFAULT_FOOTER, reasoning: true },
       milestones: true,
+      visibility: { ...DEFAULT_VISIBILITY },
     })
 
     cycleFooterMetric(api, "input")
@@ -435,5 +441,154 @@ describe("footer settings (defaults, sanitization, independent toggles)", () => 
     expect(settings().footer.cache).toBe(true)
     expect(persisted()).toBe(false)
     expect(fake.sets).toEqual([])
+  })
+})
+
+describe("visibility settings (defaults, sanitization, independent toggles)", () => {
+  test("defaults: all visibility flags on", () => {
+    const api = apiOf(makeKv())
+    loadSettings(api)
+    expect(settings().visibility).toEqual({
+      sidebar: true,
+      project: true,
+      session: true,
+      subagents: true,
+    })
+  })
+
+  test("a missing or non-object visibility value resolves to all defaults", () => {
+    const api = apiOf(makeKv({ [SETTINGS_KV_KEY]: { cache: "separated" } }))
+    loadSettings(api)
+    expect(settings().visibility).toEqual(DEFAULT_VISIBILITY)
+
+    const api2 = apiOf(makeKv({ [SETTINGS_KV_KEY]: { visibility: "yes" } }))
+    loadSettings(api2)
+    expect(settings().visibility).toEqual(DEFAULT_VISIBILITY)
+  })
+
+  test("sanitizes each visibility flag per field and honors valid overrides", () => {
+    const api = apiOf(
+      makeKv({
+        [SETTINGS_KV_KEY]: {
+          visibility: {
+            sidebar: false,
+            project: "yes",
+            session: false,
+            subagents: 1,
+          },
+        },
+      }),
+    )
+    loadSettings(api)
+    expect(settings().visibility).toEqual({
+      sidebar: false,
+      project: true,
+      session: false,
+      subagents: true,
+    })
+  })
+
+  test("honors valid visibility overrides and defaults absent fields", () => {
+    const api = apiOf(
+      makeKv({
+        [SETTINGS_KV_KEY]: {
+          visibility: { sidebar: false, project: false },
+        },
+      }),
+    )
+    loadSettings(api)
+    expect(settings().visibility).toEqual({
+      sidebar: false,
+      project: false,
+      session: true,
+      subagents: true,
+    })
+  })
+
+  test("cycleVisibility toggles one flag and persists the whole object", () => {
+    const fake = makeKv()
+    const api = apiOf(fake)
+    loadSettings(api)
+
+    cycleVisibility(api, "sidebar")
+    expect(settings().visibility.sidebar).toBe(false)
+    expect(settings().visibility.project).toBe(true)
+    expect(fake.sets).toEqual([
+      {
+        key: SETTINGS_KV_KEY,
+        value: {
+          cache: "percentage",
+          numbers: "compact",
+          collapsedSummary: "session",
+          footer: { ...DEFAULT_FOOTER },
+          milestones: true,
+          visibility: { ...DEFAULT_VISIBILITY, sidebar: false },
+        },
+      },
+    ])
+
+    cycleVisibility(api, "project")
+    expect(settings().visibility.project).toBe(false)
+    expect(fake.sets).toHaveLength(2)
+
+    loadSettings(api)
+    expect(settings().visibility.sidebar).toBe(false)
+    expect(settings().visibility.project).toBe(false)
+  })
+
+  test("visibility toggles are independent and survive interleaved cycles", () => {
+    const fake = makeKv()
+    const api = apiOf(fake)
+    loadSettings(api)
+
+    cycleVisibility(api, "session")
+    cycleVisibility(api, "subagents")
+    expect(settings().visibility).toEqual({
+      sidebar: true,
+      project: true,
+      session: false,
+      subagents: false,
+    })
+    expect(fake.sets).toHaveLength(2)
+
+    cycleVisibility(api, "session")
+    expect(settings().visibility.session).toBe(true)
+    expect(settings().visibility.subagents).toBe(false)
+  })
+
+  test("visibility cycles are ready-gated like other preferences", () => {
+    const fake = makeKv({}, false)
+    const api = apiOf(fake)
+    loadSettings(api)
+
+    cycleVisibility(api, "sidebar")
+    expect(settings().visibility.sidebar).toBe(false)
+    expect(persisted()).toBe(false)
+    expect(fake.sets).toEqual([])
+
+    cycleVisibility(api, "project")
+    expect(settings().visibility.project).toBe(false)
+    expect(persisted()).toBe(false)
+    expect(fake.sets).toEqual([])
+  })
+
+  test("each object write carries the full object including visibility changes", () => {
+    const fake = makeKv()
+    const api = apiOf(fake)
+    loadSettings(api)
+
+    cycleVisibility(api, "sidebar")
+    cycleCache(api)
+    expect(fake.sets[1]).toEqual({
+      key: SETTINGS_KV_KEY,
+      value: {
+        cache: "combined",
+        numbers: "compact",
+        collapsedSummary: "session",
+        footer: { ...DEFAULT_FOOTER },
+        milestones: true,
+        visibility: { ...DEFAULT_VISIBILITY, sidebar: false },
+      },
+    })
   })
 })

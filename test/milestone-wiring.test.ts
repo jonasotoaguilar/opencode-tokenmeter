@@ -4,7 +4,6 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import plugin from "../src/tokenmeter"
 import {
-  handleProjectMilestone,
   MILESTONE_KV_KEY,
   resetMilestoneState,
 } from "../src/tokenmeter/milestone"
