@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
-import { fallbackTotals } from "../src/tokenmeter/browser/session-fallback"
 import { loadSessionDetail } from "../src/tokenmeter/browser/session-detail"
+import { fallbackTotals } from "../src/tokenmeter/browser/session-fallback"
+
 // biome-ignore format: keep compact helpers for 400 review budget
 function mkMsg(id:string,sid:string,prov:string,model:string,i:number,o:number){return {id,sessionID:sid,role:"assistant",providerID:prov,modelID:model,cost:0,tokens:{input:i,output:o,reasoning:0,cache:{read:0,write:0}}}}
 // biome-ignore format: keep compact helpers for 400 review budget
