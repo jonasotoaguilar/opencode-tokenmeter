@@ -18,7 +18,7 @@ opencode-tokenmeter is an event-driven TUI plugin: host events invalidate sessio
 
 ## Golden Rule
 
-Every file belongs to exactly one concern: the entry (`tokenmeter.tsx`) only wires events, the slot, and the palette layers; pure helpers (`math`, `format`, `text`, `glyphs`, `types`) never touch I/O or state; `store` owns the usage state, while `settings`/`sections`/`shortcut` own the preference, disclosure, and command state (the only kv writers besides the entry); `reconcile`/`tree`/`groups`/`project`/`db` are the only modules that call the client SDK or the SQLite store. If a change crosses more than two of these layers, reconsider the design.
+Every file belongs to exactly one concern: the entry (`tokenmeter.tsx`) only wires events, the slot, and the palette layers; pure helpers (`math`, `format`, `text`, `glyphs`, `types`) never touch I/O or state; `store` owns the usage state, while `settings`/`sections`/`shortcut` own the preference, disclosure, and command state (the only kv writers besides the entry); `reconcile`/`tree`/`groups`/`project`/`db`/`browser` are the only modules that call the client SDK or the SQLite store. If a change crosses more than two of these layers, reconsider the design.
 
 ## Guide Pages
 
@@ -30,12 +30,13 @@ Every file belongs to exactly one concern: the entry (`tokenmeter.tsx`) only wir
 | [src/tokenmeter/tree.ts](../src/tokenmeter/tree.ts) | Delegation tree and groups: tree discovery, agent resolution, group summaries | `src/tokenmeter/groups.ts` |
 | [src/tokenmeter/project.ts](../src/tokenmeter/project.ts) | Project section: live-list refresh with explicit limit and cap fail-closed, deleted aggregate, polling timer, error recovery | `src/tokenmeter/db.ts` |
 | [src/tokenmeter/db.ts](../src/tokenmeter/db.ts) | Plugin-owned SQLite store: deleted-session aggregate per project + tombstone admission | `bun:sqlite`, `src/tokenmeter/math.ts` |
-| [src/tokenmeter/settings.ts](../src/tokenmeter/settings.ts) | Preferences model: three-field `settings.v1` + Subagents durable key, ready-gated writes | `api.kv`, `src/tokenmeter/sections.ts` |
+| [src/tokenmeter/settings.ts](../src/tokenmeter/settings.ts) | Preferences model: `settings.v1` (`cache`, `numbers`, `collapsedSummary`, `footer`, `milestones`, `visibility: { sidebar, project, session, subagents }`) + Subagents durable key, ready-gated whole-object writes, presentation-only visibility gating | `api.kv`, `src/tokenmeter/sections.ts` |
 | [src/tokenmeter/sections.ts](../src/tokenmeter/sections.ts) | Transient Project/Session disclosure shared with the toggle command | `src/tokenmeter/shortcut.ts`, `src/tokenmeter/panel/index.tsx` |
 | [src/tokenmeter/shortcut.ts](../src/tokenmeter/shortcut.ts) | Toggle command + configurable shortcut: keymap layer, kv preference, live re-registration | `api.keymap`, `src/tokenmeter/settings.ts` |
-| [src/tokenmeter/panel/](../src/tokenmeter/panel/) | Rendering and layout: master disclosure, section headings, agent accordion, tones, settings dialog | `index.tsx`, `section.tsx`, `group-rows.tsx`, `settings-dialog.tsx`, `tone.ts`, `project-section.tsx` |
+| [src/tokenmeter/panel/](../src/tokenmeter/panel/) | Rendering and layout: master disclosure, section headings (visibility-gated via `Show` without reserving height), agent accordion, tones, settings dialog (Visibility category) | `index.tsx`, `section.tsx`, `group-rows.tsx`, `settings-dialog.tsx`, `tone.ts`, `project-section.tsx` |
+| [src/tokenmeter/browser/](../src/tokenmeter/browser/) | Cross-project browser: Projects list, Project detail, Session detail (provider/model breakdown) via ONE-replace dialogs | `constants.ts`, `is-safe-directory.ts`, `timeout.ts`, `concurrency.ts`, `types.ts`, `directories.ts`, `session-source.ts`, `projects.ts`, `project-detail.ts`, `session-detail.ts` (+`session-info.ts`, `session-messages.ts`, `session-tree.ts`, `session-fallback.ts`), `dialog-shared.tsx`, `projects-dialog.tsx`, `project-dialog.tsx`, `session-dialog.tsx`, `dialog.tsx` |
 | [src/tokenmeter/math.ts](../src/tokenmeter/math.ts) | Pure helpers: usage math, numeric formatting, line formatting, column math, glyphs, types | `numbers.ts`, `format.ts`, `text.ts`, `glyphs.ts`, `types.ts` |
-| [src/tokenmeter/pricing.ts](../src/tokenmeter/pricing.ts) | OpenAI pricing cache from `model.list` (exact `pricingKey`, `estimateCost`, `loadPricing`); reused by Session, live Project and deleted paths | `src/tokenmeter/math.ts`, `docs/adr/0007-openai-cost-fallback.md` |
+| [src/tokenmeter/pricing.ts](../src/tokenmeter/pricing.ts) | OpenAI pricing chain: host `model.list` exact `pricingKey`/`estimateCost`/`loadPricing` first, bounded `https://models.dev/api.json` fallback (only `openai`, exact IDs with `openai/`-strip + `gpt-5.6`→`gpt-5.6-sol`, absent `cache_write`→0, tier `size:272000` for `gpt-5.6-sol` from 2026-08-26) with TTL 24h / cooldown 15m / in-flight / timeout; reused by Session, live Project and deleted paths | `src/tokenmeter/math.ts`, `docs/adr/0008-openai-cost-fallback-with-models-dev.md` (supersedes 0007) |
 | [scripts/build.ts](../scripts/build.ts) | Build and artifact guard: bundled dist, reactive-binding assertion, dist test | `test/artifact.test.ts` |
 | [test/harness.test.ts](../test/harness.test.ts) | Test suites: harness (modules), render (panel), artifact (dist) | `test/render.test.tsx`, `test/artifact.test.ts` |
 
@@ -53,7 +54,7 @@ Every file belongs to exactly one concern: the entry (`tokenmeter.tsx`) only wir
 - `PRD.md` — product intent, requirements, success criteria.
 - `ARCHITECTURE.md` — system design, flows, module map, ADR links.
 - `DESIGN.md` — panel layout, theme-role colors, glyphs, states.
-- `docs/adr/` — architecture decision records (build, reconcile, kv, external packages, width, cost fallback — see [ADR-0007](adr/0007-openai-cost-fallback.md) via [ARCHITECTURE.md](../ARCHITECTURE.md)).
+- `docs/adr/` — architecture decision records (build, reconcile, kv, external packages, width, cost fallback — see [ADR-0008](adr/0008-openai-cost-fallback-with-models-dev.md) (supersedes 0007) via [ARCHITECTURE.md](../ARCHITECTURE.md)).
 - `docs/release-security.md` — release pipeline security controls, one-time npmjs trusted-publisher setup, maintainer drift checklist.
 - `docs/releases/` — the single current release document `vX.Y.Z.md`: curated narrative body used verbatim as the GitHub Release body. Lifecycle: `git mv` the previous release document to the new tag name, replace content, bump package, commit, tag; validated by `scripts/release-preflight` (exactly one document, name matches tag, body curated) before any tag publishes.
 - `docs/skill-style-guide.md` — how to author/update LLM-first skills in this repo.

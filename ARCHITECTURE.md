@@ -1,10 +1,10 @@
 # Architecture — opencode-tokenmeter
 
-> **Status**: Approved &nbsp;|&nbsp; **Last updated**: 2026-08-14 &nbsp;|&nbsp; **Author**: jonasotoaguilar
+> **Status**: Approved &nbsp;|&nbsp; **Last updated**: 2026-08-26 &nbsp;|&nbsp; **Author**: jonasotoaguilar
 
 ## System Overview
 
-`opencode-tokenmeter` is an OpenCode TUI plugin that renders a live usage sidebar: per-session token spend, cost, and the delegation tree of the active session. The entry (`src/tokenmeter.tsx`) subscribes to the host's `session`/`message`/`part` events, feeds a reactive usage store, and registers a `sidebar_content` slot (order 95) that renders a collapsible Solid panel. The panel never remounts to repaint: every refresh event invalidates the affected session and schedules a debounced reconcile that rehydrates usage from the authoritative client `session.messages()` endpoint (replace, not merge). The panel shows three sections — Project (all-time usage), Session (active session + delegation tree), and Subagents (the per-agent delegation list, hidden until the first group exists) — under a master `▶/▼ TokenMeter` disclosure row; master and per-section disclosure are transient and never written to kv. A second data path aggregates all-time Project usage from `session.list({ scope: "project", limit: 10000 })` — the authoritative live per-session sum, refreshed on every render — plus ONE per-project DELETED-session aggregate persisted in a plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`, never `api.kv`, which concurrent TUIs would clobber). The headline token total is each session's complete CUMULATIVE TOKEN SPEND — `Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write` across ALL assistant messages, the exact reconstruction of OpenCode's billed `tokens.total` — never lowered by compaction or restarts. The plugin also registers two palette-visible commands through the modern keymap API (`api.keymap.registerLayer`, category `TokenMeter`, namespace `palette`): `tokenmeter.settings` opens the settings host `DialogSelect`, and `tokenmeter.toggle-sections` expands/collapses all three sections together with a configurable shortcut (default `Ctrl+E`, persisted in kv, re-registered live on change). The shipped artifact is a bundled ESM file whose reactive bindings are asserted at build time.
+`opencode-tokenmeter` is an OpenCode TUI plugin that renders a live usage sidebar: per-session token spend, cost, and the delegation tree of the active session. The entry (`src/tokenmeter.tsx`) subscribes to the host's `session`/`message`/`part` events, feeds a reactive usage store, and registers a `sidebar_content` slot (order 95) that renders a collapsible Solid panel. The panel never remounts to repaint: every refresh event invalidates the affected session and schedules a debounced reconcile that rehydrates usage from the authoritative client `session.messages()` endpoint (replace, not merge). The panel shows three sections — Project (all-time usage), Session (active session + delegation tree), and Subagents (the per-agent delegation list, hidden until the first group exists) — under a master `▶/▼ TokenMeter` disclosure row; master and per-section disclosure are transient and never written to kv. A second data path aggregates all-time Project usage from `session.list({ scope: "project", limit: 10000 })` — the authoritative live per-session sum, refreshed on every render — plus ONE per-project DELETED-session aggregate persisted in a plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`, never `api.kv`, which concurrent TUIs would clobber). The headline token total is each session's complete CUMULATIVE TOKEN SPEND — `Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write` across ALL assistant messages, the exact reconstruction of OpenCode's billed `tokens.total` — never lowered by compaction or restarts. The plugin also registers three palette-visible commands through the modern keymap API (`api.keymap.registerLayer`, category `TokenMeter`, namespace `palette`): `tokenmeter.settings` opens the settings host `DialogSelect`, and `tokenmeter.toggle-sections` expands/collapses all three sections together with a configurable shortcut (default `Ctrl+E`, persisted in kv, re-registered live on change), and `tokenmeter.browser` (`TokenMeter: Browse Usage`) opens the cross-project browser — `Projects` → `Project detail` → `Session detail` — via `api.ui.dialog.replace` (ONE replace at a time, once-guarded close) with provider/model breakdown per session. Visibility preferences (`visibility: { sidebar, project, session, subagents }` inside `tokenmeter.settings.v1`, defaults all visible) gate presentation only: the entry returns `null` from `sidebar_content` when the sidebar is hidden and the panel hides individual sections without reserving height, while collection, cost resolution, footer, and milestone toasts keep running. Project milestones are observed via an explicit `subscribeProjectSnapshot` subscription (the `solid-js` server build makes `createEffect` on `projectSnapshot` a no-op in Bun/Node), and OpenAI zero-cost rows are estimated via host `ModelV2Info.cost` or the bounded `https://models.dev/api.json` fallback when the host catalog is empty. The shipped artifact is a bundled ESM file whose reactive bindings are asserted at build time.
 
 ## Architecture Pattern
 
@@ -14,7 +14,7 @@
 
 - **Pure in-memory mirror as source of truth**: faster, but the TUI mirror can lag or drop messages; removals/compaction could never be reflected reliably. Rejected: the panel would drift from the client.
 - **Remount on every event**: simplest, but a remounted panel flashes and loses scroll state; the render harness explicitly guards repaint-without-remount.
-- **Polling the client on an interval**: simple, but burns client round-trips on every idle second; rejected in favor of event-driven invalidation plus a low-frequency (2 s) tree-maintenance timer only.
+- **Polling the client on an interval**: simple, but burns client round-trips on every idle second; rejected in favor of event-driven invalidation plus a low-frequency (30 s) tree-maintenance timer only.
 
 ## Architecture Views & Diagrams
 
@@ -44,6 +44,7 @@ graph TD
         Sections["sections.ts (transient disclosure)"]
         Shortcut["shortcut.ts (toggle command + shortcut)"]
         Panel["panel/index.tsx (UsagePanel)"]
+        Browser["browser/* (Projects → Project detail → Session detail)"]
         MathFmt["math / numbers / format / text / glyphs"]
     end
 
@@ -54,6 +55,7 @@ graph TD
     Entry --> Project
     Entry --> Settings
     Entry --> Shortcut
+    Entry --> Browser
     Entry --> Keymap
     Project --> Db
     Reconcile --> Tree
@@ -61,12 +63,15 @@ graph TD
     Project --> Client
     Reconcile --> Client
     Tree --> Client
+    Browser --> Client
+    Browser --> Db
     Store --> Panel
     Db --> State
     Entry --> Kv
     Entry --> Slot
     Slot --> Panel
     Panel --> MathFmt
+    Browser --> MathFmt
     Panel --> Settings
     Panel --> Sections
     Shortcut --> Keymap
@@ -130,7 +135,7 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 ### `src/tokenmeter.tsx` — Entry (event composer)
 
 - **Technology**: TypeScript + Solid JSX (`@opentui/solid`), `TuiPlugin` from `@opencode-ai/plugin/tui`.
-- **Responsibility**: Wires every event into the store and the debounced reconcile/project refresh; loads the settings and toggle-shortcut preferences once at startup; registers the palette layers — the `tokenmeter.settings` command and the toggle layer — through `api.keymap.registerLayer` with disposers released in `api.lifecycle.onDispose`; records `session.deleted` into the SQLite store before forgetting the session; starts the single bounded project polling timer; registers the `sidebar_content` slot (order 95) that resolves the sessionID and width and renders `UsagePanel`.
+- **Responsibility**: Wires every event into the store and the debounced reconcile/project refresh; loads the settings, pricing, and toggle-shortcut preferences once at startup; registers the palette layers — `tokenmeter.settings` and `tokenmeter.browser` (`Browse Usage`) — plus the toggle shortcut layer through `api.keymap.registerLayer` with disposers released in `api.lifecycle.onDispose`; records `session.deleted` into the SQLite store before forgetting the session; subscribes to `subscribeProjectSnapshot` for project milestone toasts (not a Solid `createEffect` on `projectSnapshot`, which is a no-op on the Bun/Node server build); starts the single bounded project polling timer; registers the `sidebar_content` slot (order 95) that returns `null` when `visibility.sidebar` is `false`, otherwise resolves the sessionID/width and renders `UsagePanel`.
 - **Scaling**: N/A (single host process).
 - **Dependencies**: store, reconcile, project, db, tree, panel, settings, shortcut, text.
 - **Failure modes**: every handler is a no-throw subscription; a failing listener cannot break the host turn.
@@ -143,7 +148,7 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 
 ### `src/tokenmeter/reconcile.ts` — Debounced reconciliation
 
-- **Responsibility**: Loads persisted usage per session and publishes the snapshot. Bypasses the in-memory mirror for sessions marked for rehydration; replaces the map only after a successful authoritative load (empty/failed loads stay retryable); drops stale async results via a generation counter; owns the 2 s maintenance timer on the active root (tree re-discovery for missed events).
+- **Responsibility**: Loads persisted usage per session and publishes the snapshot. Bypasses the in-memory mirror for sessions marked for rehydration; replaces the map only after a successful authoritative load (empty/failed loads stay retryable); drops stale async results via a generation counter; owns the 30 s maintenance timer on the active root (tree re-discovery for missed events).
 - **Dependencies**: tree, groups, store, math.
 - **Failure modes**: fetch failure keeps the session loadable; an empty publish is skipped so the placeholder stays until data arrives.
 
@@ -161,7 +166,7 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 
 ### `src/tokenmeter/project.ts` — Project section
 
-- **Responsibility**: Resolves `project.current()`, lists `session.list({ scope: "project", limit: PROJECT_SESSION_LIMIT })` filtered by `projectID` (a result at the 10_000 cap is a truncated list and fails closed: prior snapshot preserved, stable error surfaced), sums the live rows, adds the SQLite deleted aggregate, and publishes the snapshot. Owns the debounced refresh timer, the ~2 s polling timer (single, non-overlapping, disposed with the plugin), and the post-delete `projectIDHint` fallback.
+- **Responsibility**: Resolves `project.current()`, lists `session.list({ scope: "project", limit: PROJECT_SESSION_LIMIT })` filtered by `projectID` (a result at the 10_000 cap is a truncated list and fails closed: prior snapshot preserved, stable error surfaced), sums the live rows, adds the SQLite deleted aggregate, and publishes the snapshot. Owns the debounced refresh timer, the ~30 s polling timer (single, non-overlapping, disposed with the plugin), and the post-delete `projectIDHint` fallback.
 - **Dependencies**: db, math, `api.client` / `api.state.path`.
 - **Failure modes**: missing list payload is an error (never a silent zero); live sessions are never persisted — a refresh never writes history; a truncated list never replaces a good snapshot.
 
@@ -173,7 +178,7 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 
 ### `src/tokenmeter/settings.ts` — Preferences model
 
-- **Responsibility**: Owns the three object-backed preferences (`cache`, `numbers`, `collapsedSummary`) persisted as one versioned whole-object kv entry (`tokenmeter.settings.v1`, ready-gated writes; `persisted()` reports dropped writes) plus the Subagents preference in its durable `tokenmeter.sidebar.expanded` key (never duplicated inside `settings.v1`); sanitizes absent or malformed stored values to per-field defaults without throwing.
+- **Responsibility**: Owns the object-backed preferences (`cache`, `numbers`, `collapsedSummary`, `footer`, `milestones`, and `visibility: { sidebar, project, session, subagents }`) persisted as one versioned whole-object kv entry (`tokenmeter.settings.v1`, ready-gated writes; `persisted()` reports dropped writes) plus the Subagents preference in its durable `tokenmeter.sidebar.expanded` key (never duplicated inside `settings.v1`); sanitizes absent or malformed stored values to per-field defaults without throwing. `visibility` defaults all `true` and is presentation-only.
 - **Dependencies**: `api.kv` through the structural `SettingsApi` subset.
 - **Failure modes**: kv not ready → the in-memory value updates for the session, no write is issued, `persisted()` flips to `false`; never throws, never produces NaN.
 
@@ -189,11 +194,17 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 - **Dependencies**: settings, sections, `api.keymap`.
 - **Failure modes**: registration is idempotent (any previous layer is disposed first); the disposer is a no-op when no layer is registered.
 
+### `src/tokenmeter/browser/` — Cross-project browser (Projects → Project detail → Session detail)
+
+- **Responsibility**: Presentation-only browser over the existing Project aggregation and `session.messages` on-demand. `constants.ts`/`types.ts`/`is-safe-directory.ts`/`timeout.ts`/`concurrency.ts` provide shared guards; `directories.ts` centralizes safe `project.directories` → worktree → host resolution; `session-source.ts` (`fetchSessionsForProject`/`fetchSessionsForBrowse`) prefers `v2.session.list({project})` with directory fallback and pagination guards; `projects.ts` (`loadBrowserProjects`) loads `project.list` + `current` and enriches via V2-only sessions + deleted aggregate; `project-detail.ts` reuses `session-source` for one project, computes period/lastActive, root-only sort; `session-detail.ts` (+`session-info.ts`/`session-messages.ts`/`session-tree.ts`/`session-fallback.ts`) loads one session's messages, groups by `providerID` → `modelID` (short label last segment), sorted by spend, via `resolveCost`; `dialog-shared.tsx`/`projects-dialog.tsx`/`project-dialog.tsx`/`session-dialog.tsx` render the three `DialogSelect` panels via ONE `api.ui.dialog.replace` at a time with once-guarded close (`dialog.tsx` barrel); Back returns to that `projectID` without leaking stack entries; loading/empty/error states for each panel.
+- **Dependencies**: `db` (deleted aggregate), `math`/`numbers`/`text`/`pricing`, `api.client`/`api.state`/`api.route`/`api.ui.dialog`.
+- **Failure modes**: missing list payload or truncated cap is error (never silent zero); `session.messages` failure degrades to empty breakdown (never throw); pricing miss stays safe-zero; Back without `projectID` falls back to browser.
+
 ### `src/tokenmeter/panel/` — UsagePanel module
 
-- **Responsibility**: The rendered panel. `panel/index.tsx` is the stable entry (`UsagePanel`): the master `▶/▼ TokenMeter` disclosure row (transient, starts expanded; collapsed renders exactly one compact summary from the persisted `collapsedSummary` source), the Project and Session sections through the shared `panel/section.tsx` (heading titles in the semantic yellow `theme().warning`, leading chevrons in the main-text tone, summaries and detail rows nested two columns under the heading), the Subagents section (hidden entirely while zero groups exist; `▶ Subagents (N agents · M tasks)` collapsed / `▼ Subagents` expanded; all groups inside a real scrollbox of viewport 4), and the one-open per-agent accordion in `panel/group-rows.tsx` (`↳ name (N tasks) ▶` / `▼` with the per-agent chevron trailing the header, agent name in `theme().info`, task counts in the detail tone, metric rows indented four columns). `panel/tone.ts` derives the tone hierarchy from the host theme (primary token+cost lines in main text with the `$amount` in light red; secondary rows in a detail tone derived theme-relatively — `textMuted` blended 50% toward `background`). `panel/settings-dialog.tsx` opens the settings host `DialogSelect` (preference rows cycle without recreating the dialog, preserving focus/filter). `panel/project-section.tsx` renders the Project error line (stable `PROJECT_ERROR_MESSAGE`, truncated to the content width). Every line is measured and truncated to the content width.
+- **Responsibility**: The rendered panel. `panel/index.tsx` is the stable entry (`UsagePanel`): the master `▶/▼ TokenMeter` disclosure row (transient, starts expanded; collapsed renders exactly one compact summary from the persisted `collapsedSummary` source), the Project and Session sections through the shared `panel/section.tsx` (heading titles in the semantic yellow `theme().warning`, leading chevrons in the main-text tone, summaries and detail rows nested two columns under the heading; each gated by `settings().visibility.project/session` via `Show` without reserving height), the Subagents section (hidden entirely while zero groups exist; `▶ Subagents (N agents · M tasks)` collapsed / `▼ Subagents` expanded; all groups inside a real scrollbox of viewport 4; gated by `settings().visibility.subagents` independently of the `tokenmeter.sidebar.expanded` disclosure), and the one-open per-agent accordion in `panel/group-rows.tsx` (`↳ name (N tasks) ▶` / `▼` with the per-agent chevron trailing the header, agent name in `theme().info`, task counts in the detail tone, metric rows indented four columns). `panel/tone.ts` derives the tone hierarchy from the host theme (primary token+cost lines in main text with the `$amount` in light red; secondary rows in a detail tone derived theme-relatively — `textMuted` blended 50% toward `background`). `panel/settings-dialog.tsx` opens the settings host `DialogSelect` (preference rows cycle without recreating the dialog, preserving focus/filter; Visibility category holds the four presentation-only toggles). `panel/project-section.tsx` renders the Project error line (stable `PROJECT_ERROR_MESSAGE`, truncated to the content width). Every line is measured and truncated to the content width.
 - **Dependencies**: store/project snapshots, settings, sections, format, math, numbers, text, glyphs, reconcile/project activation.
-- **Failure modes**: width-derived `contentWidth` floors at 10; rows degrade elastically (never wrap), so no row overflows.
+- **Failure modes**: width-derived `contentWidth` floors at 10; rows degrade elastically (never wrap), so no row overflows. The `sidebar_content` slot at the entry (`tokenmeter.tsx`) returns `null` when `visibility.sidebar` is `false`, but entry-level reconcile, project polling, and milestone toasts keep running.
 
 ### `src/tokenmeter/math.ts`, `numbers.ts`, `format.ts`, `text.ts`, `glyphs.ts`, `types.ts` — Pure helpers
 
@@ -213,7 +224,7 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 
 | Store | What it holds | Format | Rationale |
 | --- | --- | --- | --- |
-| Host `api.kv` — `tokenmeter.settings.v1` | The three object-backed preferences (`cache`, `numbers`, `collapsedSummary`) | object | One whole-object write per change, ready-gated; survives restarts |
+| Host `api.kv` — `tokenmeter.settings.v1` | Object-backed preferences (`cache`, `numbers`, `collapsedSummary`, `footer`, `milestones`, `visibility: { sidebar, project, session, subagents }`) | object | One whole-object write per change, ready-gated; survives restarts; `visibility` defaults all `true`, presentation-only |
 | Host `api.kv` — `tokenmeter.sidebar.expanded` | Subagents section preference | boolean | Durable Subagents disclosure; survives restarts |
 | Host `api.kv` — `tokenmeter.toggle.shortcut` | Toggle-sections shortcut preference | string | Default `ctrl+e`; re-registers the keymap layer live on change |
 | Plugin SQLite — `tokenmeter.sqlite` (`projects`, `tombstones`) | ONE deleted-session aggregate row per projectID + (sessionID, projectID) exactly-once tombstones | SQLite (WAL) under `api.state.path.state` | `api.kv` is a whole-file read-modify-write shared by every plugin process: concurrent TUIs would overwrite each other's Project history. SQLite gives atomic per-session admission and cross-process consistency; the live total is never persisted (the list is authoritative) |
@@ -222,7 +233,7 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 
 - **Source of truth**: the client SDK. The in-memory store is a projection; sessions marked for rehydration are re-read from `client.session.messages()` (replace, not merge). The Project live total is re-read from `session.list` on every refresh — never persisted.
 - **Cross-process exactly-once**: `session.deleted` events are admitted via a `BEGIN IMMEDIATE` tombstone transaction in the shared SQLite store: only the process that inserts the (sessionID, projectID) row increments the project's deleted aggregate, so duplicate deliveries and concurrent TUIs never double-count; no-usage deletes never consume a tombstone.
-- **Cross-process freshness**: every store operation is a short open/transaction/close on a WAL database with a busy timeout, so each process reads the latest committed state; a ~2 s polling timer refreshes the Project section so a sibling TUI's deletions appear promptly.
+- **Cross-process freshness**: every store operation is a short open/transaction/close on a WAL database with a busy timeout, so each process reads the latest committed state; a ~30 s polling timer refreshes the Project section so a sibling TUI's deletions appear promptly.
 - **Idempotency**: message usage is upserted by ID; the live Project sum counts each sessionID once; the deleted aggregate is additive only under tombstone admission.
 - **Event ordering**: a generation counter drops stale async reconcile results; a debounce collapses bursts into one refresh of the whole panel.
 - **Async correctness**: `session.deleted` persists into the SQLite aggregate *before* the refresh and passes `projectIDHint`, so a failing post-delete `project.current()` still keeps the total (the hint stands in for the projectID).
@@ -230,7 +241,7 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 ## Async Delivery
 
 - **Delivery semantics**: host events are at-least-once; consumers deduplicate by keying message usage by message ID (replace), by the generation-counter guard on reconcile, and by tombstone admission for deleted sessions.
-- **Backpressure / batching**: a single debounced timer (300 ms; 100 ms on idle) per refresh; the 2 s maintenance tick is tree-only (never forces a client message fetch for loaded sessions); the 2 s project poll is a single non-overlapping interval (an in-flight refresh skips the tick).
+- **Backpressure / batching**: a single debounced timer (300 ms; 100 ms on idle) per refresh; the 30 s maintenance tick is tree-only (never forces a client message fetch for loaded sessions); the 30 s project poll is a single non-overlapping interval (an in-flight refresh skips the tick).
 - **Event envelope**: the plugin consumes only the minimal facts in each event payload and re-fetches current state from the client — it never accumulates event history.
 
 ## Non-Functional Requirements
@@ -245,8 +256,8 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 
 - Fail-contained hooks: no event handler throws; a Project failure surfaces the stable error line and never touches the Session panel.
 - Empty loads stay retryable: a first-open session transitions from placeholder to populated instead of freezing on an empty map.
-- Missed-event safety: `session.created` purges the tree cache (parentID can be absent), and the 2 s maintenance timer re-discovers descendants — a cached empty child list can never hide a child forever.
-- Cross-process Project freshness: the 2 s polling timer refreshes the live list + shared deleted aggregate, so a sibling TUI's deletions appear without any local event.
+- Missed-event safety: `session.created` purges the tree cache (parentID can be absent), and the 30 s maintenance timer re-discovers descendants — a cached empty child list can never hide a child forever.
+- Cross-process Project freshness: the 30 s polling timer refreshes the live list + shared deleted aggregate, so a sibling TUI's deletions appear without any local event.
 - SQLite concurrency: WAL + busy timeout + short open/transaction/close boundaries mean concurrent TUI processes queue writers instead of clobbering, and every read sees the latest committed state; a missing state directory degrades to no persisted deletions (never a throw).
 
 ### Maintainability
@@ -270,14 +281,16 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 | Per-component spend high-water (cost/input/output/reasoning/cacheRead/cacheWrite per-field maxima) | Compaction or a smaller later snapshot can never lower the displayed spend or its breakdown | Single-number context high-water |
 | Agent-type grouping with deterministic ordering | Repeated runs of one agent collapse into one group; ordering is stable | Per-session rows only |
 | Modern keymap API + configurable toggle shortcut | `api.keymap.registerLayer` exposes the commands to the host palette (namespace `palette`, category `TokenMeter`) and binds the toggle shortcut; the kv-persisted preference re-registers the layer live so a change applies without a restart, and `Off` keeps the palette command with no key binding | Legacy `api.command` surface; a fixed hardcoded shortcut; an in-panel settings screen |
-| OpenAI cost fallback via `model.list` | Reported cost authoritative (`cost!==0` wins, later lower reported still replaces estimate); OpenAI `cost===0` with billable tokens estimated from `ModelV2Info.cost` via exact `pricingKey` and `/1_000_000`; per-message identity map Σ, project-scoped tombstones, safe-zero on unknowns | Static price table; `config.providers`; alias/date guessing; single max cost |
+| Visibility gating (presentation-only) | `visibility: { sidebar, project, session, subagents }` inside `tokenmeter.settings.v1` (defaults all `true`); `sidebar` gates `sidebar_content` → `null`, section flags gate their `Show` without reserving height; collection, polling, and milestone toasts keep running while hidden | Separate kv keys per section; removing data when hidden |
+| OpenAI cost fallback via `model.list` with `models.dev` bounded fallback (ADR-0008, 2026-08-26; sources `https://developers.openai.com/api/docs/pricing`, `https://models.dev/api.json`) | Reported `cost!==0` authoritative; host `ModelV2Info.cost` first priority (exact `pricingKey` with `openai/`-strip + `gpt-5.6`→`gpt-5.6-sol`); when host has no usable positive exact pricing (missing/empty/tier-only/malformed/all-zero, e.g. all 13 openai models zero) fetch `https://models.dev/api.json` via native `fetch` (only `openai` provider, exact IDs, absent `cache_write`→0, tier threshold from payload like `size:272000` for `gpt-5.6-sol`, cache non-overlapping), bounded in-process TTL 24h / cooldown 15m / one in-flight / 8s timeout / no disk, host wins, safe-zero otherwise | Static hard-coded table; `config.providers`; generic alias/date/family guessing; single max cost; hard-coded tier threshold |
+| Cross-project browser via `DialogSelect` (Projects → Project detail → Session detail) | Presentation-only over existing aggregation; ONE `dialog.replace` at a time with once-guarded close, no second truth; session breakdown on-demand via `session.messages`, grouped by `providerID`/`modelID` sorted by spend, short labels | Inline sidebar expansion; second aggregation path; Nerd Font icons |
 
 ## Failure Modes & Mitigations
 
 | Failure | Impact | Mitigation |
 | --- | --- | --- |
 | TUI mirror holds stale messages | Panel shows outdated usage | Invalidation marks the session for rehydration; the next reconcile re-reads the client (replace, not merge) |
-| `session.created` without parentID | New delegated child hidden from the tree | Whole tree cache purged on creation; 2 s maintenance timer re-discovers descendants |
+| `session.created` without parentID | New delegated child hidden from the tree | Whole tree cache purged on creation; 30 s maintenance timer re-discovers descendants |
 | Event storm / out-of-order events | Churn or stale renders | Debounced timers (300 ms / 100 ms) + generation counter drops stale results; upsert-by-ID keeps totals order-independent |
 | `session.deleted` while `project.current()` unresolved | Project section flashes an error | The delete is recorded into the SQLite aggregate *before* the refresh; `projectIDHint` stands in for the projectID so the refresh still sums live + deleted |
 | Truncated session.list (at the 10_000 cap) | Silent undercount | The refresh fails closed: prior snapshot preserved, stable error surfaced — a partial total never renders |
@@ -293,4 +306,5 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 - [ADR-0004: External runtime packages provided by the host](docs/adr/0004-external-runtime-packages.md)
 - [ADR-0005: Sidebar width resolution with clamping](docs/adr/0005-sidebar-width-resolution-with-clamping.md)
 - [ADR-0006: SQLite persistence for the deleted-session project aggregate](docs/adr/0006-sqlite-persistence-for-deleted-project-usage.md)
-- [ADR-0007: OpenAI cost fallback via SDK pricing](docs/adr/0007-openai-cost-fallback.md)
+- [ADR-0007: OpenAI cost fallback via SDK pricing](docs/adr/0007-openai-cost-fallback.md) (superseded by ADR-0008)
+- [ADR-0008: OpenAI cost fallback via SDK pricing with models.dev remote fallback](docs/adr/0008-openai-cost-fallback-with-models-dev.md)

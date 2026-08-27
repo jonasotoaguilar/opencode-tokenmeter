@@ -117,7 +117,7 @@ None. No radii, strokes, or frames — everything is a text row in a terminal ce
 | `placeholder` | `textMuted` | Static `…` — no spinner, no animation |
 | `project-error` | `error` | Stable "Unable to load project data", truncated to the content width |
 | `scrollbox` | — | Viewport 4 rows, scrollY; every group while Subagents is expanded |
-| `settings-dialog` | host `DialogSelect` | Opened from the palette (`tokenmeter.settings`); preference rows cycle in place without recreating the dialog |
+| `settings-dialog` | host `DialogSelect` | Opened from the palette (`tokenmeter.settings`); preference rows cycle in place without recreating the dialog; Visibility category holds TokenMeter/Project/Session/Subagents toggles (presentation-only) |
 
 ## Do's and Don'ts
 
@@ -134,9 +134,19 @@ None. No radii, strokes, or frames — everything is a text row in a terminal ce
 - **Default**: the master row starts expanded; the Project and Session sections seed closed (each shows its compact summary row under its heading); the Subagents section is hidden entirely while zero groups exist and appears automatically with the first delegated group.
 - **Section disclosure**: clicking a heading or its leading chevron toggles that section; the `tokenmeter.toggle-sections` command (default `Ctrl+E`) expands/collapses all three sections together. Master and section disclosure are transient — reset on session change, never written to kv.
 - **Agent entries**: clicking an entry's header (or its trailing chevron) opens it — the compact L1 is replaced by the mode-aware detail rows — and closes the previously open entry (exactly one open at a time); clicking the open entry closes it.
-- **Settings**: opened from the command palette (`TokenMeter: Settings`); a host `DialogSelect` lists the preference rows (Cache, Numbers, Summary, Subagents, Shortcut), and selecting a row cycles it in place without recreating the dialog (focus and filter preserved).
+- **Settings**: opened from the command palette (`TokenMeter: Settings`); a host `DialogSelect` lists the preference rows (Cache, Numbers, Summary, Subagents, Shortcut, Visibility: TokenMeter/Project/Session/Subagents, plus Project/Milestones and Footer metrics), and selecting a row cycles it in place without recreating the dialog (focus and filter preserved).
+- **Visibility**: `TokenMeter: on/off` hides the entire sidebar (`sidebar_content` → `null`); `Project/Session/Subagents: on/off` hide only their section without reserving height. Hidden surfaces keep collecting data — cost, milestones, and footer remain live. Visibility is independent of Subagents expanded/collapsed (`tokenmeter.sidebar.expanded`).
 - **Placeholder**: a section with no snapshot yet shows a plain `…`; Project failure with no snapshot replaces it with one `error` line; failure after a snapshot keeps the metrics and adds the compact error line below; the error clears on the next refresh. Session keeps its own `…` fallback and is never touched by a Project failure.
 - **Empty first open**: a session with no usage stays on the placeholder until usage or delegations arrive — an empty load is provisional, never a frozen zero. A snapshot with zero usage renders the section's empty copy (`No sessions` for Project, `No usage yet` for Session) whether the section is open or closed.
+
+
+## Browser dialogs
+
+The browser is three native host `DialogSelect` panels navigated with ONE `api.ui.dialog.replace` at a time (once-guarded close, no recursive replace, no stack leak):
+
+- **Projects** (`TokenMeter: Browse Usage (N)`) — N = number of projects; title never duplicates tokens/cost (`· 9341.5M · $1192` stays only in Overview). Rows `label` (truncated 24, `★` pinned current) with description ISO date; sorted current first then recent; 3 disabled Overview rows (`tokens · cost` / `in · out` / `reason · cache`) enabled `__` values, not selectable for navigation; `× Close` last.
+- **Project detail** (`TokenMeter: {projectName} (N)`) — N = root sessions only (Current+Others rows, not total sessions including delegations); name truncated with `truncateToColumns` so title stays one line and never collides with `esc`; overview is the only place for totals/in-out/reason-cache% (3 rows `__total`/`__io`/`__cache`); session rows `label` (★ if current) with ISO date; `← Back to projects` + `× Close` last.
+- **Session detail** (`TokenMeter: {sessionTitle}` + optional `★ ` if current) — no `— Session`, no tokens, no cost in title; name truncated to avoid `esc` collision; Overview 3 rows only place for totals; Providers breakdown sorted spend descending (`providerID · tokens · cost · count`, provider id exact) with models underneath `└ <shortLabel> · tokens · cost` (short label last path segment, description `count messages`); `← Back to project` returns to that `projectID` (fallback browser) + `× Close`. All costs `fmtCost`, tokens `fmtCompact`, labels `truncateToColumns`, loading `Loading …`, error `Unable to load …`, no Nerd Font.
 
 ## Responsive Behavior
 

@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted
+**Superseded by [ADR-0008](0008-openai-cost-fallback-with-models-dev.md).**
+
+Host-only pricing via `client.model.list()` left `openai/gpt-5.6-sol` at zero because the v2 catalog exposes zero prices for all 13 openai models (verified 2026-08-26). The durable fix preserves this ADR's authority/identity/project rules and adds the bounded `models.dev` fallback chain documented in ADR-0008; this ADR is retained for rationale.
+
 
 ## Date
 
