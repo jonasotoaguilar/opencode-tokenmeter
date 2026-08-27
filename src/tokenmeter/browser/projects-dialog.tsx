@@ -7,6 +7,7 @@
  */
 
 import { textColumns, truncateToColumns } from "../text"
+import { createBrowserActivity } from "./browser-activity"
 import { withConcurrency } from "./concurrency"
 import { BROWSER_CONCURRENCY, FETCH_TIMEOUT_MS, NAV } from "./constants"
 import { dirExists, iso } from "./dialog-shared"
@@ -116,25 +117,9 @@ function buildBrowserOptions(
   return { title: t, options: o }
 }
 
-let browserGen = 0
-let activeBrowserGen = 0
-
 export function showBrowserDialog(api: BrowserDialogApi): void {
-  const myGen = ++browserGen
-  activeBrowserGen = myGen
-  let closed = false
-  const close = () => {
-    if (closed) return
-    closed = true
-    activeBrowserGen = 0
-    api.ui.dialog.clear()
-  }
-  const isActive = (): boolean => !closed && activeBrowserGen === myGen
-  const deactivate = (): void => {
-    if (closed) return
-    closed = true
-    activeBrowserGen = 0
-  }
+  const activity = createBrowserActivity(api)
+  const { isActive, deactivate, close } = activity
   const render = (
     loading: boolean,
     error: string | null,
