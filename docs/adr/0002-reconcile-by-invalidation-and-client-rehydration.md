@@ -18,7 +18,7 @@ The panel must reflect the current usage of the active session and its whole del
 
 ## Decision
 
-Treat the **client SDK as the source of truth** and the in-memory store as a projection. Every refresh event invalidates the affected session (drops its loaded flag, marks it for rehydration, keeps its existing map untouched so an interrupted publish never flashes zeroes) and schedules a **debounced reconcile** (300 ms; 100 ms on idle). The reconcile discovers the tree and, per session: uses the in-memory mirror only as a cheap fast path for unchanged, already-loaded sessions; bypasses it entirely for sessions marked for rehydration and re-reads the authoritative client messages; replaces the stored map (clear + rebuild by ID) only after a successful authoritative load; treats empty loads as provisional (the TUI sync may still be streaming, so the session stays loadable and retries re-read the client); and drops stale async results via a generation counter plus a current-root guard. Activation (first mount, sessionID prop change, route change) force-rehydrates the root and its whole descendant tree instead of trusting previously-loaded maps. A 2 s maintenance timer on the active root re-discovers the tree for missed events (e.g. `session.created` without parentID) without forcing client message fetches.
+Treat the **client SDK as the source of truth** and the in-memory store as a projection. Every refresh event invalidates the affected session (drops its loaded flag, marks it for rehydration, keeps its existing map untouched so an interrupted publish never flashes zeroes) and schedules a **debounced reconcile** (300 ms; 100 ms on idle). The reconcile discovers the tree and, per session: uses the in-memory mirror only as a cheap fast path for unchanged, already-loaded sessions; bypasses it entirely for sessions marked for rehydration and re-reads the authoritative client messages; replaces the stored map (clear + rebuild by ID) only after a successful authoritative load; treats empty loads as provisional (the TUI sync may still be streaming, so the session stays loadable and retries re-read the client); and drops stale async results via a generation counter plus a current-root guard. Activation (first mount, sessionID prop change, route change) force-rehydrates the root and its whole descendant tree instead of trusting previously-loaded maps. A 30 s maintenance timer on the active root re-discovers the tree for missed events (e.g. `session.created` without parentID) without forcing client message fetches.
 
 ## Consequences
 
@@ -50,7 +50,7 @@ Faster, but cannot reflect removals/compaction reliably; the panel drifts from t
 
 ### Option C: Interval polling of the client
 
-Simple, but burns client round-trips on idle seconds and repaints on a fixed cadence regardless of activity. Rejected in favor of event-driven invalidation plus the 2 s tree-only maintenance tick.
+Simple, but burns client round-trips on idle seconds and repaints on a fixed cadence regardless of activity. Rejected in favor of event-driven invalidation plus the 30 s tree-only maintenance tick.
 
 ### Option D: Remount the panel on every event
 

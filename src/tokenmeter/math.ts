@@ -254,7 +254,9 @@ export function sumProjectSessions(
   let counted = 0
   const seen = new Set<string>()
   for (const session of sessions) {
-    if (!session || session.projectID !== projectID) continue
+    if (!session) continue
+    const pid = (session as unknown as { projectID?: unknown })?.projectID
+    if (pid != null && pid !== "" && pid !== projectID) continue
     if (exclude?.has(session.id)) continue
     // A session must never be counted twice: the list is keyed by sessionID
     // (the ledger is too), so a duplicated payload contributes exactly once.

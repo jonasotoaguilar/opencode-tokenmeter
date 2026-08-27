@@ -27,16 +27,16 @@ Project section (parallel path):
       └──────► live per-session sum (authoritative, never persisted)
       └──────► db.ts ──► tokenmeter.sqlite (state dir)
                 (one deleted-session aggregate per project + tombstones)
-      └──────► ~2s polling timer keeps sibling TUIs fresh
+      └──────► ~30s polling timer keeps sibling TUIs fresh
 ```
 
-Two independent data paths feed one panel: the **Session** path (active session + delegation tree, rehydrated from client messages) and the **Project** path (authoritative live list sum + the SQLite deleted aggregate). A Project failure never touches the Session section. Monetary cost reuses the same gates everywhere (`pricing.ts` `model.list` cache → `math.resolveCost` per row, reported wins, OpenAI `cost===0` + billable + exact pricing → estimate, else safe-zero); Session keeps per-message identity Σ, Project scopes tombstones by `(session_id, project_id)` and deleted aggregates via `resolveEntry`; see [ADR-0007](../adr/0007-openai-cost-fallback.md) and [ARCHITECTURE.md](../../ARCHITECTURE.md).
+Two independent data paths feed one panel: the **Session** path (active session + delegation tree, rehydrated from client messages) and the **Project** path (authoritative live list sum + the SQLite deleted aggregate). A Project failure never touches the Session section. Monetary cost reuses the same gates everywhere (`pricing.ts` host `model.list` → `pricing-remote.ts` bounded `models.dev` fallback → `math.resolveCost` per row, reported wins, OpenAI `cost===0` + billable + exact pricing → estimate, else safe-zero); Session keeps per-message identity Σ, Project scopes tombstones by `(session_id, project_id)` and deleted aggregates via `resolveEntry`; visibility gating is presentation-only and the cross-project browser reuses the same aggregation; see [ADR-0008](../adr/0008-openai-cost-fallback-with-models-dev.md) (supersedes 0007) and [ARCHITECTURE.md](../../ARCHITECTURE.md). Monetary cost reuses the same gates everywhere (`pricing.ts` `model.list` cache → `math.resolveCost` per row, reported wins, OpenAI `cost===0` + billable + exact pricing → estimate, else safe-zero); Session keeps per-message identity Σ, Project scopes tombstones by `(session_id, project_id)` and deleted aggregates via `resolveEntry`; see [ADR-0007](../adr/0007-openai-cost-fallback.md) and [ARCHITECTURE.md](../../ARCHITECTURE.md).
 
 ## Entry points
 
-- `src/tokenmeter.tsx` — the plugin entry: subscribes to every event, loads the settings and toggle-shortcut preferences at startup, registers the palette layers (`tokenmeter.settings` command + toggle layer, disposers released in `api.lifecycle.onDispose`), tracks the active session reactively through `api.route.current`, and registers the `sidebar_content` slot (order 95) that renders `UsagePanel`.
+- `src/tokenmeter.tsx` — the plugin entry: subscribes to every event, loads `settings`/`pricing`/`toggle-shortcut` at startup, registers the palette layers (`tokenmeter.settings` + `tokenmeter.browser` `Browse Usage`, plus toggle layer, disposers released in `api.lifecycle.onDispose`), subscribes to `subscribeProjectSnapshot` for milestone toasts (not a Solid `createEffect` on the server build), tracks the active session reactively through `api.route.current`, and registers the `sidebar_content` slot (order 95) that returns `null` when `visibility.sidebar` is `false` otherwise renders `UsagePanel`.
 - `src/tokenmeter/panel/index.tsx` — the stable panel entry: `UsagePanel` activates the root on mount and on sessionID changes, then renders from the `snapshot` and `projectSnapshot` signals (with `panel/section.tsx`, `panel/group-rows.tsx`, `panel/tone.ts`, `panel/settings-dialog.tsx`, and `panel/project-section.tsx`).
-- `src/tokenmeter/settings.ts` + `sections.ts` + `shortcut.ts` — the preference model (three-field `settings.v1` + Subagents durable key), the transient Project/Session disclosure shared with the toggle command, and the toggle command/shortcut keymap layer (kv-persisted, re-registered live on change).
+- `src/tokenmeter/settings.ts` + `sections.ts` + `shortcut.ts` — the preference model (`settings.v1` with `visibility: { sidebar, project, session, subagents }` plus `footer`/`milestones` and Subagents durable key, presentation-only visibility gating), the transient Project/Session disclosure shared with the toggle command, and the toggle command/shortcut keymap layer (kv-persisted, re-registered live on change) — plus `src/tokenmeter/browser/` (cross-project browser via `DialogSelect`) and `src/tokenmeter/pricing-remote.ts` (bounded `models.dev` fallback).
 - `scripts/build.ts` — production build with the reactive-binding guard.
 - `test/render.test.tsx` — the behavioral contract that matters most: the mounted panel repaints without a remount.
 
@@ -44,7 +44,7 @@ Two independent data paths feed one panel: the **Session** path (active session 
 
 1. `src/tokenmeter.tsx` — see every event and how it maps to the store and the schedulers.
 2. `src/tokenmeter/store.ts` — the state model: per-session message maps keyed by message ID, statuses, loaded/rehydrate flags, the `snapshot` signal.
-3. `src/tokenmeter/reconcile.ts` — the freshness engine: debounce, generation counter, rehydration, the 2 s tree-maintenance timer, and `publish`.
+3. `src/tokenmeter/reconcile.ts` — the freshness engine: debounce, generation counter, rehydration, the 30 s tree-maintenance timer, and `publish`.
 4. `src/tokenmeter/tree.ts` + `groups.ts` — how descendants are discovered and collapsed into per-agent groups.
 5. `src/tokenmeter/project.ts` + `db.ts` — the persistent Project path: live-list refresh (explicit limit, cap fail-closed), tombstone-admission deleted aggregate, polling timer.
 6. `src/tokenmeter/settings.ts` + `sections.ts` + `shortcut.ts` — preferences, transient disclosure, and the toggle command/shortcut layer.
@@ -59,7 +59,7 @@ Two independent data paths feed one panel: the **Session** path (active session 
 | Snapshot signal | `store.ts` | `reconcile.publish` (Session) |
 | Project snapshot / error / loading | `project.ts` | Live `session.list` sum + SQLite deleted aggregate |
 | Deleted-session aggregate + tombstones | `db.ts` (`tokenmeter.sqlite` under `api.state.path.state`) | Atomic `session.deleted` admission (BEGIN IMMEDIATE + INSERT OR IGNORE); WAL + busy timeout, short open/transaction/close |
-| Settings (`cache`, `numbers`, `collapsedSummary`) | `settings.ts` | `api.kv` `tokenmeter.settings.v1` — whole-object, ready-gated writes |
+| Settings (`cache`, `numbers`, `collapsedSummary`, `footer`, `milestones`, `visibility: { sidebar, project, session, subagents }`) | `settings.ts` | `api.kv` `tokenmeter.settings.v1` — whole-object, ready-gated writes; `visibility` defaults all `true`, presentation-only (entry returns `null` when `sidebar` off, panel `Show` gates sections) |
 | Subagents preference | `settings.ts` | `api.kv` `tokenmeter.sidebar.expanded` |
 | Toggle shortcut | `shortcut.ts` | `api.kv` `tokenmeter.toggle.shortcut`; the keymap layer re-registers live on change |
 | Section disclosure (Project/Session) | `sections.ts` | Transient — seeded closed at mount, reset on session change, never kv |
@@ -76,7 +76,7 @@ Two independent data paths feed one panel: the **Session** path (active session 
 - Deleted sessions keep contributing through the SQLite aggregate, admitted exactly once per session across processes and duplicate deliveries; the live list is authoritative on every refresh — never persisted, never re-added.
 - Project list calls always carry the explicit 10_000 limit; a truncated (cap-saturated) result fails closed — prior snapshot preserved, stable error surfaced.
 - Every line is column-aware and truncated — the terminal never wraps mid-word.
-- Only preferences persist (`tokenmeter.settings.v1`, `tokenmeter.sidebar.expanded`, `tokenmeter.toggle.shortcut`); master/section disclosure and the open agent are transient — reset on mount and session change, never written to kv.
+- Only preferences persist (`tokenmeter.settings.v1` including `visibility`, `tokenmeter.sidebar.expanded`, `tokenmeter.toggle.shortcut`); master/section disclosure and the open agent are transient — reset on mount and session change, never written to kv. Visibility is presentation-only: hidden surfaces keep collecting data and milestones still fire.
 - Hooks never throw; a Project failure shows the stable error line and nothing else.
 
 ## Related docs

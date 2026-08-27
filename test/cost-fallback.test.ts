@@ -12,6 +12,7 @@ import {
   usageOf,
 } from "../src/tokenmeter/math"
 import {
+  __setPricingFetchForTest,
   clearPricing,
   estimateCost,
   getPricing,
@@ -235,18 +236,27 @@ describe("Unit 1B store identity", () => {
 
 const pricingApi = (list: () => Promise<unknown>) => ({
   state: { path: { directory: "/tmp/test" } },
-  client: { model: { list } },
+  client: { v2: { model: { list } } },
 })
 
 describe("Unit 2 adapter+reconcile", () => {
   beforeEach(() => {
     clearPricing()
+    // Prevent eager remote hydration from hitting real network in unit tests.
+    __setPricingFetchForTest(
+      (async () =>
+        ({
+          ok: true,
+          json: async () => ({ openai: { models: {} } }),
+        }) as unknown as typeof fetch) as unknown as typeof fetch,
+    )
     setSnapshot(null)
     purgeTreeCache()
     disposeReconcile()
   })
   afterEach(() => {
     clearPricing()
+    __setPricingFetchForTest(null as unknown as typeof fetch)
     setSnapshot(null)
     purgeTreeCache()
     disposeReconcile()
@@ -383,6 +393,14 @@ describe("Unit 2 adapter+reconcile", () => {
     forgetSession(rootID)
     purgeTreeCache()
     clearPricing()
+    // Eager remote hydration would otherwise hit real network; mock to empty for determinism.
+    __setPricingFetchForTest(
+      (async () =>
+        ({
+          ok: true,
+          json: async () => ({ openai: { models: {} } }),
+        }) as unknown as typeof fetch) as unknown as typeof fetch,
+    )
     setSnapshot(null)
     disposeReconcile()
     const fake = {
@@ -411,16 +429,20 @@ describe("Unit 2 adapter+reconcile", () => {
           children: async () => ({ data: [] }),
           get: async () => ({ data: undefined }),
         },
-        model: {
-          list: async () => ({
-            data: [
-              {
-                providerID: "openai",
-                id: "gpt-4o-mini",
-                cost: [{ input: 5, output: 15, cache: { read: 0, write: 0 } }],
-              },
-            ],
-          }),
+        v2: {
+          model: {
+            list: async () => ({
+              data: [
+                {
+                  providerID: "openai",
+                  id: "gpt-4o-mini",
+                  cost: [
+                    { input: 5, output: 15, cache: { read: 0, write: 0 } },
+                  ],
+                },
+              ],
+            }),
+          },
         },
       },
       state: {
@@ -446,6 +468,7 @@ describe("Unit 2 adapter+reconcile", () => {
     purgeTreeCache()
     disposeReconcile()
     clearPricing()
+    __setPricingFetchForTest(null as unknown as typeof fetch)
     setSnapshot(null)
   })
 })
@@ -542,16 +565,20 @@ describe("Unit 3 project tombstone scope", () => {
         session: {
           list: async () => ({ data: liveA }),
         },
-        model: {
-          list: async () => ({
-            data: [
-              {
-                providerID: "openai",
-                id: "gpt-4o",
-                cost: [{ input: 5, output: 15, cache: { read: 0, write: 0 } }],
-              },
-            ],
-          }),
+        v2: {
+          model: {
+            list: async () => ({
+              data: [
+                {
+                  providerID: "openai",
+                  id: "gpt-4o",
+                  cost: [
+                    { input: 5, output: 15, cache: { read: 0, write: 0 } },
+                  ],
+                },
+              ],
+            }),
+          },
         },
       },
     }
@@ -566,16 +593,20 @@ describe("Unit 3 project tombstone scope", () => {
       client: {
         project: { current: async () => ({ data: { id: "projB" } }) },
         session: { list: async () => ({ data: liveB }) },
-        model: {
-          list: async () => ({
-            data: [
-              {
-                providerID: "openai",
-                id: "gpt-4o",
-                cost: [{ input: 5, output: 15, cache: { read: 0, write: 0 } }],
-              },
-            ],
-          }),
+        v2: {
+          model: {
+            list: async () => ({
+              data: [
+                {
+                  providerID: "openai",
+                  id: "gpt-4o",
+                  cost: [
+                    { input: 5, output: 15, cache: { read: 0, write: 0 } },
+                  ],
+                },
+              ],
+            }),
+          },
         },
       },
     }
@@ -614,12 +645,14 @@ describe("remediation Tokens restart and recover", () => {
         modelID: "gpt-4o",
         tokens: { input: 1000, output: 500 },
       }) as unknown as import("../src/tokenmeter/types").UsageMessage
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees usage
     const b = usageOf(m(0))!
     expect(b.cost).toBe(0)
     expect(b.source).toBe("reported")
     usageMap(sid).set("m1", b)
     expect(observedSessionUsage(sid)?.cost).toBe(0)
     setPricing(new Map([["openai:gpt-4o", price]]))
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees usage
     const e = usageOf(m(0))!
     expect(e.cost).toBeCloseTo(0.0125)
     expect(e.source).toBe("estimated")
@@ -627,9 +660,11 @@ describe("remediation Tokens restart and recover", () => {
     expect(observedSessionUsage(sid)?.cost).toBeCloseTo(0.0125)
     usageMap(sid).set("m1", e)
     expect(observedSessionUsage(sid)?.cost).toBeCloseTo(0.0125)
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees usage
     const r = usageOf(m(0.01))!
     usageMap(sid).set("m1", r)
     expect(observedSessionUsage(sid)?.cost).toBeCloseTo(0.01)
+    // biome-ignore lint/style/noNonNullAssertion: test guarantees usage
     const z = usageOf(m(0))!
     usageMap(sid).set("m1", z)
     expect(observedSessionUsage(sid)?.cost).toBeCloseTo(0.01)

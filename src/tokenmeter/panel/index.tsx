@@ -152,6 +152,14 @@ export function UsagePanel(props) {
   const chevron = () =>
     props.subagentsPref() === "expanded" ? GLYPH.collapse : GLYPH.expand
 
+  // One wheel/touchpad tick = one collapsed agent (2 rows). The ScrollBox
+  // wheel path uses scrollAcceleration, not the scrollbar's scrollStep, so a
+  // fixed multiplier of 2 is the smallest supported declarative option.
+  const subagentsScrollAccel = {
+    tick: () => 2,
+    reset() {},
+  }
+
   // Single shared layout derivation for viewport height and scroll
   // overflow: `overflow = totalRows > 4`, `height = min(totalRows, 4)`.
   // One collapsed group is 2 rows, expanded compact is 4 (header + 3
@@ -189,89 +197,98 @@ export function UsagePanel(props) {
         when={masterCollapsed()}
         fallback={
           <>
-            <Section
-              title="Project"
-              variant="project"
-              view={projectView}
-              emptyCopy="No sessions"
-              open={projectOpen}
-              onToggle={() => setSectionOpen("project", !projectOpen())}
-              theme={theme}
-              inner={inner}
-            />
-            <Section
-              title="Session"
-              view={view}
-              emptyCopy="No usage yet"
-              open={sessionOpen}
-              onToggle={() => setSectionOpen("session", !sessionOpen())}
-              theme={theme}
-              inner={inner}
-            />
+            <Show when={settings().visibility.project}>
+              <Section
+                title="Project"
+                variant="project"
+                view={projectView}
+                emptyCopy="No sessions"
+                open={projectOpen}
+                onToggle={() => setSectionOpen("project", !projectOpen())}
+                theme={theme}
+                inner={inner}
+              />
+            </Show>
+            <Show when={settings().visibility.session}>
+              <Section
+                title="Session"
+                view={view}
+                emptyCopy="No usage yet"
+                open={sessionOpen}
+                onToggle={() => setSectionOpen("session", !sessionOpen())}
+                theme={theme}
+                inner={inner}
+              />
+            </Show>
             {/* The Subagents section renders ONLY while the snapshot has at
                 least one group: with zero groups there is no heading, no
                 scrollbox and no `0 agents · 0 tasks` caption — the section
                 consumes zero vertical space and appears automatically once
-                the first delegated group exists. */}
-            <Show when={view()}>
-              {(snap) => (
-                <Show when={snap().groups.length > 0}>
-                  <box flexDirection="row">
-                    {/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI text element, not DOM; click-to-toggle is the TUI interaction model. */}
-                    <text
-                      fg={theme().text}
-                      selectable={false}
-                      onMouseDown={props.onToggleSubagents}
-                    >
-                      {`${chevron()} `}
-                    </text>
-                    {/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI text element, not DOM; click-to-toggle is the TUI interaction model. */}
-                    <text
-                      fg={theme().warning}
-                      selectable={false}
-                      onMouseDown={props.onToggleSubagents}
-                    >
-                      Subagents
-                    </text>
-                    <Show when={props.subagentsPref() === "collapsed"}>
+                the first delegated group exists. Visibility hides the section
+                without reserving height; the expanded/collapsed disclosure
+                (`tokenmeter.sidebar.expanded`) stays independent. */}
+            <Show when={settings().visibility.subagents}>
+              <Show when={view()}>
+                {(snap) => (
+                  <Show when={snap().groups.length > 0}>
+                    <box flexDirection="row">
                       {/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI text element, not DOM; click-to-toggle is the TUI interaction model. */}
                       <text
-                        fg={theme().textMuted}
+                        fg={theme().text}
                         selectable={false}
                         onMouseDown={props.onToggleSubagents}
                       >
-                        {` (${formatCount(snap().agents, "agent")} · ${formatCount(snap().delegations, "task")})`}
+                        {`${chevron()} `}
                       </text>
+                      {/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI text element, not DOM; click-to-toggle is the TUI interaction model. */}
+                      <text
+                        fg={theme().warning}
+                        selectable={false}
+                        onMouseDown={props.onToggleSubagents}
+                      >
+                        Subagents
+                      </text>
+                      <Show when={props.subagentsPref() === "collapsed"}>
+                        {/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI text element, not DOM; click-to-toggle is the TUI interaction model. */}
+                        <text
+                          fg={theme().textMuted}
+                          selectable={false}
+                          onMouseDown={props.onToggleSubagents}
+                        >
+                          {` (${formatCount(snap().agents, "agent")} · ${formatCount(snap().delegations, "task")})`}
+                        </text>
+                      </Show>
+                    </box>
+                    <Show when={props.subagentsPref() === "expanded"}>
+                      <scrollbox
+                        width={inner()}
+                        height={subagentsLayout().height}
+                        scrollY={subagentsLayout().overflow}
+                        scrollAcceleration={subagentsScrollAccel}
+                        verticalScrollbarOptions={{
+                          visible: subagentsLayout().overflow,
+                        }}
+                      >
+                        <For each={snap().groups}>
+                          {(group, index) => (
+                            <GroupRows
+                              group={group}
+                              inner={inner}
+                              theme={theme}
+                              open={() => openGroupIndex() === index()}
+                              onToggle={() =>
+                                setOpenGroupIndex(
+                                  openGroupIndex() === index() ? null : index(),
+                                )
+                              }
+                            />
+                          )}
+                        </For>
+                      </scrollbox>
                     </Show>
-                  </box>
-                  <Show when={props.subagentsPref() === "expanded"}>
-                    <scrollbox
-                      width={inner()}
-                      height={subagentsLayout().height}
-                      scrollY={subagentsLayout().overflow}
-                      verticalScrollbarOptions={{
-                        visible: subagentsLayout().overflow,
-                      }}
-                    >
-                      <For each={snap().groups}>
-                        {(group, index) => (
-                          <GroupRows
-                            group={group}
-                            inner={inner}
-                            theme={theme}
-                            open={() => openGroupIndex() === index()}
-                            onToggle={() =>
-                              setOpenGroupIndex(
-                                openGroupIndex() === index() ? null : index(),
-                              )
-                            }
-                          />
-                        )}
-                      </For>
-                    </scrollbox>
                   </Show>
-                </Show>
-              )}
+                )}
+              </Show>
             </Show>
           </>
         }

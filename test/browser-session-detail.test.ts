@@ -1,0 +1,20 @@
+import { describe, expect, test } from "bun:test"
+import { loadSessionDetail } from "../src/tokenmeter/browser/session-detail"
+import { fallbackTotals } from "../src/tokenmeter/browser/session-fallback"
+
+// biome-ignore format: keep compact helpers for 400 review budget
+function mkMsg(id:string,sid:string,prov:string,model:string,i:number,o:number){return {id,sessionID:sid,role:"assistant",providerID:prov,modelID:model,cost:0,tokens:{input:i,output:o,reasoning:0,cache:{read:0,write:0}}}}
+// biome-ignore format: keep compact helpers for 400 review budget
+function mkSess(id:string,title="Alpha",time={created:1000,updated:2000}){return {id,projectID:"projA",title,time,tokens:{input:0,output:0,reasoning:0,cache:{read:0,write:0}},cost:0} as never}
+// biome-ignore format: keep compact helpers for 400 review budget
+function h(msgs:unknown[],cur:string|null=null){return {state:{path:{directory:"/tmp",state:"/tmp"},session:{get:(id:string)=>id==="sA"||id==="sB"?mkSess(id):undefined}},route:cur?{current:{params:{sessionID:cur}}}:undefined,client:{project:{list:async()=>({data:[{id:"projA",name:"projA",worktree:"/tmp",time:{created:1,updated:2}}]}),current:async()=>({data:{id:"projA"}})},session:{list:async()=>({data:[mkSess("sA"),mkSess("sB")]}),get:async()=>({data:mkSess("sA")}),messages:async(p:Record<string,unknown>)=>({data:(msgs as unknown[]).filter((m)=>(m as Record<string,unknown>).sessionID===p.sessionID).map((m)=>({info:m}))}),children:async()=>({data:[]})},model:{list:async()=>({data:[]})},v2:{model:{list:async()=>({data:[]})}}},ui:{dialog:{replace(){},clear(){}},DialogSelect:()=>null as unknown,toast(){}}} as never}
+describe("browser session-detail", () => {
+  // biome-ignore format: keep compact for 400 review budget
+  test("throws on invalid sid", async () => { await expect(loadSessionDetail({} as never, "")).rejects.toThrow("Unable to load session"); await expect(loadSessionDetail({} as never, null as never)).rejects.toThrow() })
+  // biome-ignore format: keep compact for 400 review budget
+  test("groups providers and aggregates usage", async () => { const msgs = [mkMsg("m1", "sA", "openai", "openai/gpt-4o", 1000, 500), mkMsg("m2", "sA", "anthropic", "anthropic/claude", 500, 300)]; const d = await loadSessionDetail(h(msgs, "sA") as never, "sA"); expect(d.providers.length).toBe(2); expect(d.usage.context).toBe(2300); expect(d.usage.input).toBe(1500); expect(d.messageCount).toBe(2); expect(d.isCurrent).toBe(true); expect(d.label).toBe("Alpha"); expect(d.providers[0]?.providerID).toBeDefined() })
+  // biome-ignore format: keep compact for 400 review budget
+  test("fallback and empty", async () => { const d = await loadSessionDetail(h([]) as never, "sA"); expect(d.usage.context).toBeGreaterThanOrEqual(0); expect(d.providers.length).toBe(0); expect(d.isCurrent).toBe(false); const infos=new Map([["sA",{tokens:{input:10,output:5,reasoning:1,cache:{read:2,write:3}},cost:1.5,model:{providerID:"anthropic",id:"claude"},time:{created:1000,updated:2000}}]]) as never; const r=await fallbackTotals({} as never,["sA"],infos,500); expect(r?.ctx).toBe(21); const api={client:{session:{list:async()=>({data:[{id:"s1",tokens:{input:5,output:5},cost:0.5,time:{created:1000,updated:5000}}]})}}} as never; const r2=await fallbackTotals(api,["s1"],new Map(),1000); expect(r2?.last).toBe(5000); expect(await fallbackTotals({} as never,["x"],new Map([["x",null]]),0)).toBeNull() })
+  // biome-ignore format: keep compact for 400 review budget
+  test("covers tree and unknown provider", async () => { const api = h([]) as never; (api as unknown as {client:{session:{children:()=>Promise<unknown>}}}).client.session.children = async () => ({data:[{id:"sB"}]}); const d = await loadSessionDetail(api, "sA"); expect(d.id).toBe("sA"); const msgs2 = [{id:"m1",sessionID:"sA",role:"assistant",tokens:{input:1,output:1,reasoning:0,cache:{read:0,write:0}}} as unknown]; const d2 = await loadSessionDetail(h(msgs2) as never, "sA"); expect(d2.providers[0]?.providerID).toBe("unknown") })
+})

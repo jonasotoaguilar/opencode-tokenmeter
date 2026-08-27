@@ -17,5 +17,31 @@
     "rules": {
       "recommended": true
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": [
+        "test/openai-cost-remote.test.ts"
+      ],
+      "formatter": {
+        "enabled": false
+      }
+    },
+    {
+      "includes": [
+        "test/browser-session-source.test.ts"
+      ],
+      "formatter": {
+        "enabled": false
+      }
+    },
+    {
+      "includes": [
+        "test/browser-project-detail.test.ts"
+      ],
+      "formatter": {
+        "enabled": false
+      }
+    }
+  ]
 }

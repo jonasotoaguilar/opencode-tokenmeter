@@ -44,16 +44,13 @@ import {
   setProjectLoading,
   setProjectSnapshot,
 } from "../src/tokenmeter/project"
-import {
-  disposeReconcile,
-  MAINTENANCE_DELAY,
-  RECONCILE_DELAY,
-} from "../src/tokenmeter/reconcile"
+import { disposeReconcile, RECONCILE_DELAY } from "../src/tokenmeter/reconcile"
 import {
   cycleFooter,
   cycleFooterMetric,
   cycleNumbers,
   cycleSubagents,
+  cycleVisibility,
   SETTINGS_KV_KEY,
   SUBAGENTS_KV_KEY,
   settings,
@@ -1033,14 +1030,14 @@ describe("render-level live refresh", () => {
     expect(stuck).not.toContain("52K tokens")
     expect(stuck).not.toContain("(1 task)")
 
-    // The 2s maintenance tick purges the tree cache and re-discovers the
+    // The 30s maintenance tick purges the tree cache and re-discovers the
     // child: the SAME mounted panel now sums child tokens and shows one
     // delegation — no remount, no further event needed.
     await waitFor(
       () =>
         must(snapshot()).delegations === 1 &&
         snapshot()?.totalTokens === 41000 + 10500,
-      6000,
+      35_000,
     )
     await setup.waitForFrame((frame) => frame.includes("52K tokens"))
     const frame = setup.captureCharFrame()
@@ -1048,13 +1045,15 @@ describe("render-level live refresh", () => {
     expect(frame).toContain(`↳ sdd-apply (1 task) ${GLYPH.expand}`)
 
     // Cleanup is exercised: disposal clears the maintenance timer, so the
-    // snapshot object stays put across another maintenance window.
+    // snapshot object stays put across the next window. Full 30s disposal
+    // is covered deterministically in performance-idle.test.ts; here a short
+    // wait proves the timer was cleared without slowing the suite 30s.
     disposeReconcile()
     const settled = snapshot()
-    await sleep(MAINTENANCE_DELAY + 200)
+    await sleep(500)
     expect(snapshot()).toBe(settled)
     dispose()
-  }, 20000)
+  }, 40_000)
 })
 
 describe("Project section (projectID crossing, placeholder, collapse/expand, scrollbox)", () => {
@@ -3001,7 +3000,7 @@ describe("settings dialog (DialogSelect menu)", () => {
     const render = stack[index]?.render
     if (typeof render !== "function")
       throw new Error("renderDialog: no dialog element")
-    return testRender(render as never, { width: 60, height: 20 })
+    return testRender(render as never, { width: 60, height: 30 })
   }
 
   test("opens a DialogSelect with one option per preference showing the current value", async () => {
@@ -3022,24 +3021,36 @@ describe("settings dialog (DialogSelect menu)", () => {
     expect(frame).toContain("Summary: session")
     expect(frame).toContain("Subagents: collapsed")
     expect(frame).toContain("Shortcut: Ctrl+E")
+    expect(frame).toContain("TokenMeter: on")
+    expect(frame).toContain("Project: on")
+    expect(frame).toContain("Session: on")
+    expect(frame).toContain("Subagents: on")
     // The single Settings command's options are grouped into the native
-    // category subsections `Sidebar`, `Project` and `Footer` (installed
-    // `TuiDialogSelectOption.category`), each header rendered once before
-    // its contiguous run of options.
+    // category subsections `Sidebar`, `Visibility`, `Project` and `Footer`
+    // (installed `TuiDialogSelectOption.category`), each header rendered
+    // once before its contiguous run of options. Visibility holds the four
+    // presentation-only toggles (sidebar/project/session/subagents).
     expect(frame).toContain("Sidebar")
+    expect(frame).toContain("Visibility")
     expect(frame).toContain("Project")
     expect(frame).toContain("Footer")
     const options = dialogProps[0]?.options ?? []
-    expect(options).toHaveLength(12)
+    expect(options).toHaveLength(17)
     expect(options.slice(0, 5).every((opt) => opt.category === "Sidebar")).toBe(
       true,
     )
-    expect(options.slice(5, 6).every((opt) => opt.category === "Project")).toBe(
-      true,
-    )
-    expect(options.slice(6).every((opt) => opt.category === "Footer")).toBe(
-      true,
-    )
+    expect(
+      options.slice(5, 9).every((opt) => opt.category === "Visibility"),
+    ).toBe(true)
+    expect(
+      options.slice(9, 10).every((opt) => opt.category === "Project"),
+    ).toBe(true)
+    expect(
+      options.slice(10, 16).every((opt) => opt.category === "Footer"),
+    ).toBe(true)
+    expect(options[16]?.value).toBe("__close")
+    expect(options[16]?.category).toBe("────────")
+    expect(options[16]?.title).toBe("× Close")
     dispose()
   }, 20000)
 
@@ -3211,6 +3222,200 @@ describe("settings dialog (DialogSelect menu)", () => {
     expect(subagentsPref()).toBe("collapsed")
     dispose()
   }, 20000)
+
+  test("visibility rows cycle without recreating the dialog and persist the whole object", async () => {
+    const rootID = "ses_dialog_visibility"
+    purgeTreeCache()
+    dialogProps.length = 0
+    const { api, dialog, kvWrites, dispose } = await mountEntry(
+      state(rootID),
+      {},
+      false,
+    )
+    showSettingsDialog(api)
+    const setup = await renderDialog(dialog.stack)
+    await waitForFrameDriven(setup, (frame) => frame.includes("TokenMeter: on"))
+    expect(setup.captureCharFrame()).toContain("Project: on")
+    expect(setup.captureCharFrame()).toContain("Session: on")
+    expect(setup.captureCharFrame()).toContain("Subagents: on")
+    const props0 = dialogProps[0]
+    const sidebarOpt = props0?.options.find(
+      (o) => o.value === "visibility.sidebar",
+    )
+    const projectOpt = props0?.options.find(
+      (o) => o.value === "visibility.project",
+    )
+    if (!sidebarOpt || !projectOpt)
+      throw new Error("visibility options missing")
+    // Cycle sidebar: TokenMeter on -> off, whole-object write, same dialog.
+    props0?.onSelect?.(sidebarOpt)
+    expect(settings().visibility.sidebar).toBe(false)
+    expect(dialog.replaces()).toBe(1)
+    expect(kvWrites.filter((k) => k === SETTINGS_KV_KEY)).toHaveLength(1)
+    await waitForFrameDriven(setup, (frame) =>
+      frame.includes("TokenMeter: off"),
+    )
+    expect(setup.captureCharFrame()).not.toContain("TokenMeter: on")
+    // Project visibility independent.
+    props0?.onSelect?.(projectOpt)
+    expect(settings().visibility.project).toBe(false)
+    expect(settings().visibility.sidebar).toBe(false)
+    await waitForFrameDriven(setup, (frame) => frame.includes("Project: off"))
+    expect(dialog.replaces()).toBe(1)
+    expect(dialogProps).toHaveLength(1)
+    dispose()
+  }, 20000)
+})
+
+describe("visibility (sidebar and section gating, presentation-only)", () => {
+  test("hidden sidebar makes the slot return null while the store still reconciles", async () => {
+    const rootID = "ses_vis_sidebar"
+    const s: MutableApi = {
+      sessions: {
+        [rootID]: [
+          msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+        ],
+      },
+      children: {},
+      metas: { [rootID]: { id: rootID, title: "Root" } },
+    }
+    purgeTreeCache()
+    const { slot, setRoute, dispose } = await mountEntry(s, {}, true, {
+      visibility: {
+        sidebar: false,
+        project: true,
+        session: true,
+        subagents: true,
+      },
+    })
+    // Entry-level gating: sidebar_content returns null when sidebar hidden.
+    expect(slot({ theme: THEME }, { session_id: rootID })).toBeNull()
+    // Data collection still runs at the entry level even though the panel is hidden.
+    // The route effect drives activation even without a mounted panel.
+    setRoute({ name: "session", params: { sessionID: rootID } })
+    await waitFor(() => snapshot()?.rootID === rootID)
+    expect(snapshot()?.totalTokens).toBe(41000)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("section visibility hides only its section — Project, Session and Subagents independent, no height reserved", async () => {
+    const rootID = "ses_vis_sections"
+    const childID = "ses_vis_sections_child"
+    const s: MutableApi = {
+      sessions: {
+        [rootID]: [
+          msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+        ],
+        [childID]: [msg("c1", childID, { input: 2000, output: 100 }, 0.001)],
+      },
+      children: { [rootID]: [{ id: childID, agent: "general" }] },
+      metas: {
+        [rootID]: { id: rootID, title: "Root" },
+        [childID]: { id: childID, agent: "general" },
+      },
+    }
+    const project: ProjectState = {
+      current: { id: "proj_vis", worktree: "/wt" },
+      sessions: [
+        {
+          id: "ps1",
+          projectID: "proj_vis",
+          cost: 0.01,
+          tokens: { input: 1000, output: 500, reasoning: 200 },
+        },
+      ],
+    }
+    purgeTreeCache()
+    upsertMessageUsage(
+      msg("pm1", "ps1", { input: 1000, output: 500, reasoning: 200 }, 0.01),
+    )
+    const { slot, api, dispose } = await mountEntry(s, project, true)
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      { width: 60, height: 20 },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitFor(() => projectSnapshot() !== null)
+    await waitForFrameDriven(
+      setup,
+      (frame) => frame.includes("Project") && frame.includes("Session"),
+    )
+    expect(setup.captureCharFrame()).toContain("Subagents")
+
+    // Hide Project: its heading disappears, Session and Subagents stay.
+    cycleVisibility(api, "project")
+    await waitForFrameDriven(
+      setup,
+      (frame) => !frame.includes("Project") && frame.includes("Session"),
+    )
+    expect(setup.captureCharFrame()).not.toContain("Project")
+    expect(setup.captureCharFrame()).toContain("Session")
+    expect(setup.captureCharFrame()).toContain("Subagents")
+
+    // Hide Session: only Subagents remains.
+    cycleVisibility(api, "session")
+    await waitForFrameDriven(
+      setup,
+      (frame) => !frame.includes("Session") && frame.includes("Subagents"),
+    )
+    expect(setup.captureCharFrame()).not.toContain("Session")
+
+    // Hide Subagents: heading disappears even though groups exist; Project still hidden, Session hidden.
+    cycleVisibility(api, "subagents")
+    await waitForFrameDriven(setup, (frame) => !frame.includes("Subagents"))
+    expect(setup.captureCharFrame()).not.toContain("Subagents")
+    expect(setup.captureCharFrame()).not.toContain("↳ general")
+    // Data still collected: snapshot groups remain.
+    expect(snapshot()?.groups.length).toBe(1)
+
+    // Restore Session: it reappears reactively on the same mounted panel.
+    cycleVisibility(api, "session")
+    await waitForFrameDriven(setup, (frame) => frame.includes("Session"))
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("Subagents visibility is independent of the expanded/collapsed disclosure", async () => {
+    const rootID = "ses_vis_subagents_disc"
+    const childID = "ses_vis_sub_child"
+    const s: MutableApi = {
+      sessions: {
+        [rootID]: [
+          msg("r1", rootID, { input: 40000, output: 1000, total: 42000 }, 0.01),
+        ],
+        [childID]: [msg("c1", childID, { input: 2000, output: 100 }, 0.001)],
+      },
+      children: { [rootID]: [{ id: childID, agent: "general" }] },
+      metas: {
+        [rootID]: { id: rootID, title: "Root" },
+        [childID]: { id: childID, agent: "general" },
+      },
+    }
+    purgeTreeCache()
+    const { slot, api, dispose } = await mountEntry(s, {}, false)
+    const setup = await testRender(
+      () => slot({ theme: THEME }, { session_id: rootID }) as never,
+      { width: 60, height: 20 },
+    )
+    await waitFor(() => snapshot()?.rootID === rootID)
+    await waitForFrameDriven(setup, (frame) => frame.includes("Subagents"))
+    expect(setup.captureCharFrame()).toContain("▶ Subagents")
+    // Expand via the durable disclosure (collapsed -> expanded) while visible.
+    cycleSubagents(api)
+    await waitForFrameDriven(setup, (frame) => frame.includes("▼ Subagents"))
+    expect(subagentsPref()).toBe("expanded")
+    // Hide the section: heading disappears but the disclosure preference stays expanded.
+    cycleVisibility(api, "subagents")
+    await waitForFrameDriven(setup, (frame) => !frame.includes("Subagents"))
+    expect(subagentsPref()).toBe("expanded")
+    // Show again: it restores as expanded (▼), not collapsed.
+    cycleVisibility(api, "subagents")
+    await waitForFrameDriven(setup, (frame) => frame.includes("▼ Subagents"))
+    expect(subagentsPref()).toBe("expanded")
+    disposeReconcile()
+    dispose()
+  }, 20000)
 })
 
 describe("palette command (keymap.registerLayer seam)", () => {
@@ -3285,7 +3490,7 @@ describe("palette command (keymap.registerLayer seam)", () => {
       throw new Error("palette dialog render missing")
     const dialogSetup = await testRender(render as never, {
       width: 60,
-      height: 20,
+      height: 30,
     })
     await waitForFrameDriven(dialogSetup, (frame) =>
       frame.includes("TokenMeter Settings"),

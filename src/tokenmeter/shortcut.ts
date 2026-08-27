@@ -142,7 +142,8 @@ export function disposeToggleLayer(): void {
 export function cycleToggleShortcut(api: ToggleShortcutApi): void {
   const current = toggleShortcut()
   const index = TOGGLE_SHORTCUTS.findIndex((entry) => entry.key === current)
-  const next = TOGGLE_SHORTCUTS[(index + 1) % TOGGLE_SHORTCUTS.length]!.key
+  const entry = TOGGLE_SHORTCUTS[(index + 1) % TOGGLE_SHORTCUTS.length]
+  const next = entry ? entry.key : DEFAULT_TOGGLE_SHORTCUT
   setToggleShortcut(next)
   if (api.kv.ready) api.kv.set(TOGGLE_SHORTCUT_KV_KEY, next)
   registerToggleLayer(api)
