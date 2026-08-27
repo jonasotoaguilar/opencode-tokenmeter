@@ -130,10 +130,23 @@ export function showSessionDetail(
   pidHint?: string,
 ): void {
   let closed = false
+  let suppress = false
   const close = () => {
     if (closed) return
     closed = true
     api.ui.dialog.clear()
+  }
+  const onClose = () => {
+    if (suppress) return
+    close()
+  }
+  const withSuppress = (fn: () => void): void => {
+    suppress = true
+    try {
+      fn()
+    } finally {
+      suppress = false
+    }
   }
   const render = (
     loading: boolean,
@@ -162,7 +175,7 @@ export function showSessionDetail(
       />
     )
   }
-  api.ui.dialog.replace(() => render(true, null, null), close)
+  api.ui.dialog.replace(() => render(true, null, null), onClose)
   void (async () => {
     let detail: SessionDetail | null = null
     let error: string | null = null
@@ -176,6 +189,8 @@ export function showSessionDetail(
       detail = null
     }
     if (closed) return
-    api.ui.dialog.replace(() => render(false, error, detail), close)
+    withSuppress(() =>
+      api.ui.dialog.replace(() => render(false, error, detail), onClose),
+    )
   })()
 }

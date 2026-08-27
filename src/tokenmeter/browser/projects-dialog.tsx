@@ -122,7 +122,7 @@ function buildBrowserOptions(
 
 export function showBrowserDialog(api: BrowserDialogApi): void {
   const activity = createBrowserActivity(api)
-  const { isActive, deactivate, close } = activity
+  const { isActive, deactivate, close, onClose, withSuppress } = activity
   const render = (
     loading: boolean,
     error: string | null,
@@ -149,7 +149,7 @@ export function showBrowserDialog(api: BrowserDialogApi): void {
       />
     )
   }
-  api.ui.dialog.replace(() => render(true, null, null), close)
+  api.ui.dialog.replace(() => render(true, null, null), onClose)
   void (async () => {
     try {
       const rawList = (await withTimeout(
@@ -248,9 +248,11 @@ export function showBrowserDialog(api: BrowserDialogApi): void {
         .sort((a, b) => b.lastActive - a.lastActive)
       const provisionalOrdered = [...curProv, ...restProv]
       if (isActive()) {
-        api.ui.dialog.replace(
-          () => render(false, null, provisionalOrdered),
-          close,
+        withSuppress(() =>
+          api.ui.dialog.replace(
+            () => render(false, null, provisionalOrdered),
+            onClose,
+          ),
         )
       }
       const filtered: BrowserRow[] = []
@@ -275,12 +277,16 @@ export function showBrowserDialog(api: BrowserDialogApi): void {
         .sort((a, b) => b.lastActive - a.lastActive)
       const ordered = [...curRows, ...rest]
       if (!isActive()) return
-      api.ui.dialog.replace(() => render(false, null, ordered), close)
+      withSuppress(() =>
+        api.ui.dialog.replace(() => render(false, null, ordered), onClose),
+      )
     } catch {
       if (!isActive()) return
-      api.ui.dialog.replace(
-        () => render(false, "Unable to load projects", []),
-        close,
+      withSuppress(() =>
+        api.ui.dialog.replace(
+          () => render(false, "Unable to load projects", []),
+          onClose,
+        ),
       )
     }
   })().catch(() => {})
