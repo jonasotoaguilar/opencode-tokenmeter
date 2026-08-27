@@ -34,6 +34,14 @@
       "formatter": {
         "enabled": false
       }
+    },
+    {
+      "includes": [
+        "test/browser-project-detail.test.ts"
+      ],
+      "formatter": {
+        "enabled": false
+      }
     }
   ]
 }
