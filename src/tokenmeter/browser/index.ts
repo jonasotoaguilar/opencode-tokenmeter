@@ -20,6 +20,8 @@ export {
   resolveSafeWorktree,
 } from "./directories"
 export { isSafeDirectory } from "./is-safe-directory"
+export type { BrowserProjectDetail, BrowserSession } from "./project-detail"
+export { loadProjectDetail } from "./project-detail"
 export { loadBrowserProjects } from "./projects"
 export {
   fetchSessionsForBrowse,
