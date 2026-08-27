@@ -42,8 +42,9 @@
  * forever. Each tick purges the tree cache and reuses the debounced
  * reconcile, so the next reconcile re-discovers descendants — a tree-only
  * refresh that never forces a client message fetch. The timer is owned by
- * the activateRoot/disposeReconcile lifecycle: route changes replace it
- * instead of stacking ticks, and disposal clears it.
+ * the activateRoot/disposeReconcile lifecycle (30 s safety fallback):
+ * route changes replace it instead of stacking ticks, and disposal clears
+ * it.
  */
 
 import { buildGroups } from "./groups"
@@ -94,8 +95,8 @@ export type ReconcileApi = {
 
 export const RECONCILE_DELAY = 300
 export const IDLE_DELAY = 100
-/** Low-frequency tree-maintenance cadence on the active root (matches the reference plugin). */
-export const MAINTENANCE_DELAY = 2000
+/** Low-frequency tree-maintenance cadence on the active root (30 s safety fallback). */
+export const MAINTENANCE_DELAY = 30_000
 
 let currentRoot: string | null = null
 let reconcileTimer: ReturnType<typeof setTimeout> | null = null
@@ -254,6 +255,7 @@ export function scheduleReconcile(
  * invalidated, so loaded sessions keep the cheap in-memory fast path.
  */
 function maintenanceTick(api: ReconcileApi): void {
+  if (!currentRoot) return
   purgeTreeCache()
   scheduleReconcile(api, RECONCILE_DELAY)
 }
