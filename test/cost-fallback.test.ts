@@ -12,6 +12,7 @@ import {
   usageOf,
 } from "../src/tokenmeter/math"
 import {
+  __setPricingFetchForTest,
   clearPricing,
   estimateCost,
   getPricing,
@@ -241,12 +242,21 @@ const pricingApi = (list: () => Promise<unknown>) => ({
 describe("Unit 2 adapter+reconcile", () => {
   beforeEach(() => {
     clearPricing()
+    // Prevent eager remote hydration from hitting real network in unit tests.
+    __setPricingFetchForTest(
+      (async () =>
+        ({
+          ok: true,
+          json: async () => ({ openai: { models: {} } }),
+        }) as unknown as typeof fetch) as unknown as typeof fetch,
+    )
     setSnapshot(null)
     purgeTreeCache()
     disposeReconcile()
   })
   afterEach(() => {
     clearPricing()
+    __setPricingFetchForTest(null as unknown as typeof fetch)
     setSnapshot(null)
     purgeTreeCache()
     disposeReconcile()
@@ -383,6 +393,14 @@ describe("Unit 2 adapter+reconcile", () => {
     forgetSession(rootID)
     purgeTreeCache()
     clearPricing()
+    // Eager remote hydration would otherwise hit real network; mock to empty for determinism.
+    __setPricingFetchForTest(
+      (async () =>
+        ({
+          ok: true,
+          json: async () => ({ openai: { models: {} } }),
+        }) as unknown as typeof fetch) as unknown as typeof fetch,
+    )
     setSnapshot(null)
     disposeReconcile()
     const fake = {
@@ -450,6 +468,7 @@ describe("Unit 2 adapter+reconcile", () => {
     purgeTreeCache()
     disposeReconcile()
     clearPricing()
+    __setPricingFetchForTest(null as unknown as typeof fetch)
     setSnapshot(null)
   })
 })

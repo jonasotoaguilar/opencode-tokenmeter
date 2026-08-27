@@ -88,3 +88,94 @@ export function parseStandardPrice(
     cache: { read: read as number, write: write as number },
   }
 }
+
+function parseModelsDevOpenAI(json: unknown): Map<string, FinitePrice> {
+  const out = new Map<string, FinitePrice>()
+  if (!json || typeof json !== "object" || Array.isArray(json)) return out
+  const j = json as Record<string, unknown>
+  const openaiEntry = j.openai as Record<string, unknown> | undefined
+  if (!openaiEntry || typeof openaiEntry !== "object") return out
+  const modelsObj = openaiEntry.models as Record<string, unknown> | undefined
+  if (!modelsObj || typeof modelsObj !== "object" || Array.isArray(modelsObj))
+    return out
+  for (const [modelId, raw] of Object.entries(modelsObj)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue
+    const model = raw as Record<string, unknown>
+    const costRaw = model.cost
+    if (!costRaw || typeof costRaw !== "object" || Array.isArray(costRaw))
+      continue
+    const cost = costRaw as Record<string, unknown>
+    const standard = parseStandardPrice(cost)
+    if (!standard) continue
+    const tiers = cost.tiers
+    if (Array.isArray(tiers)) {
+      for (const t of tiers) {
+        if (!t || typeof t !== "object" || Array.isArray(t)) continue
+        const tierObj = t as Record<string, unknown>
+        const tierMeta = tierObj.tier as Record<string, unknown> | undefined
+        if (tierMeta?.type !== "context") continue
+        const size = tierMeta.size
+        if (typeof size !== "number" || !Number.isFinite(size) || size <= 0)
+          continue
+        const tierPrice = parseStandardPrice(tierObj)
+        if (!tierPrice) continue
+        standard.tier = {
+          threshold: size,
+          input: tierPrice.input,
+          output: tierPrice.output,
+          cache: { read: tierPrice.cache.read, write: tierPrice.cache.write },
+        }
+        break
+      }
+    }
+    const key = pricingKey("openai", modelId)
+    if (!key) continue
+    out.set(key, standard)
+  }
+  return out
+}
+
+export async function loadRemoteIfNeeded(): Promise<void> {
+  if (remoteInflight) return remoteInflight
+  const now = clockNow()
+  if (
+    remoteLastSuccess !== 0 &&
+    now - remoteLastSuccess < REMOTE_SUCCESS_TTL_MS
+  )
+    return
+  if (
+    remoteLastFailure !== 0 &&
+    now - remoteLastFailure < REMOTE_FAILURE_COOLDOWN_MS
+  )
+    return
+  remoteInflight = (async () => {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
+    const controller =
+      typeof AbortController !== "undefined" ? new AbortController() : null
+    try {
+      if (controller)
+        timeoutId = setTimeout(
+          () => controller.abort(),
+          REMOTE_FETCH_TIMEOUT_MS,
+        )
+      const res = await fetchImpl(REMOTE_URL, {
+        signal: controller?.signal,
+        redirect: "error",
+      } as RequestInit)
+      if (timeoutId) clearTimeout(timeoutId)
+      if (!res.ok) throw new Error(`remote status ${res.status}`)
+      const json = (await res.json()) as unknown
+      const next = parseModelsDevOpenAI(json)
+      remotePricingMap.clear()
+      for (const [k, v] of next) remotePricingMap.set(k, v)
+      remoteLastSuccess = clockNow()
+      remoteLastFailure = 0
+    } catch {
+      if (timeoutId) clearTimeout(timeoutId)
+      remoteLastFailure = clockNow()
+    } finally {
+      remoteInflight = null
+    }
+  })()
+  return remoteInflight
+}
