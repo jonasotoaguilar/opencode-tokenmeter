@@ -26,6 +26,14 @@
       "formatter": {
         "enabled": false
       }
+    },
+    {
+      "includes": [
+        "test/browser-session-source.test.ts"
+      ],
+      "formatter": {
+        "enabled": false
+      }
     }
   ]
 }
