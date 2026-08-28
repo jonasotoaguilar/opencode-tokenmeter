@@ -1,56 +1,56 @@
 /**
  * Browser session sources.
- * Prefers v2.session.list({project}) without directory; falls back
- * to safe directory pagination only for project detail paths.
+ * Uses legacy directory-scoped session.list({directory, scope:"project"})
+ * via resolveSafeWorktree — proven authoritative cross-project. V2
+ * project-scoped list is instance-scoped and not used for browse.
  */
 
 import type { ProjectSessionLike } from "../types"
-import { BROWSER_SESSION_LIMIT, FETCH_TIMEOUT_MS, PAGE_SIZE } from "./constants"
+import { FETCH_TIMEOUT_MS } from "./constants"
+import { resolveSafeWorktree } from "./directories"
 import { withTimeout } from "./timeout"
 import type { BrowserApi } from "./types"
 
-async function fetchViaV2(
+async function fetchViaDirectory(
   api: BrowserApi,
   projectID: string,
 ): Promise<ProjectSessionLike[] | null> {
-  const v2 =
-    (api as unknown as { client?: { v2?: { session?: { list?: unknown } } } })
-      ?.client?.v2?.session ??
-    (api.client as unknown as { v2?: { session?: { list?: unknown } } })?.v2
-      ?.session
-  const fn = (v2 as { list?: unknown })?.list
-  if (typeof fn !== "function") return null
-  const all: ProjectSessionLike[] = []
-  let cursor: string | undefined
-  do {
-    const params: Record<string, unknown> = {
-      project: projectID,
-      limit: PAGE_SIZE,
-    }
-    if (cursor) params.cursor = cursor
-    let res: unknown
-    try {
-      res = await withTimeout(
-        (fn as (p: unknown) => Promise<unknown>).call(v2, params),
-        FETCH_TIMEOUT_MS,
-      )
-    } catch {
-      return null
-    }
-    const r = res as Record<string, unknown>
-    const data = (r as { data?: unknown })?.data as unknown[] | undefined
-    if (!Array.isArray(data)) throw new Error("Unable to load sessions")
-    for (const s of data as ProjectSessionLike[]) {
-      const pid = (s as unknown as { projectID?: unknown })?.projectID
-      if (pid === projectID) all.push(s)
-    }
-    if (data.length === 0) break
-    const next = (r as { cursor?: { next?: string } })?.cursor?.next
-    if (typeof next === "string" && next && next !== cursor) cursor = next
-    else break
-    if (all.length >= BROWSER_SESSION_LIMIT) break
-  } while (cursor !== undefined)
-  return all
+  let dir: string | null = null
+  try {
+    const listRes = (await withTimeout(
+      api.client.project.list() as Promise<{ data?: unknown }>,
+      FETCH_TIMEOUT_MS,
+    )) as { data?: unknown }
+    const arr = listRes?.data as { id: string; worktree?: string }[] | undefined
+    const found = Array.isArray(arr)
+      ? arr.find((p) => p.id === projectID)
+      : undefined
+    dir = await resolveSafeWorktree(api, projectID, found?.worktree)
+  } catch {
+    return null
+  }
+  if (!dir) return null
+  try {
+    const res = (await withTimeout(
+      (
+        api.client.session.list as (
+          p: Record<string, unknown>,
+        ) => Promise<unknown>
+      ).call(api.client.session, {
+        directory: dir,
+        scope: "project",
+        limit: 200,
+      }),
+      FETCH_TIMEOUT_MS,
+    )) as { data?: unknown }
+    const data = res?.data as ProjectSessionLike[] | undefined
+    if (!Array.isArray(data)) return null
+    return data.filter(
+      (s) => (s as unknown as { projectID?: string }).projectID === projectID,
+    )
+  } catch {
+    return null
+  }
 }
 
 export async function fetchSessionsForBrowse(
@@ -58,8 +58,8 @@ export async function fetchSessionsForBrowse(
   projectID: string,
 ): Promise<ProjectSessionLike[]> {
   try {
-    const v2 = await fetchViaV2(api, projectID)
-    if (Array.isArray(v2)) return v2
+    const via = await fetchViaDirectory(api, projectID)
+    if (Array.isArray(via)) return via
   } catch {}
   return []
 }
