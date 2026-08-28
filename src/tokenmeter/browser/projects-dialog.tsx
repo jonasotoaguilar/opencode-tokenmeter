@@ -1,52 +1,22 @@
 /** @jsxImportSource @opentui/solid */
 /**
  * Projects list dialog.
- * First paint from project.list + current pin; provisional filters via
- * sync eligibility (exists, directory, .git, not /, not HOME, not ~/foo);
- * async probe filters to V2 limit-1 session presence (api.client.v2.session.list({project,limit:1})).
- * Title is count only; no Overview tokens/cost.
+ * Deterministic eligible-only list: project.list + project.current + synchronous
+ * isEligibleProjectPath (exists, directory, .git, not /, not HOME, not ~/foo).
+ * No V2 presence probes — V2 session.list is instance-scoped and not authoritative
+ * cross-project, so root must not hide valid zero-session projects. One usable
+ * render after eligibility, no N per-project backend calls. Title is count only.
  */
 
 import { textColumns, truncateToColumns } from "../text"
 import { createBrowserActivity } from "./browser-activity"
-import { withConcurrency } from "./concurrency"
-import { BROWSER_CONCURRENCY, FETCH_TIMEOUT_MS, NAV } from "./constants"
+import { FETCH_TIMEOUT_MS, NAV } from "./constants"
 import { iso } from "./dialog-shared"
 import { isEligibleProjectPath } from "./eligibility"
 import { isSafeDirectory } from "./is-safe-directory"
 import { showProjectDetail } from "./project-dialog"
 import { withTimeout } from "./timeout"
 import type { BrowserDialogApi } from "./types"
-
-function probeHasSessionsV2(
-  api: BrowserDialogApi,
-  projectID: string,
-): Promise<boolean | null> {
-  const v2 = (
-    api as unknown as { client: { v2?: { session?: { list?: unknown } } } }
-  ).client.v2?.session
-  const fn = v2?.list as
-    | ((p: Record<string, unknown>) => Promise<unknown>)
-    | undefined
-  if (typeof fn !== "function") return Promise.resolve(null)
-  return withTimeout(
-    fn.call(v2, { project: projectID, limit: 1 }) as Promise<unknown>,
-    FETCH_TIMEOUT_MS,
-  )
-    .then((res) => {
-      if (!res || typeof res !== "object") return null
-      const d1 = (res as Record<string, unknown>).data
-      let arr: unknown[] | null = null
-      if (Array.isArray(d1)) arr = d1
-      else if (d1 && typeof d1 === "object") {
-        const inner = (d1 as Record<string, unknown>).data
-        if (Array.isArray(inner)) arr = inner as unknown[]
-      }
-      if (arr === null) return null
-      return arr.length > 0
-    })
-    .catch(() => null)
-}
 
 type BrowserRow = {
   id: string
@@ -240,46 +210,17 @@ export function showBrowserDialog(api: BrowserDialogApi): void {
         }
         return false
       })
-      const provisionalSafe: BrowserRow[] = eligibleRows.map((row) => ({
+      const eligibleSafe: BrowserRow[] = eligibleRows.map((row) => ({
         id: row.id,
         label: row.label,
         lastActive: row.lastActive,
         isCurrent: row.isCurrent,
       }))
-      const curProv = provisionalSafe.filter((r) => r.isCurrent)
-      const restProv = provisionalSafe
+      const curEligible = eligibleSafe.filter((r) => r.isCurrent)
+      const restEligible = eligibleSafe
         .filter((r) => !r.isCurrent)
         .sort((a, b) => b.lastActive - a.lastActive)
-      const provisionalOrdered = [...curProv, ...restProv]
-      if (isActive()) {
-        withSuppress(() =>
-          api.ui.dialog.replace(
-            () => render(false, null, provisionalOrdered),
-            onClose,
-          ),
-        )
-      }
-      const filtered: BrowserRow[] = []
-      await withConcurrency(eligibleRows, BROWSER_CONCURRENCY, async (row) => {
-        let probe: boolean | null = null
-        try {
-          probe = await probeHasSessionsV2(api, row.id)
-        } catch {
-          probe = null
-        }
-        if (probe === false) return
-        filtered.push({
-          id: row.id,
-          label: row.label,
-          lastActive: row.lastActive,
-          isCurrent: row.isCurrent,
-        })
-      }).catch(() => {})
-      const curRows = filtered.filter((r) => r.isCurrent)
-      const rest = filtered
-        .filter((r) => !r.isCurrent)
-        .sort((a, b) => b.lastActive - a.lastActive)
-      const ordered = [...curRows, ...rest]
+      const ordered = [...curEligible, ...restEligible]
       if (!isActive()) return
       withSuppress(() =>
         api.ui.dialog.replace(() => render(false, null, ordered), onClose),

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by ADR-0010 (2026-08-28) — V2 probes are instance-scoped and not authoritative cross-project; root is now eligible-only 2 calls.
 
 ## Date
 

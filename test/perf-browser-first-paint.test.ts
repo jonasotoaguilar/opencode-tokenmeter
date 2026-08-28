@@ -94,14 +94,13 @@ function makePerfHarness(N = 28, probeMs = 100, listMs = 8, curMs = 8, extras: P
 }
 
 describe("perf P0: Usage first paint", () => {
-  // Baseline (main, legacy): 58 calls (list 1 + current 1 + directories 28 + session.list(directory) 28), first usable 18.8ms after P0, settlement ≤900ms, 3 replaces.
-  // Candidate (V2): 30 calls (list 1 + current 1 + v2.session.list({project,limit:1}) 28), provisional ≤100ms, final ≤900ms, same replaces.
-  test("provisional usable ≤100ms, final ≤900ms, 30 V2 calls", async () => {
+  // Root is deterministic eligible-only: 2 calls (list 1 + current 1), no N per-project probes.
+  // Provisional is final; usable in ≤100ms, ≤2 replaces, no V2 probes.
+  test("eligible usable ≤100ms, 2 calls, no V2 probes", async () => {
     const h = makePerfHarness(28, 100, 8, 8)
     const start = performance.now()
     h.resetStart()
     showBrowserDialog(h.api)
-    // provisional should appear quickly: poll via get()
     let provCap: { title: string } | null = null
     let provAt = -1
     for (let i = 0; i < 30; i++) {
@@ -117,20 +116,18 @@ describe("perf P0: Usage first paint", () => {
     expect(provCap).not.toBeNull()
     expect(provAt).toBeLessThanOrEqual(100)
     expect(provCap!.title).toBe("TokenMeter: Browse Usage (28)")
-    // capture caps timing via internal getCaps which records on get() already
-    // wait for final filtered to settle
-    await delay(1000, null)
+    await delay(300, null)
     const caps = h.getCaps()
     const usable = caps.filter(c => c.cap.title.startsWith("TokenMeter: Browse Usage (") && !c.cap.title.includes("loading"))
-    expect(usable.length).toBeGreaterThanOrEqual(2)
+    expect(usable.length).toBeGreaterThanOrEqual(1)
     const finalCap = usable[usable.length - 1]!
     expect(finalCap.cap.title).toBe("TokenMeter: Browse Usage (28)")
-    expect(finalCap.t).toBeLessThanOrEqual(900)
+    expect(finalCap.t).toBeLessThanOrEqual(300)
     const c = h.counts()
     expect(c.listCalls).toBe(1)
     expect(c.curCalls).toBe(1)
-    expect(c.v2Calls).toBe(28)
-    expect(c.listCalls + c.curCalls + c.v2Calls).toBe(30)
+    expect(c.v2Calls).toBe(0)
+    expect(c.listCalls + c.curCalls + c.v2Calls).toBe(2)
     expect(h.get().options.some((o: { value: string }) => o.value === "/")).toBe(false)
     h.cleanup()
   })
@@ -185,9 +182,8 @@ describe("perf P0: Usage first paint", () => {
     h.cleanup()
   })
 
-  test("provisional uses only eligible worktree evidence (git, not HOME child), background V2 filters empty", async () => {
+  test("eligible only: unsafe and non-git never appear, zero-session eligible remains", async () => {
     stubPricing();
-    // One project with unsafe worktree, one with missing .git, and empty-session project filtered finally; eligible requires .git and not direct HOME child.
     const stateDir = mkdtempSync(join(tmpdir(), "perf-state-"))
     const hostDir = mkdtempSync(join(tmpdir(), "perf-host-"))
     ensureGit(hostDir)
@@ -196,7 +192,6 @@ describe("perf P0: Usage first paint", () => {
     const empty = mkdtempSync(join(tmpdir(), "perf-empty-"))
     ensureGit(empty)
     const noGit = mkdtempSync(join(tmpdir(), "perf-nogit-"))
-    // no .git for noGit -> ineligible
     const projects = [
       { id: "proj-good", name: "good", worktree: good, time: { created: 1, updated: 10 } },
       { id: "proj-unsafe", name: "bad", worktree: "/", time: { created: 1, updated: 9 } },
@@ -209,12 +204,9 @@ describe("perf P0: Usage first paint", () => {
     const api = {
       state: { path: { directory: hostDir, state: stateDir } },
       client: {
-        project: {
-          list: async () => ({ data: projects } as never),
-          current: async () => ({ data: { id: "proj-good" } } as never),
-        },
+        project: { list: async () => ({ data: projects } as never), current: async () => ({ data: { id: "proj-good" } } as never) },
         session: { list: async () => ({ data: [] } as never) },
-        v2: { session: { list: async (p: Record<string, unknown>) => { const pid = p.project as string; if (pid === "proj-good") return { data: [{ id: "s1" }] } as never; if (pid === "proj-empty") return { data: [] } as never; if (pid === "proj-nogit") return { data: [{ id: "s1" }] } as never; return { data: [] } as never } } },
+        v2: { session: { list: async () => ({ data: [] } as never) } },
       },
       ui: { dialog: { replace(r: () => unknown, c?: () => void) { stack.splice(0, stack.length, { render: r, onClose: c }) }, clear() { stack.splice(0, stack.length) } }, DialogSelect: (props: Cap) => { captured = props; return null as never }, toast() {} },
     } as never
@@ -222,25 +214,20 @@ describe("perf P0: Usage first paint", () => {
     showBrowserDialog(api as never)
     await delay(60, null)
     const prov = get()
-    // provisional uses only synchronous safe evidence: good and empty are safe, unsafe "/" excluded; all appear provisionally before session probe
-    // empty has session empty, so provisionally it WOULD appear (safe dir) then be filtered; but our earlier harness had empty session probe empty -> provisionally includes empty
-    // Check that unsafe never appears provisionally
     expect(prov.options.some(o => o.value === "proj-unsafe")).toBe(false)
     expect(prov.options.some(o => o.value === "proj-good")).toBe(true)
-    // empty may or may not be present provisionally depending on isSafeDirectory; it is safe so should be present before filtering
-    // Do not assert strict empty provisional presence if timing races; instead check final filtering
-    await delay(500, null)
+    expect(prov.options.some(o => o.value === "proj-nogit")).toBe(false)
+    await delay(100, null)
     const fin = get()
-    // final should have filtered empty-session project out, still not unsafe/nogit (nogit ineligible never appears)
     expect(fin.options.some(o => o.value === "proj-good")).toBe(true)
-    expect(fin.options.some(o => o.value === "proj-empty")).toBe(false)
+    expect(fin.options.some(o => o.value === "proj-empty")).toBe(true)
     expect(fin.options.some(o => o.value === "proj-unsafe")).toBe(false)
     expect(fin.options.some(o => o.value === "proj-nogit")).toBe(false)
-    expect(fin.title).toBe("TokenMeter: Browse Usage (1)")
+    expect(fin.title).toBe("TokenMeter: Browse Usage (2)")
     for (const d of [stateDir, hostDir, good, empty, noGit]) try { rmSync(d, { recursive: true, force: true }) } catch {}
   })
 
-  test("no unhandled rejection and no extra replace loops (≤3 replaces)", async () => {
+  test("no unhandled rejection and no extra replace loops (≤2 replaces)", async () => {
     const h = makePerfHarness(5, 50, 2, 2)
     // track unhandled rejections
     let unhandled = false
@@ -250,7 +237,7 @@ describe("perf P0: Usage first paint", () => {
     await delay(500, null)
     process.off("unhandledRejection", handler)
     expect(unhandled).toBe(false)
-    expect(h.counts().replaceCount).toBeLessThanOrEqual(3)
+    expect(h.counts().replaceCount).toBeLessThanOrEqual(2)
     expect(h.counts().replaceCount).toBeGreaterThanOrEqual(2)
     h.cleanup()
   })
