@@ -21,27 +21,31 @@ import type { BrowserDialogApi } from "./types"
 function probeHasSessionsV2(
   api: BrowserDialogApi,
   projectID: string,
-): Promise<boolean> {
+): Promise<boolean | null> {
   const v2 = (
-    api as unknown as {
-      client: { v2?: { session?: { list?: unknown } } }
-    }
+    api as unknown as { client: { v2?: { session?: { list?: unknown } } } }
   ).client.v2?.session
   const fn = v2?.list as
     | ((p: Record<string, unknown>) => Promise<unknown>)
     | undefined
-  if (typeof fn !== "function") return Promise.resolve(false)
+  if (typeof fn !== "function") return Promise.resolve(null)
   return withTimeout(
-    fn.call(v2, { project: projectID, limit: 1 }) as Promise<{
-      data?: unknown
-    }>,
+    fn.call(v2, { project: projectID, limit: 1 }) as Promise<unknown>,
     FETCH_TIMEOUT_MS,
   )
     .then((res) => {
-      const data = (res as { data?: unknown })?.data as unknown[] | undefined
-      return Array.isArray(data) && data.length > 0
+      if (!res || typeof res !== "object") return null
+      const d1 = (res as Record<string, unknown>).data
+      let arr: unknown[] | null = null
+      if (Array.isArray(d1)) arr = d1
+      else if (d1 && typeof d1 === "object") {
+        const inner = (d1 as Record<string, unknown>).data
+        if (Array.isArray(inner)) arr = inner as unknown[]
+      }
+      if (arr === null) return null
+      return arr.length > 0
     })
-    .catch(() => false)
+    .catch(() => null)
 }
 
 type BrowserRow = {
@@ -257,13 +261,13 @@ export function showBrowserDialog(api: BrowserDialogApi): void {
       }
       const filtered: BrowserRow[] = []
       await withConcurrency(eligibleRows, BROWSER_CONCURRENCY, async (row) => {
-        let has = false
+        let probe: boolean | null = null
         try {
-          has = await probeHasSessionsV2(api, row.id)
+          probe = await probeHasSessionsV2(api, row.id)
         } catch {
-          has = false
+          probe = null
         }
-        if (!has) return
+        if (probe === false) return
         filtered.push({
           id: row.id,
           label: row.label,

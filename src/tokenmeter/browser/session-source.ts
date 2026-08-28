@@ -38,14 +38,27 @@ async function fetchViaV2(
       return null
     }
     const r = res as Record<string, unknown>
-    const data = (r as { data?: unknown })?.data as unknown[] | undefined
-    if (!Array.isArray(data)) throw new Error("Unable to load sessions")
+    const raw = r.data
+    let data: unknown[] | null = null
+    if (Array.isArray(raw)) data = raw as unknown[]
+    else if (raw && typeof raw === "object") {
+      const inner = (raw as Record<string, unknown>).data
+      if (Array.isArray(inner)) data = inner as unknown[]
+    }
+    if (data === null) return null
     for (const s of data as ProjectSessionLike[]) {
       const pid = (s as unknown as { projectID?: unknown })?.projectID
       if (pid === projectID) all.push(s)
     }
     if (data.length === 0) break
-    const next = (r as { cursor?: { next?: string } })?.cursor?.next
+    const cur = (raw as Record<string, unknown> | null)?.cursor as
+      | { next?: string }
+      | undefined
+    const fallback = (r as { cursor?: { next?: string } })?.cursor?.next
+    const next =
+      typeof (cur as { next?: unknown } | undefined)?.next === "string"
+        ? (cur as { next: string }).next
+        : fallback
     if (typeof next === "string" && next && next !== cursor) cursor = next
     else break
     if (all.length >= BROWSER_SESSION_LIMIT) break
