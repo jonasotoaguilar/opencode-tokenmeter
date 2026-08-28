@@ -17,12 +17,17 @@ export type BrowserActivity = {
   deactivate: () => void
   /** Idempotent close: deactivate and clear once. */
   close: () => void
+  /** Host onClose: suppressed during content-update replaces. */
+  onClose: () => void
+  /** Run fn with onClose suppressed so replace-driven onClose is a no-op. */
+  withSuppress: (fn: () => void) => void
 }
 
 export function createBrowserActivity(api: BrowserDialogApi): BrowserActivity {
   const myGen = ++browserGen
   activeBrowserGen = myGen
   let closed = false
+  let suppress = false
   const isActive = (): boolean => !closed && activeBrowserGen === myGen
   const deactivate = (): void => {
     if (closed) return
@@ -35,7 +40,19 @@ export function createBrowserActivity(api: BrowserDialogApi): BrowserActivity {
     activeBrowserGen = 0
     api.ui.dialog.clear()
   }
-  return { isActive, deactivate, close }
+  const onClose = (): void => {
+    if (suppress) return
+    close()
+  }
+  const withSuppress = (fn: () => void): void => {
+    suppress = true
+    try {
+      fn()
+    } finally {
+      suppress = false
+    }
+  }
+  return { isActive, deactivate, close, onClose, withSuppress }
 }
 
 /** Test-only: resets generation counters to isolate lifecycles. */
