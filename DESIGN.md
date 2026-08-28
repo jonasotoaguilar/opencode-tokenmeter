@@ -142,7 +142,7 @@ None. No radii, strokes, or frames — everything is a text row in a terminal ce
 
 ## Browser dialogs
 
-The browser is three native host `DialogSelect` panels navigated with ONE `api.ui.dialog.replace` at a time (once-guarded close, no recursive replace, no stack leak):
+The browser is three native host `DialogSelect` panels navigated with ONE `api.ui.dialog.replace` at a time (once-guarded close, no recursive replace, no stack leak; `× Close` and `Escape` close at any stage — loading, provisional, or final — and are idempotent, with late probes blocked after close):
 
 - **Projects** (`TokenMeter: Browse Usage (N)`) — N = number of projects; title is count-only and never duplicates tokens/cost. Rows `label` (truncated 24, `★` pinned current) with description ISO date; sorted current first then recent; categories `Current Project` then `Projects`, eligible projects only (existing `.git` directory, not `/`/HOME/`~/foo`; provisional ≤100 ms, final V2 probes 58→30). While loading/error the panel shows a single `Overview` placeholder; `× Close` last.
 - **Project detail** (`TokenMeter: {projectName} (N)`) — N = root sessions only (pinned current + others, not delegations); name truncated with `truncateToColumns` so title stays one line and never collides with `esc`; overview is the only place for totals/in-out/reason-cache% (3 rows `__total`/`__io`/`__cache` plus period); session rows `label` (★ if current) with ISO date; categories `Current Session` then `Sessions`; `← Back to projects` + `× Close` last.
