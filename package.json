@@ -53,7 +53,7 @@
   },
   "scripts": {
     "build": "bun run scripts/build.ts",
-    "coverage": "bun test --coverage --coverage-reporter=lcov --coverage-reporter=text --path-ignore-patterns=\"test/artifact.test.ts\"",
+    "coverage": "bun test --coverage --coverage-reporter=lcov --coverage-reporter=text --path-ignore-patterns=\"test/artifact.test.ts\" --path-ignore-patterns=\"test/helpers/*\"",
     "prepack": "bun run build",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
     "test": "bun test",
