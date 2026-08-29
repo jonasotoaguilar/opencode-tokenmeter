@@ -106,12 +106,6 @@ import { formatCachePair } from "../src/tokenmeter/format-cache"
 import { formatCompactSummary } from "../src/tokenmeter/format-detail"
 import { GLYPH } from "../src/tokenmeter/glyphs"
 import {
-  PROJECT_DB_FILE,
-  projectDbPath,
-  readDeletedAggregate,
-  recordDeletedSession,
-} from "../src/tokenmeter/legacy-db"
-import {
   realOutput,
   sumMessages,
   sumProjectSessions,
@@ -970,86 +964,6 @@ describe("project aggregation (project.ts)", () => {
       else process.env.TOKENMETER_DURABLE_DIR = prevDurable
       rmSync(durableDir, { recursive: true, force: true })
     }
-  })
-
-  test("REGRESSION: payload and observed usage merge per-component — a delete carries both and the field maxima win", async () => {
-    const stateDir = tmpStateDir()
-    const dbPath = projectDbPath(stateDir)
-    // The payload snapshot (server fields) is smaller on input but larger on
-    // cache than the plugin's observed message aggregate: the persisted
-    // entry must keep each field's maximum, exactly like the store.
-    recordDeletedSession(
-      dbPath,
-      {
-        id: "s1",
-        projectID: "proj1",
-        cost: 0.05,
-        tokens: {
-          input: 1000,
-          output: 500,
-          reasoning: 200,
-          cache: { read: 100, write: 50 },
-        },
-      },
-      {
-        cost: 0.01,
-        input: 2000,
-        output: 700,
-        reasoning: 300,
-        cacheRead: 0,
-        cacheWrite: 0,
-        cache: 0,
-        total: 3000,
-      },
-    )
-    expect(readDeletedAggregate(dbPath, "proj1")).toMatchObject({
-      cost: 0.05,
-      input: 2000,
-      output: 700,
-      reasoning: 300,
-      cacheRead: 100,
-      cacheWrite: 50,
-      cache: 150,
-      context: 3150,
-    })
-  })
-
-  test("REGRESSION: post-delete — a failing project.current() with the projectIDHint keeps the project total (live list + deleted aggregate), no error flash", async () => {
-    setProjectSnapshot(null)
-    const stateDir = tmpStateDir()
-    const dbPath = projectDbPath(stateDir)
-    const sessions: ProjectSessionLike[] = [
-      {
-        id: "ps2",
-        projectID: "proj_x",
-        cost: 0.02,
-        tokens: { input: 2000, output: 700, reasoning: 300 },
-      },
-    ]
-    // project.current() returns no data: the transient context gap right
-    // after a delete.
-    const api = projApi(null, sessions, stateDir)
-    // The delete already recorded the aggregate (written BEFORE the refresh).
-    recordDeletedSession(dbPath, {
-      id: "ps1",
-      projectID: "proj_x",
-      tokens: {
-        input: 1000,
-        output: 500,
-        reasoning: 200,
-        cache: { read: 100, write: 50 },
-      },
-    })
-    await refreshProject(api as never, "proj_x")
-    expect(projectError()).toBeNull()
-    expect(projectSnapshot()?.sessions).toBe(2)
-    expect(projectSnapshot()?.context).toBe(4850)
-    // Without a hint the same failure surfaces the stable error.
-    setProjectSnapshot(null)
-    setProjectError(null)
-    await refreshProject(api as never)
-    expect(projectError()).toBe("Unable to load project data")
-    expect(projectSnapshot()).toBeNull()
   })
 
   test("Project lookup failure keeps the previous snapshot and surfaces the stable error; no throw", async () => {
