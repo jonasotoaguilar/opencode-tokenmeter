@@ -1,8 +1,10 @@
 # ADR-0006: SQLite persistence for the deleted-session project aggregate
 
+> **Superseded by [ADR-0009](0009-durable-per-session-checkpoints.md)** — state-directory `tokenmeter.sqlite` is cache-ephemeral; the durable per-session checkpoint store outside `api.state.path.state` is the current architecture. This ADR is retained for historical rationale only.
+
 ## Status
 
-Accepted
+Superseded by ADR-0009
 
 ## Date
 
