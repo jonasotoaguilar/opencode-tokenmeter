@@ -31,28 +31,29 @@
  *    session.list endpoint returns — listed with `scope: "project"` (no
  *    directory scoping, no roots filtering, children included) and an
  *    explicit bounded limit (the SDK defaults to 100 rows), then
- *    filtered by session.projectID — plus the persisted DELETED-session
- *    aggregate from the plugin-owned SQLite store (tokenmeter.sqlite under
- *    api.state.path.state); a truncated list (length at the cap) fails
- *    closed: prior snapshot preserved, stable error surfaced. A failed
- *    lookup/list keeps the previous snapshot, surfaces the stable "Unable
- *    to load project data" message (projectError) and never touches Session
- *  - post-delete: session.deleted records the delete payload's usage (or
- *    the last known observed usage) into the SQLite aggregate BEFORE the
- *    refresh — atomically, exactly once per session across processes, via a
- *    tombstone-admission transaction — and passes the deleted session's
- *    projectID as a projectIDHint, so a failing project.current() right
- *    after the delete keeps the projectID and the refresh still sums the
- *    live list plus the deleted aggregate (same total, no projectError);
- *    without a hint the stable error still surfaces
- *  - the Project total = authoritative live session.list sum + the
- *    deleted aggregate: live sessions are NEVER persisted or re-added; a
- *    delete with no usage never consumes its tombstone (a later useful
- *    event is still admitted); different projects stay isolated in the same
- *    SQLite file; a duplicate same-session deletion and cascade (child +
- *    parent) events each contribute exactly once; concurrent instances
- *    immediately see each other's committed writes. The obsolete v4 kv
- *    ledger is never read, written or migrated
+ *    filtered by session.projectID — plus durable per-session checkpoints
+ *    outside the host state directory (`checkpoints.sqlite` under OS data
+ *    dir, never `api.state.path.state` nor `api.kv`). A truncated list
+ *    (length at the cap) fails closed: prior snapshot preserved, stable
+ *    error surfaced. A failed lookup/list keeps the previous snapshot,
+ *    surfaces the stable "Unable to load project data" message (projectError)
+ *    and never touches Session
+ *  - post-delete: session.deleted UPSERTs the delete payload's usage (payload
+ *    + last known observed usage merged monotonically, cost reported-wins)
+ *    into the same durable checkpoint row BEFORE the refresh — monotonic
+ *    WAL `MAX()` + cost `CASE` so concurrent/duplicate deliveries keep
+ *    high-water and count once; a delete with no usage is no-op. Passes the
+ *    deleted session's projectID as a projectIDHint, so a failing
+ *    project.current() right after the delete keeps the projectID and the
+ *    refresh still unions the live list plus checkpoints (same total, no
+ *    projectError); without a hint the stable error still surfaces
+ *  - the Project total = authoritative live session.list **union** checkpoints
+ *    by session ID (live + checkpoint merge monotonically and count once,
+ *    checkpoint-only survives, duplicate live rows once, alias recovery for
+ *    regenerated projectID, cache/context invariants); concurrent instances
+ *    immediately see each other's committed writes via WAL. The obsolete
+ *    `tokenmeter.sqlite` tombstone/aggregate and v4 kv ledger are never
+ *    read/written except for one-time migration
  *  - a single bounded polling timer (~2 s, PROJECT_POLL_DELAY) refreshes
  *    Project on top of the event-driven fast path so a sibling OpenCode
  *    process working in the same project appears in the sidebar; ticks
@@ -98,6 +99,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { checkpointDeletedSession } from "../src/tokenmeter/durable/deleted"
+import { durableDbPath } from "../src/tokenmeter/durable/paths"
 import { formatAgentLine, formatMetricLines } from "../src/tokenmeter/format"
 import { formatCachePair } from "../src/tokenmeter/format-cache"
 import { formatCompactSummary } from "../src/tokenmeter/format-detail"
@@ -872,196 +875,101 @@ describe("project aggregation (project.ts)", () => {
     expect(projectSnapshot()?.context).toBe(0)
   })
 
-  test("REGRESSION: SQLite store — separate connections cannot overwrite projects, and a duplicate same-session deletion increments exactly once", async () => {
-    const stateDir = tmpStateDir()
-    const dbPath = projectDbPath(stateDir)
-    expect(dbPath).toBe(join(stateDir, PROJECT_DB_FILE))
-    const s1 = {
-      id: "s1",
-      projectID: "proj1",
-      cost: 0.01,
-      tokens: {
-        input: 1000,
-        output: 500,
-        reasoning: 200,
-        cache: { read: 100, write: 50 },
-      },
-    }
-    const s2 = {
-      id: "s2",
-      projectID: "proj2",
-      cost: 0.02,
-      tokens: { input: 2000, output: 700, reasoning: 300 },
-    }
-    // Each call opens its OWN connection: independent instances, one file.
-    recordDeletedSession(dbPath, s1)
-    recordDeletedSession(dbPath, s2)
-    // Different projects stay isolated: neither write overwrote the other.
-    expect(readDeletedAggregate(dbPath, "proj1")).toMatchObject({
-      cost: 0.01,
-      input: 1000,
-      output: 500,
-      reasoning: 200,
-      cacheRead: 100,
-      cacheWrite: 50,
-      cache: 150,
-      context: 1850,
-    })
-    expect(readDeletedAggregate(dbPath, "proj2")).toMatchObject({
-      cost: 0.02,
-      input: 2000,
-      output: 700,
-      reasoning: 300,
-      cache: 0,
-      context: 3000,
-    })
-    // Duplicate deliveries of the same deletion: admitted exactly once.
-    recordDeletedSession(dbPath, s1)
-    recordDeletedSession(dbPath, s1)
-    expect(readDeletedAggregate(dbPath, "proj1")?.input).toBe(1000)
-    expect(readDeletedAggregate(dbPath, "proj1")?.context).toBe(1850)
-  })
-
-  test("REGRESSION: one instance immediately sees another instance's committed delete — same-project refresh reads updated client totals plus the shared deleted aggregate", async () => {
+  test("REGRESSION: one instance immediately sees another instance's committed delete — same-project refresh reads updated client totals plus the shared durable checkpoint", async () => {
     setProjectSnapshot(null)
     const stateDir = tmpStateDir()
-    const dbPath = projectDbPath(stateDir)
-    const s2: ProjectSessionLike = {
-      id: "s2",
-      projectID: "proj1",
-      cost: 0.02,
-      tokens: { input: 2000, output: 700, reasoning: 300 },
+    const durableDir = mkdtempSync(join(tmpdir(), "tokenmeter-durable-"))
+    const prevDurable = process.env.TOKENMETER_DURABLE_DIR
+    process.env.TOKENMETER_DURABLE_DIR = durableDir
+    try {
+      const durablePath = durableDbPath()!
+      const s2: ProjectSessionLike = {
+        id: "s2",
+        projectID: "proj1",
+        cost: 0.02,
+        tokens: { input: 2000, output: 700, reasoning: 300 },
+      }
+      const api = projApi({ id: "proj1" }, [s2], stateDir)
+      await refreshProject(api as never)
+      expect(projectSnapshot()?.sessions).toBe(1)
+      expect(projectSnapshot()?.context).toBe(3000)
+      // A DIFFERENT process (its own connection) checkpoints s1.
+      checkpointDeletedSession(
+        durablePath,
+        {
+          id: "s1",
+          projectID: "proj1",
+          cost: 0.01,
+          tokens: {
+            input: 1000,
+            output: 500,
+            reasoning: 200,
+            cache: { read: 100, write: 50 },
+          },
+        },
+        "/proj/dir",
+      )
+      // The refresh reads the shared durable checkpoint immediately via union.
+      await refreshProject(api as never)
+      expect(projectSnapshot()?.sessions).toBe(2)
+      expect(projectSnapshot()?.context).toBe(4850)
+      expect(projectSnapshot()?.input).toBe(3000)
+      expect(projectSnapshot()?.cache).toBe(150)
+      expect(projectError()).toBeNull()
+    } finally {
+      if (prevDurable === undefined)
+        delete (process.env as Record<string, unknown>).TOKENMETER_DURABLE_DIR
+      else process.env.TOKENMETER_DURABLE_DIR = prevDurable
+      rmSync(durableDir, { recursive: true, force: true })
     }
-    const api = projApi({ id: "proj1" }, [s2], stateDir)
-    await refreshProject(api as never)
-    expect(projectSnapshot()?.sessions).toBe(1)
-    expect(projectSnapshot()?.context).toBe(3000)
-    // A DIFFERENT process (its own connection) records s1's deletion.
-    recordDeletedSession(dbPath, {
-      id: "s1",
-      projectID: "proj1",
-      cost: 0.01,
-      tokens: {
-        input: 1000,
-        output: 500,
-        reasoning: 200,
-        cache: { read: 100, write: 50 },
-      },
-    })
-    // The refresh reads the shared committed aggregate immediately.
-    await refreshProject(api as never)
-    expect(projectSnapshot()?.sessions).toBe(2)
-    expect(projectSnapshot()?.context).toBe(4850)
-    expect(projectSnapshot()?.input).toBe(3000)
-    expect(projectSnapshot()?.cache).toBe(150)
-    expect(projectError()).toBeNull()
   })
 
-  test("REGRESSION: recursive deletion events — child and parent each contribute exactly once; duplicate deliveries do not inflate", async () => {
+  test("REGRESSION: post-delete — a failing project.current() with the projectIDHint keeps the project total (live list + durable checkpoint), no error flash", async () => {
+    setProjectSnapshot(null)
     const stateDir = tmpStateDir()
-    const dbPath = projectDbPath(stateDir)
-    // OpenCode deletes children first, one session.deleted event per session.
-    const child = {
-      id: "child",
-      projectID: "proj1",
-      parentID: "parent",
-      cost: 0.01,
-      tokens: {
-        input: 500,
-        output: 100,
-        reasoning: 50,
-        cache: { read: 25, write: 25 },
-      },
+    const durableDir = mkdtempSync(join(tmpdir(), "tokenmeter-durable-"))
+    const prevDurable = process.env.TOKENMETER_DURABLE_DIR
+    process.env.TOKENMETER_DURABLE_DIR = durableDir
+    try {
+      const durablePath = durableDbPath()!
+      const sessions: ProjectSessionLike[] = [
+        {
+          id: "ps2",
+          projectID: "proj_x",
+          cost: 0.02,
+          tokens: { input: 2000, output: 700, reasoning: 300 },
+        },
+      ]
+      const api = projApi(null, sessions, stateDir)
+      checkpointDeletedSession(
+        durablePath,
+        {
+          id: "ps1",
+          projectID: "proj_x",
+          tokens: {
+            input: 1000,
+            output: 500,
+            reasoning: 200,
+            cache: { read: 100, write: 50 },
+          },
+        },
+        "/proj/dir",
+      )
+      await refreshProject(api as never, "proj_x")
+      expect(projectError()).toBeNull()
+      expect(projectSnapshot()?.sessions).toBe(2)
+      expect(projectSnapshot()?.context).toBe(4850)
+      setProjectSnapshot(null)
+      setProjectError(null)
+      await refreshProject(api as never)
+      expect(projectError()).toBe("Unable to load project data")
+      expect(projectSnapshot()).toBeNull()
+    } finally {
+      if (prevDurable === undefined)
+        delete (process.env as Record<string, unknown>).TOKENMETER_DURABLE_DIR
+      else process.env.TOKENMETER_DURABLE_DIR = prevDurable
+      rmSync(durableDir, { recursive: true, force: true })
     }
-    const parent = {
-      id: "parent",
-      projectID: "proj1",
-      cost: 0.02,
-      tokens: { input: 2000, output: 700, reasoning: 300 },
-    }
-    recordDeletedSession(dbPath, child)
-    recordDeletedSession(dbPath, parent)
-    const once = readDeletedAggregate(dbPath, "proj1")
-    expect(once).toMatchObject({
-      input: 2500,
-      output: 800,
-      reasoning: 350,
-      cacheRead: 25,
-      cacheWrite: 25,
-      cache: 50,
-      context: 3700,
-    })
-    // Duplicate deliveries of both events: nothing inflates.
-    recordDeletedSession(dbPath, child)
-    recordDeletedSession(dbPath, parent)
-    recordDeletedSession(dbPath, child)
-    expect(readDeletedAggregate(dbPath, "proj1")).toEqual(once)
-  })
-
-  test("REGRESSION: a delete with no usage never consumes the tombstone — a later event carrying usage is still admitted", async () => {
-    const stateDir = tmpStateDir()
-    const dbPath = projectDbPath(stateDir)
-    // Delete payload AND observed usage both empty: nothing persisted and,
-    // crucially, NO tombstone — the session stays admissible.
-    recordDeletedSession(dbPath, { id: "ghost", projectID: "proj1" }, null)
-    expect(readDeletedAggregate(dbPath, "proj1")).toBeNull()
-    // A later event for the same session WITH usage is admitted exactly once.
-    recordDeletedSession(dbPath, {
-      id: "ghost",
-      projectID: "proj1",
-      cost: 0.01,
-      tokens: { input: 1000, output: 500, reasoning: 200 },
-    })
-    recordDeletedSession(dbPath, {
-      id: "ghost",
-      projectID: "proj1",
-      cost: 0.01,
-      tokens: { input: 1000, output: 500, reasoning: 200 },
-    })
-    expect(readDeletedAggregate(dbPath, "proj1")?.context).toBe(1700)
-    expect(readDeletedAggregate(dbPath, "proj1")?.input).toBe(1000)
-  })
-
-  test("REGRESSION: unusable database paths are fail-contained — record/read never throw and read as no deleted usage", async () => {
-    const stateDir = tmpStateDir()
-    const s1 = {
-      id: "s1",
-      projectID: "proj1",
-      cost: 0.01,
-      tokens: { input: 1000, output: 500, reasoning: 200 },
-    }
-    // Missing state directory: projectDbPath resolves to null — a no-op,
-    // never a throw, out of the session.deleted event handler.
-    expect(() => recordDeletedSession(null, s1)).not.toThrow()
-    expect(readDeletedAggregate(null, "proj1")).toBeNull()
-    // Parent directory missing: the connection cannot even open.
-    const missingParent = join(stateDir, "missing", PROJECT_DB_FILE)
-    expect(() => recordDeletedSession(missingParent, s1)).not.toThrow()
-    expect(readDeletedAggregate(missingParent, "proj1")).toBeNull()
-    // Corrupt file at a valid path: open succeeds but the schema/PRAGMA
-    // phase fails — same fail-contained no-op.
-    const corrupt = join(stateDir, "corrupt.sqlite")
-    writeFileSync(corrupt, "not a database")
-    expect(() => recordDeletedSession(corrupt, s1)).not.toThrow()
-    expect(readDeletedAggregate(corrupt, "proj1")).toBeNull()
-  })
-
-  test("REGRESSION: a usable state directory still persists the deleted aggregate through the same functions", async () => {
-    const stateDir = tmpStateDir()
-    const dbPath = projectDbPath(stateDir)
-    recordDeletedSession(dbPath, {
-      id: "s1",
-      projectID: "proj1",
-      cost: 0.01,
-      tokens: { input: 1000, output: 500, reasoning: 200 },
-    })
-    expect(readDeletedAggregate(dbPath, "proj1")).toMatchObject({
-      cost: 0.01,
-      input: 1000,
-      output: 500,
-      reasoning: 200,
-      context: 1700,
-    })
   })
 
   test("REGRESSION: payload and observed usage merge per-component — a delete carries both and the field maxima win", async () => {
