@@ -6,12 +6,6 @@ import {
 import { durableDbPath } from "../src/tokenmeter/durable/paths"
 import { reconcileProjectUsage } from "../src/tokenmeter/durable/reconcile"
 import {
-  projectDbPath,
-  readDeletedAggregate,
-  readDeletedSessionIDs,
-  recordDeletedSession,
-} from "../src/tokenmeter/legacy-db"
-import {
   resolveCost,
   resolveEntry,
   sumProjectSessions,
@@ -820,7 +814,7 @@ describe("Unit 4 deleted monetary resolution", () => {
       resolveEntry(null, null, { providerID: "openai", id: "gpt-4o" } as never),
     ).toBeNull()
   })
-  test("repeated/lifecycle no double count", async () => {
+  test("repeated/lifecycle no double count via durable union", async () => {
     const { mkdtempSync, rmSync } = await import("node:fs")
     const { tmpdir } = await import("node:os")
     const { join } = await import("node:path")
@@ -830,42 +824,103 @@ describe("Unit 4 deleted monetary resolution", () => {
       cache: { read: 0, write: 0 },
     }
     setPricing(new Map([["openai:gpt-4o", price]]))
-    const dir = mkdtempSync(join(tmpdir(), "tokenmeter-ut4-"))
-    const dbPath = projectDbPath(dir)
-    const sess = (id: string, cost: number, input: number, output: number) =>
-      ({
-        id,
-        projectID: "projA",
-        cost,
-        tokens: { input, output },
-        model: { id: "gpt-4o", providerID: "openai" },
-      }) as never
-    recordDeletedSession(dbPath, sess("sessA", 0, 1000, 500), null)
-    expect(readDeletedAggregate(dbPath, "projA")?.cost).toBeCloseTo(0.0125)
-    recordDeletedSession(dbPath, sess("sessA", 0, 1000, 500), null)
-    expect(readDeletedAggregate(dbPath, "projA")?.cost).toBeCloseTo(0.0125)
-    recordDeletedSession(dbPath, sess("sessB", 0.03, 2000, 700), null)
-    expect(readDeletedAggregate(dbPath, "projA")?.cost).toBeCloseTo(0.0425)
-    expect(() => recordDeletedSession(null, null, null)).not.toThrow()
-    const { readDeletedSessionIDs: rIds } = await import(
-      "../src/tokenmeter/legacy-db"
-    )
-    const { sumProjectSessions: sSum, combineProjectUsage: cUse } =
-      await import("../src/tokenmeter/math")
-    const live = [
-      {
-        id: "live1",
-        projectID: "projA",
-        cost: 0,
-        tokens: { input: 1000, output: 500 },
-        model: { id: "gpt-4o", providerID: "openai" },
-      },
-    ]
-    const lu = sSum("projA", live as never, rIds(dbPath, "projA"))
-    expect(lu.cost).toBeCloseTo(0.0125)
-    expect(cUse(lu, readDeletedAggregate(dbPath, "projA")).cost).toBeCloseTo(
-      0.055,
-    )
-    rmSync(dir, { recursive: true, force: true })
+    const durableDir = mkdtempSync(join(tmpdir(), "tokenmeter-ut4-"))
+    const saved = process.env.TOKENMETER_DURABLE_DIR
+    process.env.TOKENMETER_DURABLE_DIR = durableDir
+    const dbPath = durableDbPath()!
+    const stateDir = mkdtempSync(join(tmpdir(), "tokenmeter-ut4-state-"))
+    try {
+      const sess = (id: string, cost: number, input: number, output: number) =>
+        ({
+          id,
+          projectID: "projA",
+          cost,
+          tokens: { input, output },
+          model: { id: "gpt-4o", providerID: "openai" },
+        }) as never
+      const changed1 = checkpointActiveProject(dbPath, "projA", "/proj/dir", [
+        sess("sessA", 0, 1000, 500),
+      ])
+      expect(changed1).toBe(1)
+      const cps1 = readCheckpoints(dbPath, "projA", "/proj/dir")
+      const usage1 = reconcileProjectUsage("projA", [], cps1, "/proj/dir")
+      expect(usage1.cost).toBeCloseTo(0.0125)
+      const changed2 = checkpointActiveProject(dbPath, "projA", "/proj/dir", [
+        sess("sessA", 0, 1000, 500),
+      ])
+      expect(changed2).toBe(0)
+      const cps2 = readCheckpoints(dbPath, "projA", "/proj/dir")
+      const usage2 = reconcileProjectUsage("projA", [], cps2, "/proj/dir")
+      expect(usage2.cost).toBeCloseTo(0.0125)
+      checkpointActiveProject(dbPath, "projA", "/proj/dir", [
+        sess("sessB", 0.03, 2000, 700),
+      ])
+      const cps3 = readCheckpoints(dbPath, "projA", "/proj/dir")
+      const usage3 = reconcileProjectUsage("projA", [], cps3, "/proj/dir")
+      expect(usage3.cost).toBeCloseTo(0.0425)
+      expect(() =>
+        checkpointActiveProject(null, "projA", "/proj/dir", [
+          sess("sessA", 0, 1000, 500),
+        ]),
+      ).not.toThrow()
+      const live = [
+        {
+          id: "live1",
+          projectID: "projA",
+          cost: 0,
+          tokens: { input: 1000, output: 500 },
+          model: { id: "gpt-4o", providerID: "openai" },
+        },
+      ]
+      const cpsAll = readCheckpoints(dbPath, "projA", "/proj/dir")
+      const union = reconcileProjectUsage(
+        "projA",
+        live as never,
+        cpsAll,
+        "/proj/dir",
+      )
+      expect(union.cost).toBeCloseTo(0.055)
+      // cache invariant holds after every merge
+      expect(union.cache).toBe(union.cacheRead + union.cacheWrite)
+      const checkRow = cpsAll.get("sessA")
+      if (checkRow)
+        expect(checkRow.cache).toBe(checkRow.cacheRead + checkRow.cacheWrite)
+      // project refresh path preserves union
+      const api = {
+        state: { path: { directory: "/proj/dir", state: stateDir } },
+        client: {
+          project: {
+            current: async () => ({
+              data: { id: "projA", worktree: "/proj/dir" },
+            }),
+          },
+          session: { list: async () => ({ data: live }) },
+          v2: {
+            model: {
+              list: async () => ({
+                data: [
+                  {
+                    providerID: "openai",
+                    id: "gpt-4o",
+                    cost: [
+                      { input: 5, output: 15, cache: { read: 0, write: 0 } },
+                    ],
+                  },
+                ],
+              }),
+            },
+          },
+        },
+      }
+      await refreshProject(api as never)
+      const snap = projectSnapshot()
+      expect(snap?.cost).toBeCloseTo(0.055)
+    } finally {
+      if (saved === undefined)
+        delete (process.env as Record<string, unknown>).TOKENMETER_DURABLE_DIR
+      else process.env.TOKENMETER_DURABLE_DIR = saved
+      rmSync(durableDir, { recursive: true, force: true })
+      rmSync(stateDir, { recursive: true, force: true })
+    }
   })
 })
