@@ -103,7 +103,7 @@ import {
   projectDbPath,
   readDeletedAggregate,
   recordDeletedSession,
-} from "../src/tokenmeter/db"
+} from "../src/tokenmeter/legacy-db"
 import { formatAgentLine, formatMetricLines } from "../src/tokenmeter/format"
 import { formatCachePair } from "../src/tokenmeter/format-cache"
 import { formatCompactSummary } from "../src/tokenmeter/format-detail"
