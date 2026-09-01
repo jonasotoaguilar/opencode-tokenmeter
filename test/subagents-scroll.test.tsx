@@ -152,6 +152,9 @@ async function mount(state: MutableApi, sV1?: Record<string, unknown>) {
   setProjectError(null)
   disposeProjectRefresh()
   const dir = mkdtempSync(join(tmpdir(), "tokenmeter-scroll-"))
+  const durableDir = mkdtempSync(join(tmpdir(), "tokenmeter-scroll-durable-"))
+  const prevDurable = process.env.TOKENMETER_DURABLE_DIR
+  process.env.TOKENMETER_DURABLE_DIR = durableDir
   const api = {
     kv: {
       ready: true,
@@ -248,6 +251,10 @@ async function mount(state: MutableApi, sV1?: Record<string, unknown>) {
       for (const fn of disposes) fn()
       disposeProjectRefresh()
       rmSync(dir, { recursive: true, force: true })
+      rmSync(durableDir, { recursive: true, force: true })
+      if (prevDurable === undefined)
+        delete (process.env as Record<string, unknown>).TOKENMETER_DURABLE_DIR
+      else process.env.TOKENMETER_DURABLE_DIR = prevDurable
     },
   }
 }

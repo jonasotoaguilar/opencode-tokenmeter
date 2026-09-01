@@ -2,11 +2,8 @@
 /**
  * TokenMeter TUI entry — wires events → store → reconcile → panel, loads
  * settings/pricing/shortcut, registers sidebar_content + session_prompt_right,
- * and drives Project via live list + SQLite deleted aggregate with ~30 s
- * cross-process polling. Combines: OpenAI pricing fallback (host v2.model.list
- * + models.dev), milestone toasts via subscribeProjectSnapshot (not
- * Solid createEffect, which is a no-op on Bun/Node server solid-js), sidebar
- * visibility gating, and usage browser palette.
+ * and drives Project via durable per-session checkpoints (outside the host
+ * state directory) with ~30 s cross-process polling.
  */
 /** @jsxImportSource @opentui/solid */
 import type { TuiPlugin } from "@opencode-ai/plugin/tui"
@@ -17,7 +14,8 @@ import {
   BROWSER_COMMAND_TITLE,
   showBrowserDialog,
 } from "./tokenmeter/browser/dialog"
-import { projectDbPath, recordDeletedSession } from "./tokenmeter/db"
+import { checkpointDeletedSession } from "./tokenmeter/durable/deleted"
+import { durableDbPath, normalizeAlias } from "./tokenmeter/durable/paths"
 import { handleProjectMilestone } from "./tokenmeter/milestone"
 import { UsagePanel } from "./tokenmeter/panel"
 import { SessionPromptRight } from "./tokenmeter/panel/footer"
@@ -135,11 +133,14 @@ const tui: TuiPlugin = async (api) => {
       api.event.on("session.deleted", (e) => {
         const info = e.properties.info
         const observed = observedSessionUsage(info?.id)
-        recordDeletedSession(
-          projectDbPath(api.state.path.state),
-          info,
-          observed,
-        )
+        try {
+          const durablePath = durableDbPath()
+          const alias = normalizeAlias(
+            (info as unknown as { directory?: string })?.directory ??
+              api.state.path.directory,
+          )
+          checkpointDeletedSession(durablePath, info, alias, observed)
+        } catch {}
         forgetSession(info?.id)
         refreshAll(RECONCILE_DELAY, info?.projectID)
       }),
