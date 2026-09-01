@@ -1,3 +1,4 @@
+// biome-ignore-all lint/style/noNonNullAssertion: durable harness - absolute path guarantee
 /**
  * Alias normalization — pure Windows and ensureDirForDb.
  * Split from durable-paths for SHOULD <=200.

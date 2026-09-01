@@ -32,33 +32,25 @@
   },
   "overrides": [
     {
-      "includes": [
-        "test/openai-cost-remote.test.ts"
-      ],
+      "includes": ["test/openai-cost-remote.test.ts"],
       "formatter": {
         "enabled": false
       }
     },
     {
-      "includes": [
-        "test/browser-session-source.test.ts"
-      ],
+      "includes": ["test/browser-session-source.test.ts"],
       "formatter": {
         "enabled": false
       }
     },
     {
-      "includes": [
-        "test/browser-project-detail.test.ts"
-      ],
+      "includes": ["test/browser-project-detail.test.ts"],
       "formatter": {
         "enabled": false
       }
     },
     {
-      "includes": [
-        "test/durable-paths.test.ts"
-      ],
+      "includes": ["test/durable-paths.test.ts"],
       "formatter": {
         "enabled": false
       }

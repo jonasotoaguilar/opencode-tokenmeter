@@ -1,3 +1,4 @@
+// biome-ignore-all lint/style/noNonNullAssertion: durable harness - absolute path guarantee
 /**
  * Durable path resolution — real filesystem + pure Windows.
  * Verifies OS/XDG roots, absolute-only overrides, case folding,
@@ -85,25 +86,63 @@ describe("durable paths — OS roots and overrides", () => {
       durableDbPath({ dataDir: "/", platform: "linux" } as never),
     ).toBeNull()
   })
-
 })
 
 describe("durable paths — injected OS/env fallbacks (coverage)", () => {
   test("win32 LOCALAPPDATA fallback and homedir/null", () => {
-    expect(resolveDurableDir({ env: { LOCALAPPDATA: "C:\\Users\\u\\AppData\\Local" }, platform: "win32", homedir: "C:\\Users\\u" })).toBe("C:\\Users\\u\\AppData\\Local\\opencode-tokenmeter")
-    expect(resolveDurableDir({ env: {}, platform: "win32", homedir: "C:\\Users\\u" })).toBe("C:\\Users\\u\\AppData\\Roaming\\opencode-tokenmeter")
-    expect(resolveDurableDir({ env: {}, platform: "win32", homedir: "" })).toBeNull()
+    expect(
+      resolveDurableDir({
+        env: { LOCALAPPDATA: "C:\\Users\\u\\AppData\\Local" },
+        platform: "win32",
+        homedir: "C:\\Users\\u",
+      }),
+    ).toBe("C:\\Users\\u\\AppData\\Local\\opencode-tokenmeter")
+    expect(
+      resolveDurableDir({
+        env: {},
+        platform: "win32",
+        homedir: "C:\\Users\\u",
+      }),
+    ).toBe("C:\\Users\\u\\AppData\\Roaming\\opencode-tokenmeter")
+    expect(
+      resolveDurableDir({ env: {}, platform: "win32", homedir: "" }),
+    ).toBeNull()
   })
   test("darwin HOME fallback and null", () => {
-    expect(resolveDurableDir({ env: {}, platform: "darwin", homedir: "/Users/u" })).toBe("/Users/u/Library/Application Support/opencode-tokenmeter")
-    expect(resolveDurableDir({ env: { HOME: "/Users/u2" }, platform: "darwin", homedir: "" })).toBe("/Users/u2/Library/Application Support/opencode-tokenmeter")
-    expect(resolveDurableDir({ env: {}, platform: "darwin", homedir: "" })).toBeNull()
+    expect(
+      resolveDurableDir({ env: {}, platform: "darwin", homedir: "/Users/u" }),
+    ).toBe("/Users/u/Library/Application Support/opencode-tokenmeter")
+    expect(
+      resolveDurableDir({
+        env: { HOME: "/Users/u2" },
+        platform: "darwin",
+        homedir: "",
+      }),
+    ).toBe("/Users/u2/Library/Application Support/opencode-tokenmeter")
+    expect(
+      resolveDurableDir({ env: {}, platform: "darwin", homedir: "" }),
+    ).toBeNull()
   })
   test("linux XDG/HOME fallbacks and null", () => {
-    expect(resolveDurableDir({ env: { XDG_DATA_HOME: "/tmp/xdg2" }, platform: "linux", homedir: "/home/u" })).toBe("/tmp/xdg2/opencode-tokenmeter")
-    expect(resolveDurableDir({ env: {}, platform: "linux", homedir: "/home/u" })).toBe("/home/u/.local/share/opencode-tokenmeter")
-    expect(resolveDurableDir({ env: { HOME: "/home/u2" }, platform: "linux", homedir: "" })).toBe("/home/u2/.local/share/opencode-tokenmeter")
-    expect(resolveDurableDir({ env: {}, platform: "linux", homedir: "" })).toBeNull()
+    expect(
+      resolveDurableDir({
+        env: { XDG_DATA_HOME: "/tmp/xdg2" },
+        platform: "linux",
+        homedir: "/home/u",
+      }),
+    ).toBe("/tmp/xdg2/opencode-tokenmeter")
+    expect(
+      resolveDurableDir({ env: {}, platform: "linux", homedir: "/home/u" }),
+    ).toBe("/home/u/.local/share/opencode-tokenmeter")
+    expect(
+      resolveDurableDir({
+        env: { HOME: "/home/u2" },
+        platform: "linux",
+        homedir: "",
+      }),
+    ).toBe("/home/u2/.local/share/opencode-tokenmeter")
+    expect(
+      resolveDurableDir({ env: {}, platform: "linux", homedir: "" }),
+    ).toBeNull()
   })
 })
-
