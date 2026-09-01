@@ -930,7 +930,7 @@ describe("Unit 4 deleted monetary resolution", () => {
 })
 
 describe("math — coverage gates (high-water and exported contracts)", () => {
-  test("maxComponents keeps per-field maximum", () => {
+  test("maxComponents keeps per-field maximum so high-water never regresses", () => {
     const a = {
       cost: 1,
       input: 10,
@@ -955,6 +955,7 @@ describe("math — coverage gates (high-water and exported contracts)", () => {
       cacheRead: 5,
       cacheWrite: 4,
     })
+    // high-water: smaller later observation cannot lower stored components
     expect(maxComponents(b, a)).toEqual({
       cost: 2,
       input: 10,
@@ -963,10 +964,24 @@ describe("math — coverage gates (high-water and exported contracts)", () => {
       cacheRead: 5,
       cacheWrite: 4,
     })
+    expect(maxComponents(a, a)).toEqual(a)
   })
+
   test("entryOfSession returns null when no usage, otherwise payload spend", () => {
     expect(entryOfSession(undefined)).toBeNull()
     expect(entryOfSession(null)).toBeNull()
+    expect(entryOfSession({ id: "s1", projectID: "p1" } as never)).toBeNull()
+    expect(
+      entryOfSession({ id: "s1", projectID: "p1", tokens: {} } as never),
+    ).toBeNull()
+    expect(
+      entryOfSession({
+        id: "s1",
+        projectID: "p1",
+        cost: 0,
+        tokens: { input: 0, output: 0 },
+      } as never),
+    ).toBeNull()
     const e = entryOfSession({
       id: "s1",
       projectID: "p1",
@@ -980,11 +995,27 @@ describe("math — coverage gates (high-water and exported contracts)", () => {
     } as never)!
     expect(e.cost).toBeCloseTo(0.02)
     expect(e.input).toBe(10)
+    expect(e.output).toBe(5)
+    expect(e.reasoning).toBe(1)
+    expect(e.cacheRead).toBe(2)
+    expect(e.cacheWrite).toBe(3)
     expect(e.cache).toBe(5)
     expect(e.context).toBe(21)
+    // safe-zero for non-finite
+    const nonFinite = entryOfSession({
+      id: "s1",
+      projectID: "p1",
+      cost: Number.NaN,
+      tokens: { input: Number.POSITIVE_INFINITY, output: 5 },
+    } as never)!
+    expect(nonFinite.input).toBe(0)
+    expect(nonFinite.output).toBe(5)
+    expect(nonFinite.cost).toBe(0)
   })
-  test("entryOfSessionUsage maps SessionUsage", () => {
+
+  test("entryOfSessionUsage maps SessionUsage to ProjectAggregateEntry", () => {
     expect(entryOfSessionUsage(null)).toBeNull()
+    expect(entryOfSessionUsage(undefined)).toBeNull()
     const usage = {
       cost: 0.05,
       input: 100,
@@ -998,7 +1029,10 @@ describe("math — coverage gates (high-water and exported contracts)", () => {
     const e = entryOfSessionUsage(usage)!
     expect(e.cost).toBe(0.05)
     expect(e.input).toBe(100)
+    expect(e.cache).toBe(5)
+    expect(e.context).toBe(130)
   })
+
   test("combineProjectUsage adds deleted as one session only when it carries usage", () => {
     const live = {
       id: "projA",
@@ -1013,6 +1047,18 @@ describe("math — coverage gates (high-water and exported contracts)", () => {
       cache: 40,
     } as never
     expect(combineProjectUsage(live, null)).toEqual(live)
+    expect(combineProjectUsage(live, undefined)).toEqual(live)
+    const empty = {
+      cost: 0,
+      input: 0,
+      output: 0,
+      reasoning: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cache: 0,
+      context: 0,
+    } as never
+    expect(combineProjectUsage(live, empty)).toEqual(live)
     const deleted = {
       cost: 0.01,
       input: 100,
@@ -1026,8 +1072,12 @@ describe("math — coverage gates (high-water and exported contracts)", () => {
     const combined = combineProjectUsage(live, deleted)
     expect(combined.sessions).toBe(3)
     expect(combined.cost).toBeCloseTo(0.05)
+    expect(combined.input).toBe(300)
+    expect(combined.context).toBe(438)
+    expect(combined.cache).toBe(43)
   })
-  test("resolveCost and resolveEntry never throw on malformed tokens", () => {
+
+  test("resolveCost never throws and returns reported on malformed tokens (covers catch)", () => {
     expect(() =>
       resolveCost({
         cost: 0,
@@ -1044,6 +1094,25 @@ describe("math — coverage gates (high-water and exported contracts)", () => {
         tokens: null as never,
       }).source,
     ).toBe("reported")
+    expect(
+      resolveCost({
+        cost: 0,
+        providerID: "openai",
+        modelID: "gpt-4o",
+        tokens: null as never,
+      }).cost,
+    ).toBe(0)
+    expect(() =>
+      resolveCost({
+        cost: 0,
+        providerID: "openai",
+        modelID: "gpt-4o",
+        tokens: undefined as never,
+      }),
+    ).not.toThrow()
+  })
+
+  test("resolveEntry never throws; poisoned payload returns null (covers catch)", () => {
     expect(() => resolveEntry(null, null, null as never)).not.toThrow()
     expect(resolveEntry(null, null, null as never)).toBeNull()
     const poisoned = new Proxy({} as never, {
@@ -1053,6 +1122,19 @@ describe("math — coverage gates (high-water and exported contracts)", () => {
     })
     expect(() =>
       resolveEntry(poisoned as never, null as never, null as never),
+    ).not.toThrow()
+    expect(
+      resolveEntry(poisoned as never, null as never, null as never),
+    ).toBeNull()
+    // malformed observed with throwing getter also safe
+    const poisonedObs = new Proxy({} as never, {
+      get(_t, prop) {
+        if (prop === "input") throw new Error("poison input")
+        return 0
+      },
+    })
+    expect(() =>
+      resolveEntry(null as never, poisonedObs as never, null as never),
     ).not.toThrow()
   })
 })
