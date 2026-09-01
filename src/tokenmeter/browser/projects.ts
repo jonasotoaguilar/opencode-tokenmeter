@@ -1,15 +1,13 @@
 /**
  * Browser projects aggregation.
  * Loads project.list + current pin and enriches each project via
- * V2-only session fetch plus the deleted SQLite aggregate.
+ * V2-only session fetch plus durable per-session checkpoints (union, not
+ * live total + deleted aggregate) so overlap is never double-counted.
  */
 
-import {
-  projectDbPath,
-  readDeletedAggregate,
-  readDeletedSessionIDs,
-} from "../db"
-import { combineProjectUsage, sumProjectSessions } from "../math"
+import { readCheckpoints } from "../durable/checkpoints"
+import { durableDbPath, normalizeAlias } from "../durable/paths"
+import { reconcileProjectUsage } from "../durable/reconcile"
 import { loadPricing } from "../pricing"
 import type { ProjectSessionLike } from "../types"
 import { withConcurrency } from "./concurrency"
@@ -48,10 +46,9 @@ export async function loadBrowserProjects(
       ) as Promise<unknown>,
       FETCH_TIMEOUT_MS,
     )
-  } catch {
-    // pricing warmup failure is non-fatal
-  }
+  } catch {}
   const rows: BrowserProject[] = []
+  let hadLoadError = false
   await withConcurrency(projects, BROWSER_CONCURRENCY, async (proj) => {
     const pid = proj?.id
     if (typeof pid !== "string" || !pid) return
@@ -63,14 +60,23 @@ export async function loadBrowserProjects(
       typeof proj.time?.created === "number" ? proj.time.created : 0
     const updated =
       typeof proj.time?.updated === "number" ? proj.time.updated : created
-    let sessions: ProjectSessionLike[] = []
+    let sessions: ProjectSessionLike[] | null = null
     try {
       sessions = await withTimeout(
-        fetchSessionsForBrowse(api, pid) as Promise<ProjectSessionLike[]>,
+        fetchSessionsForBrowse(api, pid) as Promise<
+          ProjectSessionLike[] | null
+        >,
         FETCH_TIMEOUT_MS * 3,
       )
     } catch {
-      sessions = []
+      sessions = null
+    }
+    // Fail-closed: transport/error/malformed/truncated (null) is explicit error,
+    // never silently zero nor checkpoint-only. Only successful [] (cache wipe)
+    // is legitimate and may use checkpoint union.
+    if (sessions === null) {
+      hadLoadError = true
+      return
     }
     let lastActive = updated
     for (const s of sessions) {
@@ -81,20 +87,23 @@ export async function loadBrowserProjects(
         0
       if (typeof st === "number" && st > lastActive) lastActive = st
     }
-    const dbPath = projectDbPath(api.state.path.state)
-    const exclude = readDeletedSessionIDs(dbPath, pid)
-    const live = sumProjectSessions(pid, sessions, exclude)
-    const deleted = readDeletedAggregate(dbPath, pid)
+    const alias = normalizeAlias(proj.worktree)
+    const durablePath = durableDbPath()
+    const checkpoints = durablePath
+      ? readCheckpoints(durablePath, pid, alias)
+      : new Map()
+    const usage = reconcileProjectUsage(pid, sessions, checkpoints, alias)
     rows.push({
       id: pid,
       label,
       worktree: proj.worktree,
       time: { created, updated },
-      usage: combineProjectUsage(live, deleted),
+      usage,
       lastActive,
       isCurrent: pid === currentID,
     })
   })
+  if (hadLoadError) throw new Error("Unable to load projects")
   const curRows = rows.filter((r) => r.isCurrent)
   const rest = rows
     .filter((r) => !r.isCurrent)

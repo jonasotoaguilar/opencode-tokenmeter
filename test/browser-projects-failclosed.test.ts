@@ -65,11 +65,11 @@ describe("browser projects fail-closed", () => {
       const apiOk = projectApi(projectsOk, async () => ({ data: [] }))
       const rows = await loadBrowserProjects(apiOk)
       expect(rows).toHaveLength(1)
-      expect(rows[0]!.id).toBe("p1")
-      expect(rows[0]!.usage.sessions).toBe(1)
-      expect(rows[0]!.usage.input).toBe(1000)
-      expect(rows[0]!.usage.cache).toBe(
-        rows[0]!.usage.cacheRead + rows[0]!.usage.cacheWrite,
+      expect(rows[0]?.id).toBe("p1")
+      expect(rows[0]?.usage.sessions).toBe(1)
+      expect(rows[0]?.usage.input).toBe(1000)
+      expect(rows[0]?.usage.cache).toBe(
+        (rows[0]?.usage.cacheRead ?? 0) + (rows[0]?.usage.cacheWrite ?? 0),
       )
 
       // Case 3: malformed (non-array) -> throws
