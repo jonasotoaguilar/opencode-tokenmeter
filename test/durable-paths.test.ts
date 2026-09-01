@@ -4,7 +4,7 @@
  * symlink/relative handling, and normalizeAlias invariants.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdtempSync, rmSync, symlinkSync } from "node:fs"
+import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {

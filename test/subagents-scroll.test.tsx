@@ -5,7 +5,6 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { RGBA } from "@opentui/core"
 import { testRender } from "@opentui/solid"
-import { createSignal } from "solid-js"
 import plugin from "../src/tokenmeter"
 import { GLYPH } from "../src/tokenmeter/glyphs"
 import {
@@ -327,7 +326,7 @@ describe("Subagents scroll step #49", () => {
     disposeReconcile()
     dispose()
     purgeTreeCache()
-    const stateP = groupState(rootID + "_p", [
+    const stateP = groupState(`${rootID}_p`, [
       { id: "sp1", agent: "alpha", input: 4000, output: 200 },
       { id: "sp2", agent: "beta", input: 4000, output: 200 },
       { id: "sp3", agent: "gamma", input: 4000, output: 200 },
@@ -338,10 +337,10 @@ describe("Subagents scroll step #49", () => {
     })
     const setupP = await testRender(
       () =>
-        mountP.slot({ theme: THEME }, { session_id: rootID + "_p" }) as never,
+        mountP.slot({ theme: THEME }, { session_id: `${rootID}_p` }) as never,
       { width: 60, height: 20 },
     )
-    await waitFor(() => snapshot()?.rootID === rootID + "_p")
+    await waitFor(() => snapshot()?.rootID === `${rootID}_p`)
     await waitFor(() => (snapshot()?.groups.length ?? 0) === 3)
     await waitFrame(setupP, (f) => f.includes("↳ alpha"))
     await clickAgent(setupP, setupP.captureCharFrame(), "alpha")

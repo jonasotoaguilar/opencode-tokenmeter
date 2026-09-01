@@ -53,11 +53,7 @@ export function resolveDurableDir(opts?: DurablePathOpts): string | null {
 
   if (platform === "win32") {
     const appData = env.APPDATA
-    if (
-      appData &&
-      appData.trim() &&
-      isAbsoluteForPlatform(appData.trim(), platform)
-    ) {
+    if (appData?.trim() && isAbsoluteForPlatform(appData.trim(), platform)) {
       const cand = joinForPlatform(
         platform,
         appData.trim(),
@@ -66,11 +62,7 @@ export function resolveDurableDir(opts?: DurablePathOpts): string | null {
       if (isSafeForPlatform(cand, platform, hd)) return cand
     }
     const localApp = env.LOCALAPPDATA
-    if (
-      localApp &&
-      localApp.trim() &&
-      isAbsoluteForPlatform(localApp.trim(), platform)
-    ) {
+    if (localApp?.trim() && isAbsoluteForPlatform(localApp.trim(), platform)) {
       const cand = joinForPlatform(
         platform,
         localApp.trim(),
@@ -103,7 +95,7 @@ export function resolveDurableDir(opts?: DurablePathOpts): string | null {
       if (isSafeForPlatform(cand, platform, hd)) return cand
     }
     const home = env.HOME
-    if (home && home.trim() && isAbsoluteForPlatform(home.trim(), platform)) {
+    if (home?.trim() && isAbsoluteForPlatform(home.trim(), platform)) {
       const cand = joinForPlatform(
         platform,
         home.trim(),
@@ -137,7 +129,7 @@ export function resolveDurableDir(opts?: DurablePathOpts): string | null {
     if (isSafeForPlatform(cand, platform, hd)) return cand
   }
   const home = env.HOME
-  if (home && home.trim() && isAbsoluteForPlatform(home.trim(), platform)) {
+  if (home?.trim() && isAbsoluteForPlatform(home.trim(), platform)) {
     const cand = joinForPlatform(
       platform,
       home.trim(),
