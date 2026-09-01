@@ -98,16 +98,16 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { formatAgentLine, formatMetricLines } from "../src/tokenmeter/format"
+import { formatCachePair } from "../src/tokenmeter/format-cache"
+import { formatCompactSummary } from "../src/tokenmeter/format-detail"
+import { GLYPH } from "../src/tokenmeter/glyphs"
 import {
   PROJECT_DB_FILE,
   projectDbPath,
   readDeletedAggregate,
   recordDeletedSession,
 } from "../src/tokenmeter/legacy-db"
-import { formatAgentLine, formatMetricLines } from "../src/tokenmeter/format"
-import { formatCachePair } from "../src/tokenmeter/format-cache"
-import { formatCompactSummary } from "../src/tokenmeter/format-detail"
-import { GLYPH } from "../src/tokenmeter/glyphs"
 import {
   realOutput,
   sumMessages,
