@@ -9,7 +9,7 @@ import {
   projectDbPath,
   readDeletedAggregate,
   readDeletedSessionIDs,
-} from "../db"
+} from "../legacy-db"
 import { combineProjectUsage, resolveCost, sumProjectSessions } from "../math"
 import { loadPricing } from "../pricing"
 import { PROJECT_SESSION_LIMIT } from "../project"

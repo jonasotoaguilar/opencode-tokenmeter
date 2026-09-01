@@ -11,7 +11,7 @@
  */
 
 import { createSignal } from "solid-js"
-import { readDeletedAggregate, readDeletedSessionIDs } from "./db"
+import { readDeletedAggregate, readDeletedSessionIDs } from "./legacy-db"
 import { checkpointActiveProject, readCheckpoints } from "./durable/checkpoints"
 import { projectDbPath } from "./durable/legacy-path"
 import { migrateLegacyAggregates } from "./durable/migrate"
