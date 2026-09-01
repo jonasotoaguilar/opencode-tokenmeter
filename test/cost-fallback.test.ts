@@ -488,6 +488,11 @@ describe("Unit 3 project tombstone scope", () => {
     const { mkdtempSync, rmSync } = await import("node:fs")
     const { tmpdir } = await import("node:os")
     const { join } = await import("node:path")
+    // Isolated durable directory so refreshProject's durable checkpoint store
+    // does not leak between tests or pollute the shared global path.
+    const durableDir = mkdtempSync(join(tmpdir(), "tokenmeter-ut3-durable-"))
+    const prevDurable = process.env.TOKENMETER_DURABLE_DIR
+    process.env.TOKENMETER_DURABLE_DIR = durableDir
     const price: FinitePrice = {
       input: 5,
       output: 15,
@@ -614,6 +619,10 @@ describe("Unit 3 project tombstone scope", () => {
     const snapB = projectSnapshot()
     expect(snapB?.cost).toBeCloseTo(0.0125)
     rmSync(dir, { recursive: true, force: true })
+    rmSync(durableDir, { recursive: true, force: true })
+    if (prevDurable === undefined)
+      delete (process.env as Record<string, unknown>).TOKENMETER_DURABLE_DIR
+    else process.env.TOKENMETER_DURABLE_DIR = prevDurable
   })
 })
 

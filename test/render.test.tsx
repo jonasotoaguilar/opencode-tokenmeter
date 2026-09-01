@@ -466,6 +466,11 @@ async function mountEntry(
   setProjectLoading(false)
   setProjectError(null)
   disposeProjectRefresh()
+  // Isolated durable directory outside the host state dir so cache deletion
+  // does not delete the backup. Each mount gets its own temp durable.
+  const durableDir = mkdtempSync(join(tmpdir(), "tokenmeter-durable-"))
+  const prevDurable = process.env.TOKENMETER_DURABLE_DIR
+  process.env.TOKENMETER_DURABLE_DIR = durableDir
   // Isolated plugin state directory: the entry owns a SQLite store there.
   const stateDir = mkdtempSync(join(tmpdir(), "tokenmeter-render-"))
   const api = {
@@ -590,6 +595,10 @@ async function mountEntry(
       })
       disposeProjectRefresh()
       rmSync(stateDir, { recursive: true, force: true })
+      rmSync(durableDir, { recursive: true, force: true })
+      if (prevDurable === undefined)
+        delete (process.env as Record<string, unknown>).TOKENMETER_DURABLE_DIR
+      else process.env.TOKENMETER_DURABLE_DIR = prevDurable
     },
     state,
   }

@@ -1,3 +1,4 @@
+// biome-ignore-all lint/style/noNonNullAssertion: test harness - non-null after await guard
 import { describe, expect, test } from "bun:test"
 import { isSafeDirectory } from "../src/tokenmeter/browser/is-safe-directory"
 import {

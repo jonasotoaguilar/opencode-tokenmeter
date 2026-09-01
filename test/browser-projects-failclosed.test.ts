@@ -1,3 +1,4 @@
+// biome-ignore-all lint/style/noNonNullAssertion: durable harness - absolute path guarantee
 /**
  * Browser projects fail-closed — null/error not zero, [] recovers checkpoint.
  * Verifies stable error propagation for unavailable/malformed/truncated.
