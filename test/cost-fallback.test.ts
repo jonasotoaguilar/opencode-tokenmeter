@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import {
+  checkpointActiveProject,
+  readCheckpoints,
+} from "../src/tokenmeter/durable/checkpoints"
+import { durableDbPath } from "../src/tokenmeter/durable/paths"
+import { reconcileProjectUsage } from "../src/tokenmeter/durable/reconcile"
+import {
   projectDbPath,
   readDeletedAggregate,
   readDeletedSessionIDs,
@@ -473,7 +479,8 @@ describe("Unit 2 adapter+reconcile", () => {
   })
 })
 
-describe("Unit 3 project tombstone scope", () => {
+describe("Unit 3 durable checkpoint scope", () => {
+  const prevEnv = () => process.env.TOKENMETER_DURABLE_DIR
   beforeEach(() => {
     clearPricing()
     setProjectSnapshot(null)
@@ -484,145 +491,170 @@ describe("Unit 3 project tombstone scope", () => {
     setProjectSnapshot(null)
     disposeProjectRefresh()
   })
-  test("tombstone scope (sessionX,projectA) exclude before sum; B remains eligible; reported+estimated", async () => {
+  test("checkpoint scope (sessionX,projectA) merges once; B remains eligible; reported+estimated via union", async () => {
     const { mkdtempSync, rmSync } = await import("node:fs")
     const { tmpdir } = await import("node:os")
     const { join } = await import("node:path")
-    // Isolated durable directory so refreshProject's durable checkpoint store
-    // does not leak between tests or pollute the shared global path.
-    const durableDir = mkdtempSync(join(tmpdir(), "tokenmeter-ut3-durable-"))
-    const prevDurable = process.env.TOKENMETER_DURABLE_DIR
-    process.env.TOKENMETER_DURABLE_DIR = durableDir
     const price: FinitePrice = {
       input: 5,
       output: 15,
       cache: { read: 0, write: 0 },
     }
     setPricing(new Map([["openai:gpt-4o", price]]))
-    const dir = mkdtempSync(join(tmpdir(), "tokenmeter-ut3-"))
-    const dbPath = projectDbPath(dir)
-    // tombstone (sessionX, projectA) only
-    recordDeletedSession(dbPath, {
-      id: "sessionX",
-      projectID: "projA",
-      cost: 0.01,
-      tokens: { input: 1000, output: 500, reasoning: 0 },
-    })
-    expect(readDeletedSessionIDs(dbPath, "projA").has("sessionX")).toBe(true)
-    expect(readDeletedSessionIDs(dbPath, "projB").has("sessionX")).toBe(false)
-    expect(readDeletedSessionIDs(null, "projA").size).toBe(0)
-    // live rows: sessionX (openai cost 0 → estimated 0.0125) + sessionY reported 0.03
-    const liveA = [
-      {
-        id: "sessionX",
-        projectID: "projA",
-        cost: 0,
-        tokens: { input: 1000, output: 500, reasoning: 0 },
-        model: { id: "gpt-4o", providerID: "openai" },
-      },
-      {
-        id: "sessionY",
-        projectID: "projA",
-        cost: 0.03,
-        tokens: { input: 2000, output: 700, reasoning: 300 },
-        model: { id: "gpt-4o", providerID: "openai" },
-      },
-    ]
-    const liveB = [
-      {
-        id: "sessionX",
-        projectID: "projB",
-        cost: 0,
-        tokens: { input: 1000, output: 500, reasoning: 0 },
-        model: { id: "gpt-4o", providerID: "openai" },
-      },
-    ]
-    const excludeA = readDeletedSessionIDs(dbPath, "projA")
-    const excludeB = readDeletedSessionIDs(dbPath, "projB")
-    const sumA = sumProjectSessions("projA", liveA as never, excludeA)
-    const sumB = sumProjectSessions("projB", liveB as never, excludeB)
-    // A: sessionX excluded BEFORE sum — tokens/cost from X absent
-    expect(sumA.sessions).toBe(1)
-    expect(sumA.cost).toBeCloseTo(0.03)
-    expect(sumA.input).toBe(2000)
-    expect(sumA.context).toBe(3000)
-    // B: same ID but different project — still eligible, estimated cost counts
-    expect(sumB.sessions).toBe(1)
-    expect(sumB.cost).toBeCloseTo(0.0125)
-    expect(sumB.input).toBe(1000)
-    expect(sumB.context).toBe(1500)
-    // reported+estimated through existing authority: non-openai stays zero
-    const nonOpenAI = sumProjectSessions("projA", [
-      {
-        id: "s3",
-        projectID: "projA",
-        cost: 0,
-        tokens: { input: 1000, output: 500 },
-        model: { id: "claude-3", providerID: "anthropic" },
-      },
-    ] as never)
-    expect(nonOpenAI.cost).toBe(0)
-    // refreshProject live path: tombstoned X excluded, Y reported, deleted aggregate once
-    const apiA = {
-      state: { path: { directory: "/proj/dir", state: dir } },
-      client: {
-        project: { current: async () => ({ data: { id: "projA" } }) },
-        session: {
-          list: async () => ({ data: liveA }),
+    const durableDir = mkdtempSync(join(tmpdir(), "tokenmeter-ut3-"))
+    const saved = prevEnv()
+    process.env.TOKENMETER_DURABLE_DIR = durableDir
+    const dbPath = durableDbPath()!
+    const stateDir = mkdtempSync(join(tmpdir(), "tokenmeter-ut3-state-"))
+    try {
+      // checkpoint (sessionX, projectA) only
+      checkpointActiveProject(dbPath, "projA", "/proj/dir", [
+        {
+          id: "sessionX",
+          projectID: "projA",
+          cost: 0.01,
+          tokens: { input: 1000, output: 500, reasoning: 0 },
+        } as never,
+      ])
+      const cpsA = readCheckpoints(dbPath, "projA", "/proj/dir")
+      const cpsBsameAlias = readCheckpoints(dbPath, "projB", "/proj/dir")
+      const cpsBdiffAlias = readCheckpoints(dbPath, "projB", "/other/dir")
+      expect(cpsA.has("sessionX")).toBe(true)
+      // Same alias with regenerated projectID recovers (intentional alias recovery)
+      expect(cpsBsameAlias.has("sessionX")).toBe(true)
+      // Different alias stays isolated
+      expect(cpsBdiffAlias.has("sessionX")).toBe(false)
+      expect(readCheckpoints(null, "projA", "/proj/dir").size).toBe(0)
+      // For projB isolation test we use diff alias
+      const cpsB = cpsBdiffAlias
+      // live rows: sessionX (openai cost 0 → estimated 0.0125) + sessionY reported 0.03
+      // For projA, sessionX overlaps checkpoint: merged once, cost is max(reported 0.01 vs estimated 0.0125) → reported 0.01 wins
+      const liveA = [
+        {
+          id: "sessionX",
+          projectID: "projA",
+          cost: 0,
+          tokens: { input: 1000, output: 500, reasoning: 0 },
+          model: { id: "gpt-4o", providerID: "openai" },
         },
-        v2: {
-          model: {
-            list: async () => ({
-              data: [
-                {
-                  providerID: "openai",
-                  id: "gpt-4o",
-                  cost: [
-                    { input: 5, output: 15, cache: { read: 0, write: 0 } },
-                  ],
-                },
-              ],
+        {
+          id: "sessionY",
+          projectID: "projA",
+          cost: 0.03,
+          tokens: { input: 2000, output: 700, reasoning: 300 },
+          model: { id: "gpt-4o", providerID: "openai" },
+        },
+      ]
+      const liveB = [
+        {
+          id: "sessionX",
+          projectID: "projB",
+          cost: 0,
+          tokens: { input: 1000, output: 500, reasoning: 0 },
+          model: { id: "gpt-4o", providerID: "openai" },
+        },
+      ]
+      const usageA = reconcileProjectUsage(
+        "projA",
+        liveA as never,
+        cpsA,
+        "/proj/dir",
+      )
+      const usageB = reconcileProjectUsage(
+        "projB",
+        liveB as never,
+        cpsB,
+        "/proj/dir",
+      )
+      // A: sessionX merged (checkpoint 0.01 reported wins over estimated 0.0125) + sessionY reported 0.03 => 2 sessions, cost ~0.04
+      expect(usageA.sessions).toBe(2)
+      expect(usageA.cost).toBeCloseTo(0.04)
+      expect(usageA.input).toBe(3000)
+      // B: same ID but different project — no checkpoint, estimated cost counts
+      expect(usageB.sessions).toBe(1)
+      expect(usageB.cost).toBeCloseTo(0.0125)
+      expect(usageB.input).toBe(1000)
+      // reported+estimated through existing authority: non-openai stays zero
+      const nonOpenAI = sumProjectSessions("projA", [
+        {
+          id: "s3",
+          projectID: "projA",
+          cost: 0,
+          tokens: { input: 1000, output: 500 },
+          model: { id: "claude-3", providerID: "anthropic" },
+        },
+      ] as never)
+      expect(nonOpenAI.cost).toBe(0)
+      // refreshProject live path: checkpoint X + live Y via union
+      const apiA = {
+        state: { path: { directory: "/proj/dir", state: stateDir } },
+        client: {
+          project: {
+            current: async () => ({
+              data: { id: "projA", worktree: "/proj/dir" },
             }),
           },
-        },
-      },
-    }
-    await refreshProject(apiA as never)
-    const snapA = projectSnapshot()
-    // live Y (0.03) + deleted X (0.01 from aggregate) — X live excluded, deleted once
-    expect(snapA?.sessions).toBe(2)
-    expect(snapA?.cost).toBeCloseTo(0.04)
-    // B refresh still counts its X estimated (no tombstone)
-    const apiB = {
-      state: { path: { directory: "/proj/dir", state: dir } },
-      client: {
-        project: { current: async () => ({ data: { id: "projB" } }) },
-        session: { list: async () => ({ data: liveB }) },
-        v2: {
-          model: {
-            list: async () => ({
-              data: [
-                {
-                  providerID: "openai",
-                  id: "gpt-4o",
-                  cost: [
-                    { input: 5, output: 15, cache: { read: 0, write: 0 } },
-                  ],
-                },
-              ],
-            }),
+          session: {
+            list: async () => ({ data: liveA }),
+          },
+          v2: {
+            model: {
+              list: async () => ({
+                data: [
+                  {
+                    providerID: "openai",
+                    id: "gpt-4o",
+                    cost: [
+                      { input: 5, output: 15, cache: { read: 0, write: 0 } },
+                    ],
+                  },
+                ],
+              }),
+            },
           },
         },
-      },
+      }
+      await refreshProject(apiA as never)
+      const snapA = projectSnapshot()
+      expect(snapA?.sessions).toBe(2)
+      expect(snapA?.cost).toBeCloseTo(0.04)
+      // B refresh still counts its X estimated (different alias => no checkpoint for projB)
+      const apiB = {
+        state: { path: { directory: "/other/dir", state: stateDir } },
+        client: {
+          project: {
+            current: async () => ({
+              data: { id: "projB", worktree: "/other/dir" },
+            }),
+          },
+          session: { list: async () => ({ data: liveB }) },
+          v2: {
+            model: {
+              list: async () => ({
+                data: [
+                  {
+                    providerID: "openai",
+                    id: "gpt-4o",
+                    cost: [
+                      { input: 5, output: 15, cache: { read: 0, write: 0 } },
+                    ],
+                  },
+                ],
+              }),
+            },
+          },
+        },
+      }
+      await refreshProject(apiB as never)
+      const snapB = projectSnapshot()
+      expect(snapB?.cost).toBeCloseTo(0.0125)
+    } finally {
+      if (saved === undefined)
+        delete (process.env as Record<string, unknown>).TOKENMETER_DURABLE_DIR
+      else process.env.TOKENMETER_DURABLE_DIR = saved
+      rmSync(durableDir, { recursive: true, force: true })
+      rmSync(stateDir, { recursive: true, force: true })
     }
-    await refreshProject(apiB as never)
-    const snapB = projectSnapshot()
-    expect(snapB?.cost).toBeCloseTo(0.0125)
-    rmSync(dir, { recursive: true, force: true })
-    rmSync(durableDir, { recursive: true, force: true })
-    if (prevDurable === undefined)
-      delete (process.env as Record<string, unknown>).TOKENMETER_DURABLE_DIR
-    else process.env.TOKENMETER_DURABLE_DIR = prevDurable
   })
 })
 
