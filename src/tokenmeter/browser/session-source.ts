@@ -48,25 +48,29 @@ async function fetchViaV2(
     const next = (r as { cursor?: { next?: string } })?.cursor?.next
     if (typeof next === "string" && next && next !== cursor) cursor = next
     else break
-    if (all.length >= BROWSER_SESSION_LIMIT) break
+    if (all.length >= BROWSER_SESSION_LIMIT) return null
   } while (cursor !== undefined)
+  if (all.length >= BROWSER_SESSION_LIMIT) return null
   return all
 }
 
 export async function fetchSessionsForBrowse(
   api: BrowserApi,
   projectID: string,
-): Promise<ProjectSessionLike[]> {
+): Promise<ProjectSessionLike[] | null> {
   try {
     const v2 = await fetchViaV2(api, projectID)
     if (Array.isArray(v2)) return v2
-  } catch {}
-  return []
+    if (v2 === null) return null
+  } catch {
+    return null
+  }
+  return null
 }
 
 export async function fetchSessionsForProject(
   api: BrowserApi,
   projectID: string,
-): Promise<ProjectSessionLike[]> {
+): Promise<ProjectSessionLike[] | null> {
   return fetchSessionsForBrowse(api, projectID)
 }
