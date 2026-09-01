@@ -4,8 +4,8 @@
  * For each session ID, merge live/checkpoint monotonically and count exactly
  * once. Checkpoint-only sessions remain historical; duplicate live rows count
  * once; reappearing sessions update the same row.
- * Cost provenance is preserved (reported wins over estimated) rather than
- * blind max.
+ * Cost provenance is preserved (reported/observed wins over estimated) rather
+ * than blind max; observed is the complete message-derived aggregate.
  */
 
 import { resolveCost } from "../math"
@@ -85,11 +85,13 @@ function mergeCost(
   a: Pick<CheckpointRow, "cost" | "costSource">,
   b: Pick<CheckpointRow, "cost" | "costSource">,
 ): Pick<CheckpointRow, "cost" | "costSource"> {
-  const aRep = a.costSource === "reported" && a.cost !== 0
-  const bRep = b.costSource === "reported" && b.cost !== 0
-  if (aRep && bRep) return a.cost >= b.cost ? a : b
-  if (aRep) return a
-  if (bRep) return b
+  const isStrong = (x: Pick<CheckpointRow, "cost" | "costSource">) =>
+    (x.costSource === "reported" || x.costSource === "observed") && x.cost !== 0
+  const aStrong = isStrong(a)
+  const bStrong = isStrong(b)
+  if (aStrong && bStrong) return a.cost >= b.cost ? a : b
+  if (aStrong) return a
+  if (bStrong) return b
   return a.cost >= b.cost ? a : b
 }
 

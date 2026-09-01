@@ -3,7 +3,7 @@ export type CheckpointRow = {
   projectID: string
   projectAlias: string
   cost: number
-  costSource: "reported" | "estimated"
+  costSource: "reported" | "estimated" | "observed"
   input: number
   output: number
   reasoning: number
