@@ -1,6 +1,8 @@
 /**
  * Checkpoint merge helpers — per-field high-water with cost provenance.
- * Reported cost wins over estimated; otherwise max.
+ * Reported/observed cost wins over estimated; otherwise max. Observed is the
+ * message-derived complete aggregate and may replace a smaller partial
+ * reported/estimated list aggregate while retaining the larger high-water.
  */
 
 import { resolveCost } from "../math"
@@ -96,7 +98,7 @@ export function observedToEntry(
     projectID,
     projectAlias: alias,
     cost,
-    costSource: cost !== 0 ? "reported" : "reported",
+    costSource: cost !== 0 ? "observed" : "reported",
     input,
     output,
     reasoning,
@@ -114,11 +116,13 @@ export function mergeCost(
   a: Pick<CheckpointRow, "cost" | "costSource">,
   b: Pick<CheckpointRow, "cost" | "costSource">,
 ): Pick<CheckpointRow, "cost" | "costSource"> {
-  const aRep = a.costSource === "reported" && a.cost !== 0
-  const bRep = b.costSource === "reported" && b.cost !== 0
-  if (aRep && bRep) return a.cost >= b.cost ? a : b
-  if (aRep) return a
-  if (bRep) return b
+  const isStrong = (x: Pick<CheckpointRow, "cost" | "costSource">) =>
+    (x.costSource === "reported" || x.costSource === "observed") && x.cost !== 0
+  const aStrong = isStrong(a)
+  const bStrong = isStrong(b)
+  if (aStrong && bStrong) return a.cost >= b.cost ? a : b
+  if (aStrong) return a
+  if (bStrong) return b
   return a.cost >= b.cost ? a : b
 }
 

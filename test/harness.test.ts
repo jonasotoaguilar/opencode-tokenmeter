@@ -661,9 +661,17 @@ describe("project aggregation (project.ts)", () => {
       rmSync(dir, { recursive: true, force: true })
   }
   // Ensure env restored even when test throws
-  beforeEach(() => isolateDurable())
+  beforeEach(() => {
+    isolateDurable()
+    // Clear any observed message-derived state for session IDs used in this
+    // block so Project's observed merge does not leak across isolated tests.
+    for (const sid of ["s1", "s2", "s3", "other", "ps1", "ps2"])
+      forgetSession(sid)
+  })
   afterEach(() => {
     disposeProjectRefresh()
+    for (const sid of ["s1", "s2", "s3", "other", "ps1", "ps2"])
+      forgetSession(sid)
     for (const dir of tmps.splice(0))
       rmSync(dir, { recursive: true, force: true })
     restoreDurable()

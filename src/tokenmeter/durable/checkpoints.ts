@@ -2,6 +2,9 @@
  * Per-session durable checkpoints — batch piggyback on session.list.
  * Stores one row per (session_id, project_id) with WAL + busy_timeout
  * and monotonic merge. Idle refresh with unchanged rows does zero updates.
+ * Observed message-derived usage is merged per session ID present in the
+ * successful project list before UPSERT so partial reported aggregates never
+ * undercount a complete observed aggregate; no extra SDK calls or message sweeps.
  */
 
 import { Database } from "bun:sqlite"
@@ -93,7 +96,11 @@ export function readCheckpoints(
       projectAlias: String(r.project_alias ?? ""),
       cost: num(r.cost),
       costSource:
-        (r.cost_source as string) === "estimated" ? "estimated" : "reported",
+        (r.cost_source as string) === "estimated"
+          ? "estimated"
+          : (r.cost_source as string) === "observed"
+            ? "observed"
+            : "reported",
       input: num(r.input),
       output: num(r.output),
       reasoning: num(r.reasoning),
@@ -118,6 +125,7 @@ export function checkpointActiveProject(
   projectID: string,
   aliasRaw: string | null | undefined,
   sessions: ProjectSessionLike[],
+  observedById?: Map<string, import("./types").CheckpointRow> | null,
 ): number {
   if (
     !dbPath ||
@@ -140,6 +148,20 @@ export function checkpointActiveProject(
     entry.projectID = projectID
     liveMap.set(s.id, entry)
   }
+  // Merge observed message-derived usage for each session ID present in the
+  // successful project list when provided by the active-project refresh.
+  // Only IDs in `seen` are considered; historical checkpoint-only sessions
+  // are untouched until they reappear. Each session (principal or delegated
+  // child) merges independently — no tree total.
+  if (observedById && observedById.size > 0) {
+    for (const sid of seen) {
+      const observedEntry = observedById.get(sid)
+      if (!observedEntry) continue
+      const live = liveMap.get(sid)
+      if (!live) liveMap.set(sid, observedEntry)
+      else liveMap.set(sid, mergeRows(live, observedEntry))
+    }
+  }
   if (liveMap.size === 0) return 0
   const existing = readCheckpoints(dbPath, projectID, alias)
   const toUpsert: CheckpointRow[] = []
@@ -160,8 +182,8 @@ export function checkpointActiveProject(
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(session_id, project_id) DO UPDATE SET
            project_alias=excluded.project_alias,
-           cost=CASE WHEN excluded.cost_source='reported' AND excluded.cost!=0 AND checkpoints.cost_source='reported' AND checkpoints.cost!=0 THEN MAX(checkpoints.cost, excluded.cost) WHEN excluded.cost_source='reported' AND excluded.cost!=0 THEN excluded.cost WHEN checkpoints.cost_source='reported' AND checkpoints.cost!=0 THEN checkpoints.cost ELSE MAX(checkpoints.cost, excluded.cost) END,
-           cost_source=CASE WHEN excluded.cost_source='reported' AND excluded.cost!=0 AND checkpoints.cost_source='reported' AND checkpoints.cost!=0 THEN CASE WHEN checkpoints.cost>=excluded.cost THEN checkpoints.cost_source ELSE excluded.cost_source END WHEN excluded.cost_source='reported' AND excluded.cost!=0 THEN excluded.cost_source WHEN checkpoints.cost_source='reported' AND checkpoints.cost!=0 THEN checkpoints.cost_source ELSE CASE WHEN checkpoints.cost>=excluded.cost THEN checkpoints.cost_source ELSE excluded.cost_source END END,
+           cost=CASE WHEN excluded.cost_source IN ('reported','observed') AND excluded.cost!=0 AND checkpoints.cost_source IN ('reported','observed') AND checkpoints.cost!=0 THEN MAX(checkpoints.cost, excluded.cost) WHEN excluded.cost_source IN ('reported','observed') AND excluded.cost!=0 THEN excluded.cost WHEN checkpoints.cost_source IN ('reported','observed') AND checkpoints.cost!=0 THEN checkpoints.cost ELSE MAX(checkpoints.cost, excluded.cost) END,
+           cost_source=CASE WHEN excluded.cost_source IN ('reported','observed') AND excluded.cost!=0 AND checkpoints.cost_source IN ('reported','observed') AND checkpoints.cost!=0 THEN CASE WHEN checkpoints.cost>=excluded.cost THEN checkpoints.cost_source ELSE excluded.cost_source END WHEN excluded.cost_source IN ('reported','observed') AND excluded.cost!=0 THEN excluded.cost_source WHEN checkpoints.cost_source IN ('reported','observed') AND checkpoints.cost!=0 THEN checkpoints.cost_source ELSE CASE WHEN checkpoints.cost>=excluded.cost THEN checkpoints.cost_source ELSE excluded.cost_source END END,
             input=MAX(checkpoints.input, excluded.input), output=MAX(checkpoints.output, excluded.output), reasoning=MAX(checkpoints.reasoning, excluded.reasoning),
             cache_read=MAX(checkpoints.cache_read, excluded.cache_read), cache_write=MAX(checkpoints.cache_write, excluded.cache_write), cache=MAX(checkpoints.cache_read, excluded.cache_read) + MAX(checkpoints.cache_write, excluded.cache_write),
             context=MAX(checkpoints.input, excluded.input) + MAX(checkpoints.output, excluded.output) + MAX(checkpoints.reasoning, excluded.reasoning) + MAX(checkpoints.cache_read, excluded.cache_read) + MAX(checkpoints.cache_write, excluded.cache_write), updated_at=MAX(checkpoints.updated_at, excluded.updated_at), checkpoint_at=MAX(checkpoints.checkpoint_at, excluded.checkpoint_at), version=1`).run(

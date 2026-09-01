@@ -13,10 +13,13 @@
 import { createSignal } from "solid-js"
 import { checkpointActiveProject, readCheckpoints } from "./durable/checkpoints"
 import { projectDbPath } from "./durable/legacy-path"
+import { mergeRows, observedToEntry } from "./durable/merge"
 import { migrateLegacyAggregates } from "./durable/migrate"
 import { durableDbPath, normalizeAlias } from "./durable/paths"
 import { reconcileProjectUsage } from "./durable/reconcile"
+import { combineProjectUsage, sumProjectSessions } from "./math"
 import { loadPricing } from "./pricing"
+import { observedSessionUsage } from "./store"
 import type { ProjectSessionLike, ProjectUsage } from "./types"
 
 const [projectSnapshot, _setProjectSnapshot] =
@@ -116,9 +119,45 @@ export async function refreshProject(
       if (durablePath && legacyPath)
         migrateLegacyAggregates(durablePath, legacyPath)
     } catch {}
+    let observedById: Map<
+      string,
+      import("./durable/types").CheckpointRow
+    > | null = null
+    try {
+      const map = new Map<string, import("./durable/types").CheckpointRow>()
+      const seenObs = new Set<string>()
+      for (const s of projectSessions) {
+        const sid = (s as unknown as { id?: unknown })?.id
+        if (typeof sid !== "string" || !sid) continue
+        if (
+          (s as unknown as { projectID?: unknown })?.projectID != null &&
+          (s as unknown as { projectID?: unknown })?.projectID !== "" &&
+          (s as unknown as { projectID?: unknown })?.projectID !== projectID
+        )
+          continue
+        if (seenObs.has(sid)) continue
+        seenObs.add(sid)
+        let obs: ReturnType<typeof observedSessionUsage> | null = null
+        try {
+          obs = observedSessionUsage(sid)
+        } catch {
+          obs = null
+        }
+        if (!obs) continue
+        const e = observedToEntry(obs, sid, projectID, alias)
+        if (e) map.set(sid, e)
+      }
+      if (map.size) observedById = map
+    } catch {}
     try {
       if (durablePath)
-        checkpointActiveProject(durablePath, projectID, alias, projectSessions)
+        checkpointActiveProject(
+          durablePath,
+          projectID,
+          alias,
+          projectSessions,
+          observedById,
+        )
     } catch {}
     let checkpoints: Map<
       string,
@@ -131,6 +170,18 @@ export async function refreshProject(
     } catch {
       checkpoints = new Map()
     }
+    try {
+      if (observedById?.size) {
+        const cp =
+          checkpoints ??
+          new Map<string, import("./durable/types").CheckpointRow>()
+        for (const [sid, e] of observedById) {
+          const ex = cp.get(sid)
+          cp.set(sid, ex ? mergeRows(ex, e) : e)
+        }
+        checkpoints = cp
+      }
+    } catch {}
     const usage = reconcileProjectUsage(
       projectID,
       projectSessions,
