@@ -1,3 +1,4 @@
+/** Retain legacy adapter for harness migration - feature trunk only */
 /**
  * Plugin-owned SQLite persistence for the Project section's DELETED-session
  * totals.
