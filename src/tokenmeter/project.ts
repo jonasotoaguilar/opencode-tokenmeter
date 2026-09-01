@@ -16,8 +16,6 @@ import { projectDbPath } from "./durable/legacy-path"
 import { migrateLegacyAggregates } from "./durable/migrate"
 import { durableDbPath, normalizeAlias } from "./durable/paths"
 import { reconcileProjectUsage } from "./durable/reconcile"
-import { readDeletedAggregate, readDeletedSessionIDs } from "./legacy-db"
-import { combineProjectUsage, sumProjectSessions } from "./math"
 import { loadPricing } from "./pricing"
 import type { ProjectSessionLike, ProjectUsage } from "./types"
 
@@ -111,61 +109,35 @@ export async function refreshProject(
     try {
       await loadPricing(api as unknown as Parameters<typeof loadPricing>[0])
     } catch {}
-    // Migration bridge (feature-trunk-only, removed at final): prefer legacy
-    // aggregate when the test's stateDir contains legacy tombstones/aggregate
-    // so old harness remains green while durable tests use checkpoints.
-    const legacyPathForBridge = projectDbPath(api.state.path.state)
-    let hasLegacy = false
+    const alias = normalizeAlias(worktree ?? directory)
+    const durablePath = durableDbPath()
+    const legacyPath = projectDbPath(api.state.path.state)
     try {
-      const agg = legacyPathForBridge
-        ? readDeletedAggregate(legacyPathForBridge, projectID)
-        : null
-      const ids = legacyPathForBridge
-        ? readDeletedSessionIDs(legacyPathForBridge, projectID)
-        : null
-      hasLegacy = !!agg || !!ids?.size
+      if (durablePath && legacyPath)
+        migrateLegacyAggregates(durablePath, legacyPath)
     } catch {}
-    if (hasLegacy) {
-      const exclude = readDeletedSessionIDs(legacyPathForBridge, projectID)
-      const live = sumProjectSessions(projectID, projectSessions, exclude)
-      const deleted = readDeletedAggregate(legacyPathForBridge, projectID)
-      setProjectSnapshot(combineProjectUsage(live, deleted))
-    } else {
-      const alias = normalizeAlias(worktree ?? directory)
-      const durablePath = durableDbPath()
-      const legacyPath = projectDbPath(api.state.path.state)
-      try {
-        if (durablePath && legacyPath)
-          migrateLegacyAggregates(durablePath, legacyPath)
-      } catch {}
-      try {
-        if (durablePath)
-          checkpointActiveProject(
-            durablePath,
-            projectID,
-            alias,
-            projectSessions,
-          )
-      } catch {}
-      let checkpoints: Map<
-        string,
-        import("./durable/types").CheckpointRow
-      > | null = null
-      try {
-        checkpoints = durablePath
-          ? readCheckpoints(durablePath, projectID, alias)
-          : new Map()
-      } catch {
-        checkpoints = new Map()
-      }
-      const usage = reconcileProjectUsage(
-        projectID,
-        projectSessions,
-        checkpoints ?? new Map(),
-        alias,
-      )
-      setProjectSnapshot(usage)
+    try {
+      if (durablePath)
+        checkpointActiveProject(durablePath, projectID, alias, projectSessions)
+    } catch {}
+    let checkpoints: Map<
+      string,
+      import("./durable/types").CheckpointRow
+    > | null = null
+    try {
+      checkpoints = durablePath
+        ? readCheckpoints(durablePath, projectID, alias)
+        : new Map()
+    } catch {
+      checkpoints = new Map()
     }
+    const usage = reconcileProjectUsage(
+      projectID,
+      projectSessions,
+      checkpoints ?? new Map(),
+      alias,
+    )
+    setProjectSnapshot(usage)
   } catch {
     setProjectError(PROJECT_ERROR_MESSAGE)
   } finally {

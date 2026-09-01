@@ -931,15 +931,53 @@ describe("Unit 4 deleted monetary resolution", () => {
 
 describe("math — coverage gates (high-water and exported contracts)", () => {
   test("maxComponents keeps per-field maximum", () => {
-    const a = { cost: 1, input: 10, output: 5, reasoning: 2, cacheRead: 1, cacheWrite: 4 }
-    const b = { cost: 2, input: 5, output: 20, reasoning: 1, cacheRead: 5, cacheWrite: 1 }
-    expect(maxComponents(a, b)).toEqual({ cost: 2, input: 10, output: 20, reasoning: 2, cacheRead: 5, cacheWrite: 4 })
-    expect(maxComponents(b, a)).toEqual({ cost: 2, input: 10, output: 20, reasoning: 2, cacheRead: 5, cacheWrite: 4 })
+    const a = {
+      cost: 1,
+      input: 10,
+      output: 5,
+      reasoning: 2,
+      cacheRead: 1,
+      cacheWrite: 4,
+    }
+    const b = {
+      cost: 2,
+      input: 5,
+      output: 20,
+      reasoning: 1,
+      cacheRead: 5,
+      cacheWrite: 1,
+    }
+    expect(maxComponents(a, b)).toEqual({
+      cost: 2,
+      input: 10,
+      output: 20,
+      reasoning: 2,
+      cacheRead: 5,
+      cacheWrite: 4,
+    })
+    expect(maxComponents(b, a)).toEqual({
+      cost: 2,
+      input: 10,
+      output: 20,
+      reasoning: 2,
+      cacheRead: 5,
+      cacheWrite: 4,
+    })
   })
   test("entryOfSession returns null when no usage, otherwise payload spend", () => {
     expect(entryOfSession(undefined)).toBeNull()
     expect(entryOfSession(null)).toBeNull()
-    const e = entryOfSession({ id: "s1", projectID: "p1", cost: 0.02, tokens: { input: 10, output: 5, reasoning: 1, cache: { read: 2, write: 3 } } } as never)!
+    const e = entryOfSession({
+      id: "s1",
+      projectID: "p1",
+      cost: 0.02,
+      tokens: {
+        input: 10,
+        output: 5,
+        reasoning: 1,
+        cache: { read: 2, write: 3 },
+      },
+    } as never)!
     expect(e.cost).toBeCloseTo(0.02)
     expect(e.input).toBe(10)
     expect(e.cache).toBe(5)
@@ -947,25 +985,74 @@ describe("math — coverage gates (high-water and exported contracts)", () => {
   })
   test("entryOfSessionUsage maps SessionUsage", () => {
     expect(entryOfSessionUsage(null)).toBeNull()
-    const usage = { cost: 0.05, input: 100, output: 20, reasoning: 5, cacheRead: 2, cacheWrite: 3, cache: 5, total: 130 } as never
+    const usage = {
+      cost: 0.05,
+      input: 100,
+      output: 20,
+      reasoning: 5,
+      cacheRead: 2,
+      cacheWrite: 3,
+      cache: 5,
+      total: 130,
+    } as never
     const e = entryOfSessionUsage(usage)!
     expect(e.cost).toBe(0.05)
     expect(e.input).toBe(100)
   })
   test("combineProjectUsage adds deleted as one session only when it carries usage", () => {
-    const live = { id: "projA", sessions: 2, cost: 0.04, context: 300, input: 200, output: 50, reasoning: 10, cacheRead: 20, cacheWrite: 20, cache: 40 } as never
+    const live = {
+      id: "projA",
+      sessions: 2,
+      cost: 0.04,
+      context: 300,
+      input: 200,
+      output: 50,
+      reasoning: 10,
+      cacheRead: 20,
+      cacheWrite: 20,
+      cache: 40,
+    } as never
     expect(combineProjectUsage(live, null)).toEqual(live)
-    const deleted = { cost: 0.01, input: 100, output: 30, reasoning: 5, cacheRead: 1, cacheWrite: 2, cache: 3, context: 138 } as never
+    const deleted = {
+      cost: 0.01,
+      input: 100,
+      output: 30,
+      reasoning: 5,
+      cacheRead: 1,
+      cacheWrite: 2,
+      cache: 3,
+      context: 138,
+    } as never
     const combined = combineProjectUsage(live, deleted)
     expect(combined.sessions).toBe(3)
     expect(combined.cost).toBeCloseTo(0.05)
   })
   test("resolveCost and resolveEntry never throw on malformed tokens", () => {
-    expect(() => resolveCost({ cost: 0, providerID: "openai", modelID: "gpt-4o", tokens: null as never })).not.toThrow()
-    expect(resolveCost({ cost: 0, providerID: "openai", modelID: "gpt-4o", tokens: null as never }).source).toBe("reported")
+    expect(() =>
+      resolveCost({
+        cost: 0,
+        providerID: "openai",
+        modelID: "gpt-4o",
+        tokens: null as never,
+      }),
+    ).not.toThrow()
+    expect(
+      resolveCost({
+        cost: 0,
+        providerID: "openai",
+        modelID: "gpt-4o",
+        tokens: null as never,
+      }).source,
+    ).toBe("reported")
     expect(() => resolveEntry(null, null, null as never)).not.toThrow()
     expect(resolveEntry(null, null, null as never)).toBeNull()
-    const poisoned = new Proxy({} as never, { get() { throw new Error("poison") } })
-    expect(() => resolveEntry(poisoned as never, null as never, null as never)).not.toThrow()
+    const poisoned = new Proxy({} as never, {
+      get() {
+        throw new Error("poison")
+      },
+    })
+    expect(() =>
+      resolveEntry(poisoned as never, null as never, null as never),
+    ).not.toThrow()
   })
 })
