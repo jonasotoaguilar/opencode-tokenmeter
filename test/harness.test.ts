@@ -94,7 +94,7 @@
  *    persisted)
  *  - the subtitles read Project and Session (singular), both accent-colored
  */
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -639,18 +639,37 @@ describe("session aggregation (complete-session spend, cumulative breakdowns)", 
 })
 
 describe("project aggregation (project.ts)", () => {
-  /** Temp state directories created by this block; removed after each test. */
-  /** Temp state directories created by this block; removed after each test. */
+  /** Temp state/durable directories created by this block; removed after each test. */
   const tmps: string[] = []
+  const durableTmps: string[] = []
   const tmpStateDir = () => {
     const dir = mkdtempSync(join(tmpdir(), "tokenmeter-test-"))
     tmps.push(dir)
     return dir
   }
+  let savedDurable: string | undefined
+  // Isolate durable checkpoints per test so union does not leak across tests
+  const isolateDurable = () => {
+    savedDurable = process.env.TOKENMETER_DURABLE_DIR
+    const dir = mkdtempSync(join(tmpdir(), "tokenmeter-durable-"))
+    durableTmps.push(dir)
+    process.env.TOKENMETER_DURABLE_DIR = dir
+  }
+  const restoreDurable = () => {
+    if (savedDurable === undefined)
+      delete (process.env as Record<string, unknown>).TOKENMETER_DURABLE_DIR
+    else process.env.TOKENMETER_DURABLE_DIR = savedDurable
+    savedDurable = undefined
+    for (const dir of durableTmps.splice(0))
+      rmSync(dir, { recursive: true, force: true })
+  }
+  // Ensure env restored even when test throws
+  beforeEach(() => isolateDurable())
   afterEach(() => {
     disposeProjectRefresh()
     for (const dir of tmps.splice(0))
       rmSync(dir, { recursive: true, force: true })
+    restoreDurable()
   })
 
   const projApi = (
