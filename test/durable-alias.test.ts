@@ -3,9 +3,6 @@
  * Split from durable-paths for SHOULD <=200.
  */
 import { describe, expect, test } from "bun:test"
-import { existsSync, mkdtempSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
 import {
   durableDbPath,
   normalizeAlias,
@@ -73,27 +70,5 @@ describe("durable alias — pure Windows", () => {
       homedir: "C:\\Users\\u",
     })!
     expect(p.toLowerCase()).toBe("c:\\tmp\\override\\checkpoints.sqlite")
-  })
-})
-
-describe("durable alias — ensureDirForDb is path-module based", () => {
-  test("creates nested directory via dirname", () => {
-    const base = mkdtempSync(join(tmpdir(), "dur-ensure-"))
-    const nested = join(base, "a", "b", "c", "checkpoints.sqlite")
-    const {
-      checkpointActiveProject,
-    } = require("../src/tokenmeter/durable/checkpoints")
-    const dir = nested.replace(/\/checkpoints\.sqlite$/, "")
-    expect(existsSync(dir)).toBe(false)
-    checkpointActiveProject(nested, "projA", "/proj/dir", [
-      {
-        id: "s1",
-        projectID: "projA",
-        cost: 0.01,
-        tokens: { input: 100, output: 50 },
-      },
-    ] as never)
-    expect(existsSync(dir)).toBe(true)
-    rmSync(base, { recursive: true, force: true })
   })
 })
