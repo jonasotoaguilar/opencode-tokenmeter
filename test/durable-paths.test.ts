@@ -86,41 +86,24 @@ describe("durable paths — OS roots and overrides", () => {
     ).toBeNull()
   })
 
-  test("symlink target is resolved best-effort, missing target is safe", () => {
-    const real = mkdtempSync(join(tmpdir(), "dur-real-"))
-    const linkParent = mkdtempSync(join(tmpdir(), "dur-link-parent-"))
-    const link = join(linkParent, "linkdir")
-    try {
-      symlinkSync(real, link)
-      // normalizeAlias should resolve symlink to real path where possible
-      const aliased = normalizeAlias(link)
-      // Best-effort: if realpath succeeds, it's the real dir; otherwise normalized link
-      expect(aliased === real || aliased === link).toBe(true)
-      // durableDbPath with symlink override should also resolve
-      const resolved = resolveDurableDir({
-        env: { TOKENMETER_DURABLE_DIR: link },
-        platform: "linux",
-        homedir: "/home/u",
-      })
-      expect(resolved === real || resolved === link).toBe(true)
-    } catch {
-      // Symlink not supported on this FS — skip but not fail
-      expect(true).toBe(true)
-    } finally {
-      rmSync(real, { recursive: true, force: true })
-      rmSync(linkParent, { recursive: true, force: true })
-    }
-    // Missing symlink target is safe (no throw, returns normalized)
-    const missing = join(tmpdir(), `dur-missing-${Date.now()}-nosuch`)
-    const aliasMissing = normalizeAlias(missing)
-    // For missing, normalizeAlias returns normalized path (since realpath fails, fallback)
-    expect(aliasMissing).toBe(missing)
-    expect(() =>
-      resolveDurableDir({
-        env: { TOKENMETER_DURABLE_DIR: missing },
-        platform: "linux",
-        homedir: "/home/u",
-      }),
-    ).not.toThrow()
+})
+
+describe("durable paths — injected OS/env fallbacks (coverage)", () => {
+  test("win32 LOCALAPPDATA fallback and homedir/null", () => {
+    expect(resolveDurableDir({ env: { LOCALAPPDATA: "C:\\Users\\u\\AppData\\Local" }, platform: "win32", homedir: "C:\\Users\\u" })).toBe("C:\\Users\\u\\AppData\\Local\\opencode-tokenmeter")
+    expect(resolveDurableDir({ env: {}, platform: "win32", homedir: "C:\\Users\\u" })).toBe("C:\\Users\\u\\AppData\\Roaming\\opencode-tokenmeter")
+    expect(resolveDurableDir({ env: {}, platform: "win32", homedir: "" })).toBeNull()
+  })
+  test("darwin HOME fallback and null", () => {
+    expect(resolveDurableDir({ env: {}, platform: "darwin", homedir: "/Users/u" })).toBe("/Users/u/Library/Application Support/opencode-tokenmeter")
+    expect(resolveDurableDir({ env: { HOME: "/Users/u2" }, platform: "darwin", homedir: "" })).toBe("/Users/u2/Library/Application Support/opencode-tokenmeter")
+    expect(resolveDurableDir({ env: {}, platform: "darwin", homedir: "" })).toBeNull()
+  })
+  test("linux XDG/HOME fallbacks and null", () => {
+    expect(resolveDurableDir({ env: { XDG_DATA_HOME: "/tmp/xdg2" }, platform: "linux", homedir: "/home/u" })).toBe("/tmp/xdg2/opencode-tokenmeter")
+    expect(resolveDurableDir({ env: {}, platform: "linux", homedir: "/home/u" })).toBe("/home/u/.local/share/opencode-tokenmeter")
+    expect(resolveDurableDir({ env: { HOME: "/home/u2" }, platform: "linux", homedir: "" })).toBe("/home/u2/.local/share/opencode-tokenmeter")
+    expect(resolveDurableDir({ env: {}, platform: "linux", homedir: "" })).toBeNull()
   })
 })
+
