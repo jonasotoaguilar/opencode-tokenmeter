@@ -1,55 +1,25 @@
 /**
  * Project usage aggregation for the TokenMeter sidebar.
  *
- * The Project section sits above Session and shows the same two metric rows
- * (spend + thinking + cost, then input · output real · cache read/write),
- * summed from ALL sessions of the CURRENT PROJECT — crossing
- * directories/worktrees and surviving session deletion. The total is the
- * authoritative LIVE sum of the client's `session.list({ scope: "project" })`
- * rows (filtered by `session.projectID === projectID`, every session ID
- * exactly once) PLUS the persisted deleted-session aggregate from the
- * plugin-owned SQLite store (`tokenmeter.sqlite` under
- * `api.state.path.state`, see db.ts): deleting a session records its final
- * payload/observed usage into that aggregate BEFORE the refresh, so deleted
- * sessions keep contributing exactly once, across restarts and across
- * concurrent TUIs. Live sessions are NEVER persisted or re-added — the list
- * endpoint is the authoritative live source on every refresh. The coins
- * total reads each snapshot's explicitly computed complete per-session
- * spend (`input + output + reasoning + cache.read + cache.write`, never
- * below input + output + reasoning); every other metric stays cumulative.
- *
- * The list call passes an explicit bounded `limit` (PROJECT_SESSION_LIMIT =
- * 10000) because the SDK defaults to 100 rows: a project with more sessions
- * would silently undercount. When the returned length reaches the cap the
- * list is TRUNCATED and therefore unusable — the refresh fails closed: the
- * previous snapshot is preserved and the stable error line is surfaced,
- * never a partial total.
- *
- * A failed lookup/list keeps the previous snapshot (when one exists) and
- * surfaces a safe, stack-free error message via the projectError signal —
- * never a silent placeholder; the Session panel is never touched. The
- * delete handler passes the deleted session's projectID as a projectIDHint:
- * right after a delete the context may not resolve `project.current()` for a
- * moment, and the hint lets the refresh keep the projectID and still sum the
- * (already updated) deleted aggregate, so deleting never flashes
- * "Unable to load project data".
- *
- * Refresh triggers: route changes and message/session/status/project events
- * schedule a debounced refresh (existing local fast path), and a single
- * bounded polling timer (PROJECT_POLL_DELAY ≈ 30 s) refreshes on top of it so
- * a SEPARATE OpenCode process working in the same project appears in this
- * TUI's sidebar. The poll never overlaps an in-flight refresh, is started at
- * most once per plugin, and is disposed through the same lifecycle as the
- * debounce timer.
+ * The Project section shows all-time usage for the current project,
+ * reconciled as a union of live sessions (client session.list) and durable
+ * per-session checkpoints (outside the host state directory). Overlap is
+ * never double-counted: each session ID merges monotonically and counts once.
+ * Checkpoints are piggybacked on the successful list — no extra SDK calls and
+ * no message-history sweep — batch UPSERT only changed sessions in one WAL
+ * transaction, with zero row updates on idle unchanged refresh.
  */
+
 import { createSignal } from "solid-js"
-import {
-  projectDbPath,
-  readDeletedAggregate,
-  readDeletedSessionIDs,
-} from "./db"
+import { checkpointActiveProject, readCheckpoints } from "./durable/checkpoints"
+import { projectDbPath } from "./durable/legacy-path"
+import { mergeRows, observedToEntry } from "./durable/merge"
+import { migrateLegacyAggregates } from "./durable/migrate"
+import { durableDbPath, normalizeAlias } from "./durable/paths"
+import { reconcileProjectUsage } from "./durable/reconcile"
 import { combineProjectUsage, sumProjectSessions } from "./math"
 import { loadPricing } from "./pricing"
+import { observedSessionUsage } from "./store"
 import type { ProjectSessionLike, ProjectUsage } from "./types"
 
 const [projectSnapshot, _setProjectSnapshot] =
@@ -58,14 +28,12 @@ const [projectSnapshot, _setProjectSnapshot] =
 export { projectSnapshot }
 
 const snapshotListeners = new Set<(snap: ProjectUsage | null) => void>()
-
 export function subscribeProjectSnapshot(
   listener: (snap: ProjectUsage | null) => void,
 ): () => void {
   snapshotListeners.add(listener)
   return () => snapshotListeners.delete(listener)
 }
-
 function notifyProjectSnapshot(snap: ProjectUsage | null): void {
   for (const listener of snapshotListeners) {
     try {
@@ -73,56 +41,23 @@ function notifyProjectSnapshot(snap: ProjectUsage | null): void {
     } catch {}
   }
 }
-
 export function setProjectSnapshot(value: ProjectUsage | null): void {
   _setProjectSnapshot(value)
   notifyProjectSnapshot(value)
 }
-
-/** Test-only: clears all snapshot listeners (used to isolate wiring tests). */
 export function __clearSnapshotListenersForTest(): void {
   snapshotListeners.clear()
 }
 
-/**
- * True while a refreshProject run is awaiting the API/list/ledger work, false
- * once it settles (success or failure, via finally). The panel keeps the
- * static `…` placeholder while no snapshot exists; this flag is the
- * observable in-flight state (used by tests) — loading never animates. It
- * also gates the polling timer, so two refreshes never overlap.
- */
 export const [projectLoading, setProjectLoading] = createSignal(false)
-
-/**
- * Non-null when the last refresh failed to resolve the project or its
- * sessions: ALWAYS the stable PROJECT_ERROR_MESSAGE — raw runtime error
- * messages, string coercions and stack traces never reach the UI. Cleared
- * as soon as a refresh starts, so an in-flight or successful refresh never
- * shows a stale error. The panel renders it in theme().error, truncated to
- * the content width.
- */
 export const [projectError, setProjectError] = createSignal<string | null>(null)
-
 export const PROJECT_REFRESH_DELAY = 300
-
-/**
- * Explicit bounded limit for the session.list call. The SDK defaults to
- * `input.limit ?? 100`; a project with more live rows would silently
- * undercount. 10000 is an explicit high bound, and a result length that
- * reaches it fails closed (truncated lists are never trusted).
- */
 export const PROJECT_SESSION_LIMIT = 10_000
-
-/** Polling cadence for cross-process Project freshness (~30 s). */
 export const PROJECT_POLL_DELAY = 30_000
-
-/** Stable user-facing message for every Project refresh failure. */
 export const PROJECT_ERROR_MESSAGE = "Unable to load project data"
 
 export type ProjectApi = {
-  state: {
-    path: { directory: string; state: string }
-  }
+  state: { path: { directory: string; state: string } }
   client: {
     project: {
       current(params: {
@@ -136,29 +71,13 @@ export type ProjectApi = {
         limit: number
       }): Promise<{ data?: ProjectSessionLike[] }>
     }
-    v2?: {
-      model?: {
-        list?(params?: unknown): Promise<unknown>
-      }
-    }
+    v2?: { model?: { list?(params?: unknown): Promise<unknown> } }
   }
 }
 
 let projectTimer: ReturnType<typeof setTimeout> | null = null
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
-/**
- * Refreshes the Project snapshot: authoritative live list sum (explicit
- * bounded limit) plus the persisted deleted-session aggregate. Never writes
- * history during an ordinary refresh — live sessions are never persisted.
- * Fails closed on a truncated list: the prior snapshot is preserved and the
- * stable error line is surfaced. A `projectIDHint` (captured from a
- * session.deleted payload) keeps the refresh on the deleted session's
- * project when `project.current()` is momentarily unresolved right after a
- * delete. Any other failure keeps the previous snapshot (when one exists)
- * and surfaces a safe error message via projectError; the session panel is
- * independent and keeps working.
- */
 export async function refreshProject(
   api: ProjectApi,
   projectIDHint?: string,
@@ -167,50 +86,110 @@ export async function refreshProject(
   setProjectError(null)
   try {
     const directory = api.state.path.directory
-    // The hint is only a fallback for the transient post-delete gap (a
-    // throwing or empty project.current()); the resolved project always wins.
     let projectID = projectIDHint
+    let worktree: string | undefined
     try {
       const projectRes = await api.client.project.current({ directory })
-      if (projectRes?.data?.id) projectID = projectRes.data.id
-    } catch {
-      // Post-delete context gap: keep the hint and let the list decide.
-    }
+      if (projectRes?.data?.id) {
+        projectID = projectRes.data.id
+        worktree = projectRes.data.worktree
+      }
+    } catch {}
     if (!projectID) throw new Error(PROJECT_ERROR_MESSAGE)
-    // The directory binds the SDK request to the active server instance;
-    // `scope: "project"` then widens the query to every directory/worktree
-    // of that project, and the explicit limit prevents the SDK's default
-    // 100-row silent truncation.
     const listRes = await api.client.session.list({
       directory,
       scope: "project",
       limit: PROJECT_SESSION_LIMIT,
     })
     const sessions = listRes?.data
-    // A missing list payload is an error, never a silent empty list: the
-    // Project would otherwise show zeroed metrics while the API is down.
     if (!sessions) throw new Error(PROJECT_ERROR_MESSAGE)
-    // A result at the cap is a TRUNCATED list: the total would silently
-    // undercount, so fail closed — preserve the prior snapshot and surface
-    // the stable error instead of showing a partial total.
     if (sessions.length >= PROJECT_SESSION_LIMIT)
       throw new Error(PROJECT_ERROR_MESSAGE)
-    const projectSessions = sessions.filter((session) => {
-      const pid = (session as unknown as { projectID?: unknown })?.projectID
+    const projectSessions = sessions.filter((s) => {
+      const pid = (s as unknown as { projectID?: unknown })?.projectID
       return pid == null || pid === "" || pid === projectID
     })
     try {
       await loadPricing(api as unknown as Parameters<typeof loadPricing>[0])
     } catch {}
-    const dbPath = projectDbPath(api.state.path.state)
-    const exclude = readDeletedSessionIDs(dbPath, projectID)
-    const live = sumProjectSessions(projectID, projectSessions, exclude)
-    const deleted = readDeletedAggregate(dbPath, projectID)
-    setProjectSnapshot(combineProjectUsage(live, deleted))
+    const alias = normalizeAlias(worktree ?? directory)
+    const durablePath = durableDbPath()
+    const legacyPath = projectDbPath(api.state.path.state)
+    try {
+      if (durablePath && legacyPath)
+        migrateLegacyAggregates(durablePath, legacyPath)
+    } catch {}
+    let observedById: Map<
+      string,
+      import("./durable/types").CheckpointRow
+    > | null = null
+    try {
+      const map = new Map<string, import("./durable/types").CheckpointRow>()
+      const seenObs = new Set<string>()
+      for (const s of projectSessions) {
+        const sid = (s as unknown as { id?: unknown })?.id
+        if (typeof sid !== "string" || !sid) continue
+        if (
+          (s as unknown as { projectID?: unknown })?.projectID != null &&
+          (s as unknown as { projectID?: unknown })?.projectID !== "" &&
+          (s as unknown as { projectID?: unknown })?.projectID !== projectID
+        )
+          continue
+        if (seenObs.has(sid)) continue
+        seenObs.add(sid)
+        let obs: ReturnType<typeof observedSessionUsage> | null = null
+        try {
+          obs = observedSessionUsage(sid)
+        } catch {
+          obs = null
+        }
+        if (!obs) continue
+        const e = observedToEntry(obs, sid, projectID, alias)
+        if (e) map.set(sid, e)
+      }
+      if (map.size) observedById = map
+    } catch {}
+    try {
+      if (durablePath)
+        checkpointActiveProject(
+          durablePath,
+          projectID,
+          alias,
+          projectSessions,
+          observedById,
+        )
+    } catch {}
+    let checkpoints: Map<
+      string,
+      import("./durable/types").CheckpointRow
+    > | null = null
+    try {
+      checkpoints = durablePath
+        ? readCheckpoints(durablePath, projectID, alias)
+        : new Map()
+    } catch {
+      checkpoints = new Map()
+    }
+    try {
+      if (observedById?.size) {
+        const cp =
+          checkpoints ??
+          new Map<string, import("./durable/types").CheckpointRow>()
+        for (const [sid, e] of observedById) {
+          const ex = cp.get(sid)
+          cp.set(sid, ex ? mergeRows(ex, e) : e)
+        }
+        checkpoints = cp
+      }
+    } catch {}
+    const usage = reconcileProjectUsage(
+      projectID,
+      projectSessions,
+      checkpoints ?? new Map(),
+      alias,
+    )
+    setProjectSnapshot(usage)
   } catch {
-    // Preserve the previous snapshot (when one exists) and surface the
-    // stable PROJECT_ERROR_MESSAGE — raw runtime detail is never exposed.
-    // The Session panel is independent and keeps working.
     setProjectError(PROJECT_ERROR_MESSAGE)
   } finally {
     setProjectLoading(false)
@@ -229,13 +208,6 @@ export function scheduleProjectRefresh(
   )
 }
 
-/**
- * Starts the single bounded polling timer that refreshes Project on top of
- * the local event-driven fast path, so another OpenCode process working in
- * the same project shows up in this TUI's sidebar within ~30 s. Started at
- * most once per plugin (duplicate starts are no-ops) and never overlaps an
- * in-flight refresh; cleared by disposeProjectRefresh.
- */
 export function startProjectPolling(
   api: ProjectApi,
   delay: number = PROJECT_POLL_DELAY,

@@ -1,16 +1,15 @@
 /**
  * Project detail aggregation.
- * Overview totals include all sessions (live + deleted); the selectable list
- * contains ROOT sessions only (parentID empty) with title+date, recent first.
- * Totals follow sidebar refreshProject: one session.list({directory: safeWorktree, scope:"project", limit: PROJECT_SESSION_LIMIT}) + sumProjectSessions + readDeletedAggregate.
+ * Overview totals include all sessions (live + durable checkpoints union);
+ * the selectable list contains ROOT sessions only (parentID empty) with
+ * title+date, recent first. Totals follow sidebar refreshProject: one
+ * session.list union with durable checkpoints, never deleted aggregate.
  */
 
-import {
-  projectDbPath,
-  readDeletedAggregate,
-  readDeletedSessionIDs,
-} from "../db"
-import { combineProjectUsage, resolveCost, sumProjectSessions } from "../math"
+import { readCheckpoints } from "../durable/checkpoints"
+import { durableDbPath, normalizeAlias } from "../durable/paths"
+import { reconcileProjectUsage } from "../durable/reconcile"
+import { resolveCost } from "../math"
 import { loadPricing } from "../pricing"
 import { PROJECT_SESSION_LIMIT } from "../project"
 import type { ProjectUsage } from "../types"
@@ -43,7 +42,6 @@ export type BrowserProjectDetail = {
 
 const num = (v: unknown): number =>
   typeof v === "number" && Number.isFinite(v) ? v : 0
-
 const isRoot = (s: unknown): boolean => {
   const pid =
     (s as Record<string, unknown>)?.parentID ??
@@ -131,10 +129,13 @@ export async function loadProjectDetail(
       throw new Error("Unable to load project")
     sessionsRaw = data
   } else {
-    sessionsRaw = []
+    throw new Error("Unable to load project")
   }
-  const dbPath = projectDbPath(api.state.path.state)
-  const exclude = readDeletedSessionIDs(dbPath, projectID)
+  const alias = normalizeAlias(worktree ?? safeWorktree)
+  const durablePath = durableDbPath()
+  const checkpoints = durablePath
+    ? readCheckpoints(durablePath, projectID, alias)
+    : new Map()
   const seenIds = new Set<string>()
   const sessions: typeof sessionsRaw = []
   for (const s of sessionsRaw) {
@@ -143,14 +144,22 @@ export async function loadProjectDetail(
     seenIds.add(s.id)
     sessions.push(s)
   }
-  const filtered = sessions.filter((s) => !exclude.has(s.id))
-  const live = sumProjectSessions(projectID, filtered, exclude)
-  const deleted = readDeletedAggregate(dbPath, projectID)
-  const usage = combineProjectUsage(live, deleted)
+  // Usage is union of live + checkpoints (checkpoint-only survives, overlap merges)
+  const filteredForStats = sessions.filter((s) => {
+    const pid = (s as unknown as { projectID?: unknown })?.projectID
+    return pid == null || pid === "" || pid === projectID
+  })
+  const usage = reconcileProjectUsage(
+    projectID,
+    filteredForStats,
+    checkpoints,
+    alias,
+  )
+  // Period/lastActive derived from live filtered set plus checkpoint times where live missing
   let lastActive = projectUpdated
   let minCreated = Number.POSITIVE_INFINITY
   let maxLast = 0
-  for (const s of filtered) {
+  for (const s of filteredForStats) {
     const t = s as unknown as { time?: { created?: number; updated?: number } }
     const created = typeof t.time?.created === "number" ? t.time.created : 0
     const updated =
@@ -160,12 +169,22 @@ export async function loadProjectDetail(
     if (created && created < minCreated) minCreated = created
     if (last > maxLast) maxLast = last
   }
+  // Include checkpoint-only sessions for period bounds when they extend
+  for (const cp of checkpoints.values()) {
+    if (filteredForStats.some((s) => s.id === cp.sessionID)) continue
+    if (cp.updatedAt > lastActive) lastActive = cp.updatedAt
+    if (cp.updatedAt > maxLast) maxLast = cp.updatedAt
+  }
   const period =
-    filtered.length > 0 && Number.isFinite(minCreated) && maxLast > 0
-      ? { start: minCreated, end: maxLast }
+    filteredForStats.length > 0 ||
+    (checkpoints.size > 0 && Number.isFinite(minCreated) && maxLast > 0)
+      ? {
+          start: minCreated === Number.POSITIVE_INFINITY ? maxLast : minCreated,
+          end: maxLast,
+        }
       : null
   const curID = currentSessionID(api)
-  const rootOnly = filtered.filter(isRoot)
+  const rootOnly = sessions.filter(isRoot)
   const rows: BrowserSession[] = rootOnly.map((s) => {
     const t = s as unknown as {
       time?: { created?: number; updated?: number }

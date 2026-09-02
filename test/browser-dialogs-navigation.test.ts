@@ -1,3 +1,4 @@
+// biome-ignore-all lint/style/noNonNullAssertion: navigation harness - non-null after guard
 // navigation harness - expanded for V2/eligibility/close-guard fixes
 import { describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"

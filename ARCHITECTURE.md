@@ -1,10 +1,10 @@
 # Architecture — opencode-tokenmeter
 
-> **Status**: Approved &nbsp;|&nbsp; **Last updated**: 2026-08-27 &nbsp;|&nbsp; **Author**: jonasotoaguilar
+> **Status**: Approved &nbsp;|&nbsp; **Last updated**: 2026-08-29 &nbsp;|&nbsp; **Author**: jonasotoaguilar
 
 ## System Overview
 
-`opencode-tokenmeter` is an OpenCode TUI plugin that renders a live usage sidebar: per-session token spend, cost, and the delegation tree of the active session. The entry (`src/tokenmeter.tsx`) subscribes to the host's `session`/`message`/`part` events, feeds a reactive usage store, and registers a `sidebar_content` slot (order 95) that renders a collapsible Solid panel. The panel never remounts to repaint: every refresh event invalidates the affected session and schedules a debounced reconcile that rehydrates usage from the authoritative client `session.messages()` endpoint (replace, not merge). The panel shows three sections — Project (all-time usage), Session (active session + delegation tree), and Subagents (the per-agent delegation list, hidden until the first group exists) — under a master `▶/▼ TokenMeter` disclosure row; master and per-section disclosure are transient and never written to kv. A second data path aggregates all-time Project usage from `session.list({ scope: "project", limit: 10000 })` — the authoritative live per-session sum, refreshed on every render — plus ONE per-project DELETED-session aggregate persisted in a plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`, never `api.kv`, which concurrent TUIs would clobber). The headline token total is each session's complete CUMULATIVE TOKEN SPEND — `Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write` across ALL assistant messages, the exact reconstruction of OpenCode's billed `tokens.total` — never lowered by compaction or restarts. The plugin also registers three palette-visible commands through the modern keymap API (`api.keymap.registerLayer`, category `TokenMeter`, namespace `palette`): `tokenmeter.settings` opens the settings host `DialogSelect`, and `tokenmeter.toggle-sections` expands/collapses all three sections together with a configurable shortcut (default `Ctrl+E`, persisted in kv, re-registered live on change), and `tokenmeter.browser` (`TokenMeter: Browse Usage`) opens the cross-project browser — `Projects` → `Project detail` → `Session detail` — via `api.ui.dialog.replace` (ONE replace at a time; host `DialogStack.replace`/`clear` invoke the previous entry's `onClose` before mutating, so the browser separates host `onClose` (`if (suppress) return; close()`) from user `close` (`closed` guard + `dialog.clear()`) and suppresses `onClose` only during content-update replaces via `withSuppress` — user `× Close` and `Escape → onClose` still clear exactly once) with provider/model breakdown per session. Visibility preferences (`visibility: { sidebar, project, session, subagents }` inside `tokenmeter.settings.v1`, defaults all visible) gate presentation only: the entry returns `null` from `sidebar_content` when the sidebar is hidden and the panel hides individual sections without reserving height, while collection, cost resolution, footer, and milestone toasts keep running. Project milestones are observed via an explicit `subscribeProjectSnapshot` subscription (the `solid-js` server build makes `createEffect` on `projectSnapshot` a no-op in Bun/Node), and OpenAI zero-cost rows are estimated via host `ModelV2Info.cost` or the bounded `https://models.dev/api.json` fallback when the host catalog is empty. The shipped artifact is a bundled ESM file whose reactive bindings are asserted at build time.
+`opencode-tokenmeter` is an OpenCode TUI plugin that renders a live usage sidebar: per-session token spend, cost, and the delegation tree of the active session. The entry (`src/tokenmeter.tsx`) subscribes to the host's `session`/`message`/`part` events, feeds a reactive usage store, and registers a `sidebar_content` slot (order 95) that renders a collapsible Solid panel. The panel never remounts to repaint: every refresh event invalidates the affected session and schedules a debounced reconcile that rehydrates usage from the authoritative client `session.messages()` endpoint (replace, not merge). The panel shows three sections — Project (all-time usage), Session (active session + delegation tree), and Subagents (the per-agent delegation list, hidden until the first group exists) — under a master `▶/▼ TokenMeter` disclosure row; master and per-section disclosure are transient and never written to kv. A second data path aggregates all-time Project usage from `session.list({ scope: "project", limit: 10000 })` — the authoritative live per-session sum, refreshed on every render — plus durable per-session checkpoints **outside** the host state directory (`checkpoints.sqlite` under the OS data directory — `~/.local/share/opencode-tokenmeter` on Linux, `~/Library/Application Support/opencode-tokenmeter` on macOS, `%APPDATA%/opencode-tokenmeter` on Windows — never `api.state.path.state` which is deleted with the cache, and never `api.kv`). The headline token total is each session's complete CUMULATIVE TOKEN SPEND — `Σ input + Σ output + Σ reasoning + Σ cache.read + Σ cache.write` across ALL assistant messages, the exact reconstruction of OpenCode's billed `tokens.total` — never lowered by compaction or restarts. The plugin also registers three palette-visible commands through the modern keymap API (`api.keymap.registerLayer`, category `TokenMeter`, namespace `palette`): `tokenmeter.settings` opens the settings host `DialogSelect`, and `tokenmeter.toggle-sections` expands/collapses all three sections together with a configurable shortcut (default `Ctrl+E`, persisted in kv, re-registered live on change), and `tokenmeter.browser` (`TokenMeter: Browse Usage`) opens the cross-project browser — `Projects` → `Project detail` → `Session detail` — via `api.ui.dialog.replace` (ONE replace at a time; host `DialogStack.replace`/`clear` invoke the previous entry's `onClose` before mutating, so the browser separates host `onClose` (`if (suppress) return; close()`) from user `close` (`closed` guard + `dialog.clear()`) and suppresses `onClose` only during content-update replaces via `withSuppress` — user `× Close` and `Escape → onClose` still clear exactly once) with provider/model breakdown per session. Visibility preferences (`visibility: { sidebar, project, session, subagents }` inside `tokenmeter.settings.v1`, defaults all visible) gate presentation only: the entry returns `null` from `sidebar_content` when the sidebar is hidden and the panel hides individual sections without reserving height, while collection, cost resolution, footer, and milestone toasts keep running. Project milestones are observed via an explicit `subscribeProjectSnapshot` subscription (the `solid-js` server build makes `createEffect` on `projectSnapshot` a no-op in Bun/Node), and OpenAI zero-cost rows are estimated via host `ModelV2Info.cost` or the bounded `https://models.dev/api.json` fallback when the host catalog is empty. The shipped artifact is a bundled ESM file whose reactive bindings are asserted at build time.
 
 ## Architecture Pattern
 
@@ -28,7 +28,7 @@ graph TD
         Route["api.route.current"]
         Client["api.client (SDK)"]
         Kv[("api.kv store")]
-        State[("state dir / tokenmeter.sqlite")]
+        State[("OS data dir / checkpoints.sqlite")]
         Slot["sidebar_content slot (order 95)"]
         Keymap["api.keymap (layers)"]
     end
@@ -100,35 +100,32 @@ sequenceDiagram
     R-->>H: setSnapshot → panel repaints in place
 
     Note over E,Db: session.deleted
-    E->>Db: recordDeletedSession (tombstone-admission transaction, exactly once)
+    E->>Db: upsertCheckpoint (monotonic merge, same row)
     E->>R: scheduleReconcile + scheduleProjectRefresh(projectIDHint)
-    Note over R,Db: refresh sums live list + SQLite deleted aggregate
+    Note over R,Db: refresh reconciles live list ∪ durable checkpoints
 ```
 
 ### Data Model
 
 ```mermaid
 erDiagram
-    Project ||--o{ DeletedSession : "tombstones"
-    Project ||--|| DeletedAggregate : "aggregate"
-    DeletedSession {
+    Checkpoint {
         string session_id PK
         string project_id PK
-    }
-    DeletedAggregate {
-        string project_id PK
+        string project_alias
+        string cost_source
         number cost
         number input
         number output
         number reasoning
         number cacheRead
         number cacheWrite
-        number cache
         number context
+        number updated_at
     }
 ```
 
-The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`) keeps exactly TWO tables. `projects` holds ONE aggregate row per projectID: the sum of every deleted session's final usage (cost/input/output/reasoning/cacheRead/cacheWrite/cache/context as resolved payload+observed per-component maxima, with `context == input + output + reasoning + cacheRead + cacheWrite`). `tombstones` holds the minimal (sessionID, projectID) exactly-once admission set: a `session.deleted` event opens a `BEGIN IMMEDIATE` transaction, `INSERT OR IGNORE`s its tombstone, and ONLY the transaction that inserted the row increments the aggregate — so duplicate deliveries and concurrent TUIs count each session exactly once, while a delete with no usage never consumes its tombstone. No live session/root snapshot is ever persisted; the authoritative live total is re-read from `session.list` on every refresh. The host kv store owns the Subagents section preference (`tokenmeter.sidebar.expanded`), the settings object (`tokenmeter.settings.v1`) and the toggle shortcut (`tokenmeter.toggle.shortcut`); Project/Session section disclosure is transient and never persisted. The obsolete v4 kv ledger is never read, converted, migrated or written — legacy keys are ignored. Every open/close of the store uses WAL journal mode plus a busy timeout, and every operation is a short transaction, so every TUI process reads the latest committed state.
+The durable store (`checkpoints.sqlite` under the OS data directory — `~/.local/share/opencode-tokenmeter` on Linux, `~/Library/Application Support/opencode-tokenmeter` on macOS, `%APPDATA%/opencode-tokenmeter` on Windows — never `api.state.path.state`, which is deleted with the cache) keeps one row per `(session_id, project_id)` with monotonic per-field merge. Each checkpoint stores `project_alias` (canonical worktree), `cost` + `cost_source` (reported/estimated), `input/output/reasoning/cacheRead/cacheWrite/cache/context`, `updated_at`, `checkpoint_at`, `version`. Checkpointing piggybacks every successful `session.list` for the open project (one WAL transaction, zero row updates when unchanged); `session.deleted` merges its final payload into the same row via `ON CONFLICT DO UPDATE`. No live snapshot is ever persisted separately; the live total is re-read from `session.list` on every refresh and reconciled as `live ∪ checkpoints` by session identity. The host kv store owns the Subagents section preference (`tokenmeter.sidebar.expanded`), the settings object (`tokenmeter.settings.v1`) and the toggle shortcut (`tokenmeter.toggle.shortcut`); Project/Session section disclosure is transient and never persisted. The obsolete v4 kv ledger is never read and the legacy `tokenmeter.sqlite` under `api.state.path.state` is used only for one-time migration. Every open/close uses WAL + `busy_timeout=5000` plus a short transaction, so every TUI process reads the latest committed state.
 
 ## Component Details
 
@@ -166,15 +163,15 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 
 ### `src/tokenmeter/project.ts` — Project section
 
-- **Responsibility**: Resolves `project.current()`, lists `session.list({ scope: "project", limit: PROJECT_SESSION_LIMIT })` filtered by `projectID` (a result at the 10_000 cap is a truncated list and fails closed: prior snapshot preserved, stable error surfaced), sums the live rows, adds the SQLite deleted aggregate, and publishes the snapshot. Owns the debounced refresh timer, the ~30 s polling timer (single, non-overlapping, disposed with the plugin), and the post-delete `projectIDHint` fallback.
-- **Dependencies**: db, math, `api.client` / `api.state.path`.
-- **Failure modes**: missing list payload is an error (never a silent zero); live sessions are never persisted — a refresh never writes history; a truncated list never replaces a good snapshot.
+- **Responsibility**: Resolves `project.current()`, lists `session.list({ scope: "project", limit: PROJECT_SESSION_LIMIT })` filtered by `projectID` (a result at the 10_000 cap is a truncated list and fails closed: prior snapshot preserved, stable error surfaced), reconciles the live rows with durable checkpoints via `reconcileProjectUsage` (union by `session.id` with monotonic per-field merge and cost provenance), and publishes the snapshot. Owns the debounced refresh timer, the ~30 s polling timer (single, non-overlapping, disposed with the plugin), and the post-delete `projectIDHint` fallback; also piggybacks checkpoint batch UPSERT on every successful list.
+- **Dependencies**: durable/checkpoints, durable/reconcile, math, `api.client`.
+- **Failure modes**: missing list payload is an error (never a silent zero); live sessions are never persisted separately — a checkpoint is just a monotonic copy of the live row; a truncated list never replaces a good snapshot.
 
-### `src/tokenmeter/db.ts` — Plugin-owned SQLite persistence
+### `src/tokenmeter/db.ts` — Legacy shim + `src/tokenmeter/durable/*` — Durable checkpoints
 
-- **Responsibility**: Owns `tokenmeter.sqlite` under `api.state.path.state`: `projects` (ONE deleted-session aggregate row per projectID) and `tombstones` ((sessionID, projectID) exactly-once admission). `recordDeletedSession` resolves the delete payload and the plugin-observed usage per-component, then runs ONE `BEGIN IMMEDIATE` transaction: `INSERT OR IGNORE` the tombstone, and only the transaction that inserted it increments the aggregate (a no-usage delete never consumes its tombstone). `readDeletedAggregate` returns the project's aggregate for the refresh. Every operation opens a short-lived connection (WAL + busy timeout), runs one transaction, and closes, so concurrent TUI processes read the latest committed state and never clobber each other.
-- **Dependencies**: `bun:sqlite` (Bun builtin — the build target is Bun), `node:path`, math (entry resolution).
-- **Failure modes**: a missing state directory is a no-op (never a throw); malformed rows are never produced (schema-constrained); the obsolete v4 kv ledger is never read, written or migrated.
+- **Responsibility**: `db.ts` is now a legacy shim re-exporting `PROJECT_DB_FILE`/`projectDbPath` for one-time migration only. The durable store lives in `durable/checkpoints.ts` (batch piggyback UPSERT on `session.list`), `durable/deleted.ts` (single-session UPSERT for `session.deleted`), `durable/merge.ts` (per-field high-water + reported-cost-wins), `durable/reconcile.ts` (union by `session.id`), `durable/paths.ts`/`platform.ts` (OS data dir resolution + alias normalization), `durable/migrate.ts` (one-time legacy aggregate import as a reserved checkpoint row), and `durable/legacy-path.ts`. Every operation opens a short-lived WAL connection (`busy_timeout=5000`), runs one transaction, and closes; fingerprint comparison makes unchanged refreshes perform zero updates.
+- **Dependencies**: `bun:sqlite` (Bun builtin — the build target is Bun), `node:path`, `node:os`, math.
+- **Failure modes**: a missing durable directory is created `0700` and file `0600` where feasible; a missing legacy DB is a no-op migration; malformed checkpoint rows are never produced (schema-constrained).
 
 ### `src/tokenmeter/settings.ts` — Preferences model
 
@@ -197,7 +194,7 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 ### `src/tokenmeter/browser/` — Cross-project browser (Projects → Project detail → Session detail)
 
 - **Responsibility**: Presentation-only browser over the existing Project aggregation and `session.messages` on-demand. `eligibility.ts` (`isEligibleProjectPath`) gates every project by sync filesystem checks — `existsSync` + `statSync` directory, `.git` presence, rejects `/`, HOME, or direct child `~/foo`, `parse(root)` roots, and `isSafeDirectory` — so invalid/deleted/non-git and root-level entries never flash (nested `~/projects/foo` stays). `constants.ts`/`types.ts`/`is-safe-directory.ts`/`timeout.ts` (`withTimeout` 4s) / `concurrency.ts` (`withConcurrency` 4) + `browser-activity.ts` generation guard provide bounded provisional-then-final flow: provisional eligible rows from `project.list` + `current` pin paint in ≤100 ms; async `probeHasSessionsV2` via `api.client.v2.session.list({project, limit:1})` finalizes with `BROWSER_CONCURRENCY` 4 and `FETCH_TIMEOUT_MS` 4s, generation-guarded so late probes cannot replace navigated detail. V2-only presence probes replace the legacy `project.directories` + `session.list({directory})` path, cutting backend calls 58→30 at `N=28` (see ADR-0009). `directories.ts` keeps safe worktree→host fallback for non-browser paths; `session-source.ts` enforces pagination guards; `projects.ts`/`project-detail.ts`/`session-detail.ts` (+`session-info.ts`/`session-messages.ts`/`session-tree.ts`/`session-fallback.ts`) reuse that flow and group by `providerID` → `modelID`. `dialog-shared.tsx`/`projects-dialog.tsx` (`Current Project` / `Projects`, title count-only) / `project-dialog.tsx` (`Current Session` / `Sessions`) / `session-dialog.tsx` render the three `DialogSelect` panels via ONE `api.ui.dialog.replace` at a time (`dialog.tsx` barrel). Host `DialogStack` (`packages/tui/src/ui/dialog.tsx`) calls the previous entry's `onClose` before every `replace` and `clear`; the browser therefore keeps a distinct `close` (idempotent `closed` guard + `dialog.clear()` for user `× Close`) and `onClose` (`if (suppress) return; close()` for host `Escape`/stack lifecycle) with `withSuppress(fn)` wrapping only the provisional/final content-update replaces so replace-driven `onClose` is a no-op while user `Close`/`Escape` still clear exactly once and late async is blocked by `isActive()`/`closed`; Back returns to that `projectID` without leaking entries.
-- **Dependencies**: `db` (deleted aggregate), `math`/`numbers`/`text`/`pricing`, `api.client`/`api.state`/`api.route`/`api.ui.dialog`.
+- **Dependencies**: `durable` (checkpoints), `math`/`numbers`/`text`/`pricing`, `api.client`/`api.state`/`api.route`/`api.ui.dialog`.
 - **Failure modes**: ineligible projects never enter provisional or final sets; missing list payload or truncated cap is error (never silent zero); `session.messages` failure degrades to empty breakdown (never throw); pricing miss stays safe-zero; timeout or late generation drops the probe; Back without `projectID` falls back to browser.
 
 ### `src/tokenmeter/panel/` — UsagePanel module
@@ -227,20 +224,20 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 | Host `api.kv` — `tokenmeter.settings.v1` | Object-backed preferences (`cache`, `numbers`, `collapsedSummary`, `footer`, `milestones`, `visibility: { sidebar, project, session, subagents }`) | object | One whole-object write per change, ready-gated; survives restarts; `visibility` defaults all `true`, presentation-only |
 | Host `api.kv` — `tokenmeter.sidebar.expanded` | Subagents section preference | boolean | Durable Subagents disclosure; survives restarts |
 | Host `api.kv` — `tokenmeter.toggle.shortcut` | Toggle-sections shortcut preference | string | Default `ctrl+e`; re-registers the keymap layer live on change |
-| Plugin SQLite — `tokenmeter.sqlite` (`projects`, `tombstones`) | ONE deleted-session aggregate row per projectID + (sessionID, projectID) exactly-once tombstones | SQLite (WAL) under `api.state.path.state` | `api.kv` is a whole-file read-modify-write shared by every plugin process: concurrent TUIs would overwrite each other's Project history. SQLite gives atomic per-session admission and cross-process consistency; the live total is never persisted (the list is authoritative) |
+| Plugin SQLite — `checkpoints.sqlite` (durable) | One row per `(session_id, project_id)` durable checkpoint with monotonic merge | SQLite (WAL) under OS data dir (`~/.local/share/opencode-tokenmeter` etc.) | The host state dir is ephemeral (deleted with cache); durable checkpoints survive cache deletion and are reconciled as `live ∪ checkpoints`. The live total is never persisted separately — the list is authoritative on every refresh, checkpoints are historical copies |
 
 ### Consistency & Concurrency
 
-- **Source of truth**: the client SDK. The in-memory store is a projection; sessions marked for rehydration are re-read from `client.session.messages()` (replace, not merge). The Project live total is re-read from `session.list` on every refresh — never persisted.
-- **Cross-process exactly-once**: `session.deleted` events are admitted via a `BEGIN IMMEDIATE` tombstone transaction in the shared SQLite store: only the process that inserts the (sessionID, projectID) row increments the project's deleted aggregate, so duplicate deliveries and concurrent TUIs never double-count; no-usage deletes never consume a tombstone.
-- **Cross-process freshness**: every store operation is a short open/transaction/close on a WAL database with a busy timeout, so each process reads the latest committed state; a ~30 s polling timer refreshes the Project section so a sibling TUI's deletions appear promptly.
-- **Idempotency**: message usage is upserted by ID; the live Project sum counts each sessionID once; the deleted aggregate is additive only under tombstone admission.
+- **Source of truth**: the client SDK. The in-memory store is a projection; sessions marked for rehydration are re-read from `client.session.messages()` (replace, not merge). The Project live total is re-read from `session.list` on every refresh — checkpoints are monotonic copies of live rows, never a separate aggregate.
+- **Cross-process exactly-once**: union by `session.id` guarantees each session counts once; durable checkpoints are merged monotonically (per-field max, reported cost wins) so duplicate live rows and reappearing sessions never double-count and never regress.
+- **Cross-process freshness**: every durable operation is a short open/transaction/close on a WAL database (`busy_timeout=5000`) under the OS data dir, so each process reads the latest committed state; a ~30 s polling timer refreshes the Project section so a sibling TUI's checkpoints appear promptly.
+- **Idempotency**: message usage is upserted by ID; the live Project sum counts each sessionID once; durable checkpoints update the same `(session_id, project_id)` row via `ON CONFLICT DO UPDATE` with monotonic merge.
 - **Event ordering**: a generation counter drops stale async reconcile results; a debounce collapses bursts into one refresh of the whole panel.
-- **Async correctness**: `session.deleted` persists into the SQLite aggregate *before* the refresh and passes `projectIDHint`, so a failing post-delete `project.current()` still keeps the total (the hint stands in for the projectID).
+- **Async correctness**: `session.deleted` merges into the same checkpoint row *before* the refresh and passes `projectIDHint`, so a failing post-delete `project.current()` still keeps the total (the hint stands in for the projectID).
 
 ## Async Delivery
 
-- **Delivery semantics**: host events are at-least-once; consumers deduplicate by keying message usage by message ID (replace), by the generation-counter guard on reconcile, and by tombstone admission for deleted sessions.
+- **Delivery semantics**: host events are at-least-once; consumers deduplicate by keying message usage by message ID (replace), by the generation-counter guard on reconcile, and by monotonic checkpoint merge for deleted/reappearing sessions.
 - **Backpressure / batching**: a single debounced timer (300 ms; 100 ms on idle) per refresh; the 30 s maintenance tick is tree-only (never forces a client message fetch for loaded sessions); the 30 s project poll is a single non-overlapping interval (an in-flight refresh skips the tick).
 - **Event envelope**: the plugin consumes only the minimal facts in each event payload and re-fetches current state from the client — it never accumulates event history.
 
@@ -257,8 +254,8 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 - Fail-contained hooks: no event handler throws; a Project failure surfaces the stable error line and never touches the Session panel.
 - Empty loads stay retryable: a first-open session transitions from placeholder to populated instead of freezing on an empty map.
 - Missed-event safety: `session.created` purges the tree cache (parentID can be absent), and the 30 s maintenance timer re-discovers descendants — a cached empty child list can never hide a child forever.
-- Cross-process Project freshness: the 30 s polling timer refreshes the live list + shared deleted aggregate, so a sibling TUI's deletions appear without any local event.
-- SQLite concurrency: WAL + busy timeout + short open/transaction/close boundaries mean concurrent TUI processes queue writers instead of clobbering, and every read sees the latest committed state; a missing state directory degrades to no persisted deletions (never a throw).
+- Cross-process Project freshness: the 30 s polling timer refreshes the live list + durable checkpoints, so a sibling TUI's checkpoints appear without any local event.
+- SQLite concurrency: WAL + `busy_timeout=5000` + short open/transaction/close boundaries under the OS data dir mean concurrent TUI processes queue writers instead of clobbering, and every read sees the latest committed state; a missing durable directory is created `0700` (never a throw).
 
 ### Maintainability
 
@@ -273,7 +270,7 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 | Invalidation + client rehydration reconcile | The client SDK is the source of truth; a stale mirror can never win, and removals/compaction are reflected | In-memory mirror as truth; remount on event; interval polling |
 | Bundled dist via `createSolidTransformPlugin` with post-build reactive-binding assertion | Loading source TSX eagerly would produce `jsxDEV` with zero reactive bindings — the panel would never repaint; the assertion makes a broken build unshippable | Shipping source; plain bun transform; tsup |
 | Runtime packages external (`@opencode-ai/plugin`, `@opentui/*`, `solid-js`) | The TUI host provides them at load time; inlining duplicates the host's own copies | Inlining all dependencies |
-| SQLite persistence: ONE deleted aggregate per project + (sessionID, projectID) tombstones, live total never persisted | `api.kv` is a whole-file read-modify-write shared by every plugin process — concurrent TUIs lose each other's updates. SQLite gives atomic exactly-once admission (BEGIN IMMEDIATE + INSERT OR IGNORE) and cross-process consistency; the live list is authoritative on every refresh, so no live snapshot is ever stored | Per-session tombstones; in-memory only; JSON files; the host kv store |
+| Durable per-session checkpoints outside host state (`checkpoints.sqlite` under OS data dir) with union reconciliation | The host state dir is ephemeral — deleting the cache deleted the backup under ADR-0006. Durable checkpoints survive cache deletion, piggyback `session.list`, and reconcile as `live ∪ checkpoints` with monotonic per-field merge and cost provenance | Per-project aggregate + tombstones in `api.state.path.state`; in-memory only; JSON files; host kv store |
 | Route-reactive session activation | The TUI exposes no session-select event; `api.route.current` read inside a Solid effect is the supported change signal | One-time prop read |
 | Debounced reconcile + generation counter | Event bursts collapse to one repaint; stale async results are dropped | Synchronous reconcile per event |
 | Column-aware rendering, width clamp 24–52 (fallback 38) | The terminal never wraps mid-word; rows render only when they fit | Fixed-width templates |
@@ -293,9 +290,9 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 | TUI mirror holds stale messages | Panel shows outdated usage | Invalidation marks the session for rehydration; the next reconcile re-reads the client (replace, not merge) |
 | `session.created` without parentID | New delegated child hidden from the tree | Whole tree cache purged on creation; 30 s maintenance timer re-discovers descendants |
 | Event storm / out-of-order events | Churn or stale renders | Debounced timers (300 ms / 100 ms) + generation counter drops stale results; upsert-by-ID keeps totals order-independent |
-| `session.deleted` while `project.current()` unresolved | Project section flashes an error | The delete is recorded into the SQLite aggregate *before* the refresh; `projectIDHint` stands in for the projectID so the refresh still sums live + deleted |
+| `session.deleted` while `project.current()` unresolved | Project section flashes an error | The delete merges into the same durable checkpoint row *before* the refresh; `projectIDHint` stands in for the projectID so the refresh still reconciles `live ∪ checkpoints` |
 | Truncated session.list (at the 10_000 cap) | Silent undercount | The refresh fails closed: prior snapshot preserved, stable error surfaced — a partial total never renders |
-| Cross-process kv clobbering / stale reads | Lost or duplicated Project history | Project history lives in plugin-owned SQLite (WAL + busy timeout + short transactions); tombstones make admission exactly-once |
+| Cross-process kv clobbering / stale reads | Lost or duplicated Project history | Project history lives in durable `checkpoints.sqlite` under the OS data dir (WAL + `busy_timeout=5000` + short transactions); union by `session.id` with monotonic merge makes it exactly-once |
 | Artifact degrades to eager JSX | Panel never repaints (silent) | Build-time assertion + `test/artifact.test.ts` fail the build/CI |
 | Plugin load/dispose mistakes | Leaked timers or broken turn | All signals/timers owned by one `createRoot`; `api.lifecycle.onDispose` disposes everything, including the keymap layer disposers and the toggle layer |
 
@@ -306,7 +303,7 @@ The plugin-owned SQLite store (`tokenmeter.sqlite` under `api.state.path.state`)
 - [ADR-0003: KV persistence for collapse state and the project history ledger](docs/adr/0003-kv-persistence-for-collapse-state-and-project-ledger.md) (superseded by ADR-0006)
 - [ADR-0004: External runtime packages provided by the host](docs/adr/0004-external-runtime-packages.md)
 - [ADR-0005: Sidebar width resolution with clamping](docs/adr/0005-sidebar-width-resolution-with-clamping.md)
-- [ADR-0006: SQLite persistence for the deleted-session project aggregate](docs/adr/0006-sqlite-persistence-for-deleted-project-usage.md)
+- [ADR-0006: SQLite persistence for the deleted-session project aggregate](docs/adr/0006-sqlite-persistence-for-deleted-project-usage.md) (superseded by ADR-0009)
 - [ADR-0007: OpenAI cost fallback via SDK pricing](docs/adr/0007-openai-cost-fallback.md) (superseded by ADR-0008)
 - [ADR-0008: OpenAI cost fallback via SDK pricing with models.dev remote fallback](docs/adr/0008-openai-cost-fallback-with-models-dev.md)
-- [ADR-0009: Eligible projects with V2 presence probes and provisional paint](docs/adr/0009-eligible-projects-with-v2-presence-probes.md)
+- [ADR-0009: Durable per-session checkpoints outside the host state directory](docs/adr/0009-durable-per-session-checkpoints.md)
