@@ -466,6 +466,11 @@ async function mountEntry(
   setProjectLoading(false)
   setProjectError(null)
   disposeProjectRefresh()
+  // Isolated durable directory outside the host state dir so cache deletion
+  // does not delete the backup. Each mount gets its own temp durable.
+  const durableDir = mkdtempSync(join(tmpdir(), "tokenmeter-durable-"))
+  const prevDurable = process.env.TOKENMETER_DURABLE_DIR
+  process.env.TOKENMETER_DURABLE_DIR = durableDir
   // Isolated plugin state directory: the entry owns a SQLite store there.
   const stateDir = mkdtempSync(join(tmpdir(), "tokenmeter-render-"))
   const api = {
@@ -590,6 +595,10 @@ async function mountEntry(
       })
       disposeProjectRefresh()
       rmSync(stateDir, { recursive: true, force: true })
+      rmSync(durableDir, { recursive: true, force: true })
+      if (prevDurable === undefined)
+        delete (process.env as Record<string, unknown>).TOKENMETER_DURABLE_DIR
+      else process.env.TOKENMETER_DURABLE_DIR = prevDurable
     },
     state,
   }
@@ -918,10 +927,10 @@ describe("render-level live refresh", () => {
     dispose()
   }, 20000)
 
-  test("REGRESSION: the deleted aggregate records the FULL client-loaded usage, never the truncated mirror aggregate", async () => {
-    // The store map (built by the same load) feeds the deleted aggregate via
+  test("REGRESSION: the durable checkpoint records the FULL client-loaded usage, never the truncated mirror aggregate", async () => {
+    // The store map (built by the same load) feeds the durable checkpoint via
     // observedSessionUsage when a delete payload carries no tokens. A
-    // truncated mirror must not shrink the recorded aggregate.
+    // truncated mirror must not shrink the recorded checkpoint.
     const rootID = "ses_truncated_project"
     const childID = "ses_truncated_project_child"
     const truncatedMirror = [
@@ -965,7 +974,7 @@ describe("render-level live refresh", () => {
     expect(snapshot()?.cache).toBe(0)
 
     // Delete the delegated session with a payload that carries NO tokens:
-    // the SQLite deleted aggregate records the plugin's observed usage. The
+    // the durable checkpoint records the plugin's observed usage. The
     // full client-loaded aggregate (54500) must land in the Project deleted
     // aggregate — not the truncated mirror total (6000).
     fire("session.deleted", {
@@ -1101,7 +1110,7 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
     purgeTreeCache()
     // Seed the store with the project sessions' OBSERVED usage (the real
     // shape: list payloads carry no tokens; messages are authoritative) —
-    // captured at delete time into the SQLite deleted aggregate.
+    // captured at delete time into the durable checkpoint.
     upsertMessageUsage(
       msg(
         "pm1",
@@ -1260,15 +1269,15 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
     await setup.waitForFrame((frame) => frame.includes("5K tokens"))
     // The delete lands while project.current() starts failing (the transient
     // context gap right after a delete). The delete handler records ps1 into
-    // the SQLite deleted aggregate BEFORE the refresh and passes projectID
+    // the durable checkpoint BEFORE the refresh and passes projectID
     // "proj_x" as the hint; the server drops ps1 from the live list.
     project.fail = true
     project.sessions = [must(must(project.sessions)[1])]
     fire("session.deleted", { info: { id: "ps1", projectID: "proj_x" } })
     await sleep(RECONCILE_DELAY + 200)
-    // Same total as before the delete (ps1 deleted aggregate + ps2 live), NO
+    // Same total as before the delete (ps1 durable checkpoint + ps2 live), NO
     // error: the hint kept the projectID and the refresh summed the live
-    // list plus the shared deleted aggregate.
+    // list plus the shared durable checkpoint.
     expect(projectSnapshot()?.sessions).toBe(2)
     expect(projectSnapshot()?.context).toBe(4850)
     expect(projectError()).toBeNull()
@@ -1368,7 +1377,7 @@ describe("Project section (projectID crossing, placeholder, collapse/expand, scr
     expect(projectSnapshot()?.sessions).toBe(0)
 
     // The session is deleted with a usage-less payload: the entry handler
-    // records the observed snapshot into the SQLite deleted aggregate and
+    // records the observed snapshot into the durable checkpoint and
     // the total must survive.
     fire("session.deleted", {
       info: { id: "s_obs", projectID: "proj_del", title: "gone" },

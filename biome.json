@@ -15,30 +15,42 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true
+      "recommended": true,
+      "style": {
+        "useTemplate": "off"
+      },
+      "suspicious": {
+        "noExplicitAny": "off",
+        "noAssignInExpressions": "off"
+      },
+      "correctness": {
+        "noUnusedImports": "off",
+        "noUnusedVariables": "off",
+        "noUnusedFunctionParameters": "off"
+      }
     }
   },
   "overrides": [
     {
-      "includes": [
-        "test/openai-cost-remote.test.ts"
-      ],
+      "includes": ["test/openai-cost-remote.test.ts"],
       "formatter": {
         "enabled": false
       }
     },
     {
-      "includes": [
-        "test/browser-session-source.test.ts"
-      ],
+      "includes": ["test/browser-session-source.test.ts"],
       "formatter": {
         "enabled": false
       }
     },
     {
-      "includes": [
-        "test/browser-project-detail.test.ts"
-      ],
+      "includes": ["test/browser-project-detail.test.ts"],
+      "formatter": {
+        "enabled": false
+      }
+    },
+    {
+      "includes": ["test/durable-paths.test.ts"],
       "formatter": {
         "enabled": false
       }

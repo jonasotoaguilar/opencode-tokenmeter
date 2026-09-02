@@ -105,12 +105,9 @@ describe("production TokenMeter artifact (dist/tui.js)", () => {
 
   test("REGRESSION: the artifact loads bun:sqlite and can execute a real SQLite statement", async () => {
     const code = readFileSync(ARTIFACT_PATH, "utf8")
-    // The plugin-owned Project store imports bun:sqlite (a Bun builtin the
-    // host cannot provide as an external package); the bundle must keep that
-    // import and never inline or rewrite it.
     expect(code).toContain('import { Database } from "bun:sqlite"')
-    expect(code).toContain("tokenmeter.sqlite")
-    expect(code).toContain("INSERT OR IGNORE INTO tombstones")
+    expect(code).toContain("checkpoints.sqlite")
+    expect(code).toContain("checkpoints")
     // The artifact module graph loads in the Bun runtime (its top-level
     // bun:sqlite import resolves), and the runtime executes real SQLite
     // statements — the same path the TUI host will take.

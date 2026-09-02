@@ -61,10 +61,15 @@ function makePluginApi(
   toasts: ToastCall[],
 ) {
   const stateDir = mkdtempSync(join(tmpdir(), "tokenmeter-wiring-"))
+  const durableDir = mkdtempSync(join(tmpdir(), "tokenmeter-wiring-durable-"))
+  const prevDurable = process.env.TOKENMETER_DURABLE_DIR
+  process.env.TOKENMETER_DURABLE_DIR = durableDir
   const handlers = new Map<string, (e: unknown) => void>()
   const disposes: Array<() => void> = []
   return {
     stateDir,
+    durableDir,
+    prevDurable,
     toasts,
     api: {
       kv: fakeKv.kv,
@@ -121,6 +126,10 @@ function makePluginApi(
           fn()
         } catch {}
       rmSync(stateDir, { recursive: true, force: true })
+      rmSync(durableDir, { recursive: true, force: true })
+      if (prevDurable === undefined)
+        delete (process.env as Record<string, unknown>).TOKENMETER_DURABLE_DIR
+      else process.env.TOKENMETER_DURABLE_DIR = prevDurable
     },
   }
 }
