@@ -2057,10 +2057,14 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
     )
     // The expanded agent list is a REAL scroll container that holds ALL
     // groups through the `For` — no slice, no clipped cue, no hidden count.
-    // Viewport caps at 4 rows (two collapsed agents) and shrinks for fewer
-    // rows: height = min(actual visible rows, 4) so a single collapsed group
-    // occupies 2 rows, not 4 with blank space (#25). Overflow gates the
-    // scrollbar: scrollY is only enabled when totalRows > 4 (#33).
+    // Viewport caps at 6 rows (three collapsed agents) and shrinks for fewer
+    // rows: height = min(actual visible rows, 6) so a single collapsed group
+    // occupies 2 rows, not 6 with blank space (#25). Overflow gates the
+    // scrollbar: scrollY is only enabled when totalRows > 6 (#33). One wheel
+    // gesture always advances exactly 2 rows (fixed acceleration), clamped;
+    // the toggle reveal auto-scrolls the minimum distance to show the full
+    // expanded entry (4 rows compact, 6 precise), and collapsing clamps back
+    // with no blank rows.
     expect(panelSrc).toContain("<scrollbox")
     expect(panelSrc).toContain("subagentsLayout")
     expect(panelSrc).toContain("height={subagentsLayout().height}")

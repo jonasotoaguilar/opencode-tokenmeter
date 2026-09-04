@@ -97,7 +97,6 @@ type BoxHandle = {
   viewport: { height: number }
   height: number
   verticalScrollBar: { visible: boolean }
-  scrollAcceleration: { tick: (n?: number) => number; reset: () => void }
 }
 async function clickAgent(
   s: Awaited<ReturnType<typeof testRender>>,
@@ -267,36 +266,70 @@ function wheel(h: BoxHandle, dir: "up" | "down") {
     modifiers: {},
   })
 }
-describe("Subagents scroll step #49", () => {
-  test("wheel tick moves 2 rows per step, clamps, expanded details remain reachable", async () => {
-    const rootID = "ses_scroll_49"
-    purgeTreeCache()
-    const state = groupState(rootID, [
-      { id: "s1", agent: "alpha", input: 4000, output: 200 },
-      { id: "s2", agent: "beta", input: 4000, output: 200 },
-      { id: "s3", agent: "gamma", input: 4000, output: 200 },
-    ])
-    const { slot, dispose } = await mount(state, {
-      numbers: "compact",
-      cache: "combined",
-    })
-    const setup = await testRender(
-      () => slot({ theme: THEME }, { session_id: rootID }) as never,
-      { width: 60, height: 20 },
+async function mountGroups(
+  rootID: string,
+  agents: string[],
+  sV1: Record<string, unknown>,
+) {
+  purgeTreeCache()
+  const state = groupState(
+    rootID,
+    agents.map((agent, i) => ({
+      id: `${rootID}_${i}`,
+      agent,
+      input: 4000,
+      output: 200,
+    })),
+  )
+  const { slot, dispose } = await mount(state, sV1)
+  const setup = await testRender(
+    () => slot({ theme: THEME }, { session_id: rootID }) as never,
+    { width: 60, height: 20 },
+  )
+  await waitFor(() => snapshot()?.rootID === rootID)
+  await waitFor(() => (snapshot()?.groups.length ?? 0) === agents.length)
+  await waitFrame(setup, (f) => f.includes("↳ alpha"))
+  return { setup, dispose }
+}
+describe("Subagents scroll navigation", () => {
+  test("three collapsed agents fit the 6-row viewport with no overflow", async () => {
+    const rootID = "ses_scroll_three"
+    const { setup, dispose } = await mountGroups(
+      rootID,
+      ["alpha", "beta", "gamma"],
+      { numbers: "compact", cache: "combined" },
     )
-    await waitFor(() => snapshot()?.rootID === rootID)
-    await waitFor(() => (snapshot()?.groups.length ?? 0) === 3)
-    await waitFrame(setup, (f) => f.includes("↳ alpha"))
     const box = must(findBox(setup))
-    expect(box.viewport.height).toBe(4)
+    expect(box.viewport.height).toBe(6)
     expect(box.scrollHeight).toBe(6)
-    expect(box.height).toBe(4)
+    expect(box.height).toBe(6)
+    expect(box.verticalScrollBar.visible).toBe(false)
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain(`↳ alpha (1 task) ${GLYPH.expand}`)
+    expect(frame).toContain(`↳ beta (1 task) ${GLYPH.expand}`)
+    expect(frame).toContain(`↳ gamma (1 task) ${GLYPH.expand}`)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("fourth collapsed agent overflows; wheel steps a fixed 2 rows, clamped", async () => {
+    const rootID = "ses_scroll_four"
+    const { setup, dispose } = await mountGroups(
+      rootID,
+      ["alpha", "beta", "delta", "gamma"],
+      { numbers: "compact", cache: "combined" },
+    )
+    const box = must(findBox(setup))
+    expect(box.viewport.height).toBe(6)
+    expect(box.scrollHeight).toBe(8)
     expect(box.verticalScrollBar.visible).toBe(true)
-    expect(box.scrollAcceleration.tick()).toBe(2)
     expect(box.scrollTop).toBe(0)
     wheel(box, "down")
     await loop(setup.renderer)
     expect(box.scrollTop).toBe(2)
+    let frame = setup.captureCharFrame()
+    expect(frame).toContain(`↳ beta (1 task) ${GLYPH.expand}`)
+    expect(frame).not.toContain("↳ alpha")
     wheel(box, "down")
     await loop(setup.renderer)
     expect(box.scrollTop).toBe(2)
@@ -306,79 +339,289 @@ describe("Subagents scroll step #49", () => {
     wheel(box, "up")
     await loop(setup.renderer)
     expect(box.scrollTop).toBe(0)
+    frame = setup.captureCharFrame()
+    expect(frame).toContain(`↳ alpha (1 task) ${GLYPH.expand}`)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("compact expanded entry: wheel still steps a fixed 2 rows, 0→2→4 and back", async () => {
+    const rootID = "ses_scroll_compact"
+    const { setup, dispose } = await mountGroups(
+      rootID,
+      ["alpha", "beta", "delta", "gamma"],
+      { numbers: "compact", cache: "combined" },
+    )
+    // Reach the below-the-fold header with fixed steps, then open it: the
+    // reveal shows the full 4-row entry (scrollTop 2 → 4).
+    const box = must(findBox(setup))
+    wheel(box, "down")
+    await loop(setup.renderer)
+    expect(box.scrollTop).toBe(2)
+    await clickAgent(setup, setup.captureCharFrame(), "gamma")
+    await waitFrame(setup, (f) =>
+      f.includes(`↳ gamma (1 task) ${GLYPH.collapse}`),
+    )
+    expect(box.scrollHeight).toBe(10)
+    // The reveal applies after the renderer commits the new rows.
+    await waitFor(() => box.scrollTop === 4)
+    // Fixed steps over the expanded entry: a 4-row height never stretches
+    // a tick, up or down.
+    box.scrollTo(0)
+    await loop(setup.renderer)
+    wheel(box, "down")
+    await loop(setup.renderer)
+    expect(box.scrollTop).toBe(2)
+    wheel(box, "down")
+    await loop(setup.renderer)
+    expect(box.scrollTop).toBe(4)
+    wheel(box, "up")
+    await loop(setup.renderer)
+    expect(box.scrollTop).toBe(2)
+    wheel(box, "up")
+    await loop(setup.renderer)
+    expect(box.scrollTop).toBe(0)
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain(`↳ alpha (1 task) ${GLYPH.expand}`)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("precise expanded entry: wheel still steps a fixed 2 rows, symmetric", async () => {
+    const rootID = "ses_scroll_precise"
+    const { setup, dispose } = await mountGroups(
+      rootID,
+      ["alpha", "beta", "gamma"],
+      {
+        numbers: "precise",
+        cache: "combined",
+      },
+    )
     await clickAgent(setup, setup.captureCharFrame(), "beta")
     await waitFrame(setup, (f) =>
       f.includes(`↳ beta (1 task) ${GLYPH.collapse}`),
     )
-    const exp = must(findBox(setup))
-    expect(exp.scrollHeight).toBe(8)
-    expect(exp.viewport.height).toBe(4)
-    expect(exp.verticalScrollBar.visible).toBe(true)
-    expect(exp.scrollAcceleration.tick()).toBe(2)
-    exp.scrollTo(0)
+    const box = must(findBox(setup))
+    // 2 + 6 + 2 rows = 10; viewport 6 clamps max to 4. Opening beta from
+    // the top already reveals its full 6 rows (scrollTop 0 → 2).
+    expect(box.scrollHeight).toBe(10)
+    expect(box.viewport.height).toBe(6)
+    await waitFor(() => box.scrollTop === 2)
+    let frame = setup.captureCharFrame()
+    expect(frame).toContain(`↳ beta (1 task) ${GLYPH.collapse}`)
+    box.scrollTo(0)
     await loop(setup.renderer)
-    expect(exp.scrollTop).toBe(0)
-    wheel(exp, "down")
+    wheel(box, "down")
     await loop(setup.renderer)
-    expect(exp.scrollTop).toBe(2)
-    wheel(exp, "down")
+    expect(box.scrollTop).toBe(2)
+    frame = setup.captureCharFrame()
+    expect(frame).toContain(`↳ beta (1 task) ${GLYPH.collapse}`)
+    wheel(box, "down")
     await loop(setup.renderer)
-    expect(exp.scrollTop).toBe(4)
-    wheel(exp, "down")
+    expect(box.scrollTop).toBe(4)
+    wheel(box, "up")
     await loop(setup.renderer)
-    expect(exp.scrollTop).toBe(4)
-    exp.scrollTo(exp.scrollHeight)
-    await waitFrame(setup, (f) => f.includes("4K tokens"))
-    expect(setup.captureCharFrame()).toContain("4K tokens")
+    expect(box.scrollTop).toBe(2)
+    wheel(box, "up")
+    await loop(setup.renderer)
+    expect(box.scrollTop).toBe(0)
+    expect(box.scrollTop).toBeLessThanOrEqual(
+      box.scrollHeight - box.viewport.height,
+    )
     disposeReconcile()
     dispose()
-    purgeTreeCache()
-    const stateP = groupState(`${rootID}_p`, [
-      { id: "sp1", agent: "alpha", input: 4000, output: 200 },
-      { id: "sp2", agent: "beta", input: 4000, output: 200 },
-      { id: "sp3", agent: "gamma", input: 4000, output: 200 },
-    ])
-    const mountP = await mount(stateP, {
-      numbers: "precise",
-      cache: "combined",
-    })
-    const setupP = await testRender(
-      () =>
-        mountP.slot({ theme: THEME }, { session_id: `${rootID}_p` }) as never,
-      { width: 60, height: 20 },
+  }, 20000)
+
+  test("opening the third agent from the top reveals its full 4 compact rows", async () => {
+    const rootID = "ses_scroll_capture"
+    const { setup, dispose } = await mountGroups(
+      rootID,
+      ["alpha", "beta", "gamma"],
+      { numbers: "compact", cache: "combined" },
     )
-    await waitFor(() => snapshot()?.rootID === `${rootID}_p`)
-    await waitFor(() => (snapshot()?.groups.length ?? 0) === 3)
-    await waitFrame(setupP, (f) => f.includes("↳ alpha"))
-    await clickAgent(setupP, setupP.captureCharFrame(), "alpha")
-    await waitFrame(setupP, (f) =>
-      f.includes(`↳ alpha (1 task) ${GLYPH.collapse}`),
+    const box = must(findBox(setup))
+    expect(box.scrollTop).toBe(0)
+    await clickAgent(setup, setup.captureCharFrame(), "gamma")
+    await waitFrame(setup, (f) =>
+      f.includes(`↳ gamma (1 task) ${GLYPH.collapse}`),
     )
-    const precise = must(findBox(setupP))
-    expect(precise.scrollHeight).toBe(10)
-    expect(precise.viewport.height).toBe(4)
-    expect(precise.scrollAcceleration.tick()).toBe(2)
-    precise.scrollTo(0)
-    await loop(setupP.renderer)
-    wheel(precise, "down")
-    await loop(setupP.renderer)
-    expect(precise.scrollTop).toBe(2)
-    wheel(precise, "down")
-    await loop(setupP.renderer)
-    expect(precise.scrollTop).toBe(4)
-    wheel(precise, "down")
-    await loop(setupP.renderer)
-    expect(precise.scrollTop).toBe(6)
-    wheel(precise, "down")
-    await loop(setupP.renderer)
-    expect(precise.scrollTop).toBe(6)
-    expect(precise.scrollTop).toBeLessThanOrEqual(
-      precise.scrollHeight - precise.viewport.height,
-    )
-    precise.scrollTo(precise.scrollHeight)
-    await waitFrame(setupP, (f) => f.includes("gamma"))
-    expect(setupP.captureCharFrame()).toContain("gamma")
+    // Header + 3 detail rows: the viewport moves the minimum 2 rows down —
+    // keeping only the header visible would hide the metrics. The reveal
+    // runs after the commit: poll for it, then repaint before reading.
+    expect(box.scrollHeight).toBe(8)
+    await waitFor(() => box.scrollTop === 2)
+    await loop(setup.renderer)
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain(`↳ beta (1 task) ${GLYPH.expand}`)
+    expect(frame).toContain(`↳ gamma (1 task) ${GLYPH.collapse}`)
+    expect(frame).toContain("4K tokens")
+    expect(frame).not.toContain("↳ alpha")
     disposeReconcile()
-    mountP.dispose()
+    dispose()
+  }, 20000)
+
+  test("opening an agent in precise mode reveals its full 6 rows", async () => {
+    const rootID = "ses_scroll_precise_reveal"
+    const { setup, dispose } = await mountGroups(
+      rootID,
+      ["alpha", "beta", "gamma"],
+      {
+        numbers: "precise",
+        cache: "combined",
+      },
+    )
+    const box = must(findBox(setup))
+    expect(box.scrollTop).toBe(0)
+    await clickAgent(setup, setup.captureCharFrame(), "gamma")
+    await waitFrame(setup, (f) =>
+      f.includes(`↳ gamma (1 task) ${GLYPH.collapse}`),
+    )
+    // 2 + 2 + 6 rows = 10, max 4: the 6-row entry fills the viewport alone.
+    expect(box.scrollHeight).toBe(10)
+    await waitFor(() => box.scrollTop === 4)
+    await loop(setup.renderer)
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain(`↳ gamma (1 task) ${GLYPH.collapse}`)
+    expect(frame).not.toContain("↳ alpha")
+    expect(frame).not.toContain("↳ beta")
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("opening an entry that already fits leaves the scroll offset alone", async () => {
+    const rootID = "ses_scroll_noop"
+    const { setup, dispose } = await mountGroups(
+      rootID,
+      ["alpha", "beta", "gamma"],
+      { numbers: "compact", cache: "combined" },
+    )
+    const box = must(findBox(setup))
+    await clickAgent(setup, setup.captureCharFrame(), "beta")
+    await waitFrame(setup, (f) =>
+      f.includes(`↳ beta (1 task) ${GLYPH.collapse}`),
+    )
+    // 2 + 4 + 2 rows = 8: beta's 4 rows already fit at top 0 — no-op.
+    expect(box.scrollHeight).toBe(8)
+    expect(box.scrollTop).toBe(0)
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain(`↳ alpha (1 task) ${GLYPH.expand}`)
+    expect(frame).toContain(`↳ beta (1 task) ${GLYPH.collapse}`)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("opening an entry clipped above jumps back to the entry start", async () => {
+    const rootID = "ses_scroll_above"
+    // Names stay alphabetical so gamma sits at index 2 (groups sort by
+    // agent name): opening beta then gamma below it shifts gamma's start
+    // above the viewport.
+    const { setup, dispose } = await mountGroups(
+      rootID,
+      ["alpha", "beta", "gamma", "kappa", "omega"],
+      { numbers: "compact", cache: "combined" },
+    )
+    await clickAgent(setup, setup.captureCharFrame(), "beta")
+    await waitFrame(setup, (f) =>
+      f.includes(`↳ beta (1 task) ${GLYPH.collapse}`),
+    )
+    const box = must(findBox(setup))
+    expect(box.scrollTop).toBe(0)
+    // Scroll deep while beta stays open, then open gamma below it: closing
+    // beta shifts gamma's start above the viewport, so the reveal pulls
+    // back to the entry start.
+    box.scrollTo(6)
+    await loop(setup.renderer)
+    expect(box.scrollTop).toBe(6)
+    await clickAgent(setup, setup.captureCharFrame(), "gamma")
+    await waitFrame(setup, (f) =>
+      f.includes(`↳ gamma (1 task) ${GLYPH.collapse}`),
+    )
+    // The reveal runs after the commit: poll for it, then repaint before
+    // reading the frame.
+    await waitFor(() => box.scrollTop === 4)
+    await loop(setup.renderer)
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain(`↳ gamma (1 task) ${GLYPH.collapse}`)
+    expect(frame).toContain("4K tokens")
+    expect(frame).toContain(`↳ kappa (1 task) ${GLYPH.expand}`)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("expanding the last agent reveals its full entry; detail opens downward", async () => {
+    const rootID = "ses_scroll_edge"
+    const { setup, dispose } = await mountGroups(
+      rootID,
+      ["alpha", "beta", "delta", "gamma"],
+      { numbers: "compact", cache: "combined" },
+    )
+    const box = must(findBox(setup))
+    wheel(box, "down")
+    await loop(setup.renderer)
+    expect(box.scrollTop).toBe(2)
+    await clickAgent(setup, setup.captureCharFrame(), "gamma")
+    await waitFrame(setup, (f) =>
+      f.includes(`↳ gamma (1 task) ${GLYPH.collapse}`),
+    )
+    // The full 4-row entry scrolls into view: the viewport moves the
+    // minimum 2 rows down (scrollTop 2 → 4) to show header + 3 metrics.
+    await waitFor(() => box.scrollTop === 4)
+    await loop(setup.renderer)
+    let frame = setup.captureCharFrame()
+    expect(frame).toContain(`↳ gamma (1 task) ${GLYPH.collapse}`)
+    // One fixed gesture down from the top reaches the clamped bottom; the
+    // open detail is already fully visible, so nothing moves further.
+    box.scrollTo(2)
+    await loop(setup.renderer)
+    wheel(box, "down")
+    await loop(setup.renderer)
+    expect(box.scrollTop).toBe(4)
+    frame = setup.captureCharFrame()
+    expect(frame).toContain(`↳ gamma (1 task) ${GLYPH.collapse}`)
+    expect(frame).toContain("4K tokens")
+    wheel(box, "down")
+    await loop(setup.renderer)
+    expect(box.scrollTop).toBe(4)
+    disposeReconcile()
+    dispose()
+  }, 20000)
+
+  test("collapsing the bottom agent clamps back without blank jump", async () => {
+    const rootID = "ses_scroll_clamp"
+    const { setup, dispose } = await mountGroups(
+      rootID,
+      ["alpha", "beta", "delta", "gamma"],
+      { numbers: "compact", cache: "combined" },
+    )
+    const box = must(findBox(setup))
+    // Gamma sits below the fold at top 0; one gesture down brings its
+    // header into view so it can be opened.
+    wheel(box, "down")
+    await loop(setup.renderer)
+    expect(box.scrollTop).toBe(2)
+    await clickAgent(setup, setup.captureCharFrame(), "gamma")
+    await waitFrame(setup, (f) =>
+      f.includes(`↳ gamma (1 task) ${GLYPH.collapse}`),
+    )
+    expect(box.scrollHeight).toBe(10)
+    // The reveal already moved to the clamped bottom; one more fixed
+    // gesture down keeps it there.
+    await waitFor(() => box.scrollTop === 4)
+    wheel(box, "down")
+    await loop(setup.renderer)
+    expect(box.scrollTop).toBe(4)
+    await clickAgent(setup, setup.captureCharFrame(), "gamma")
+    await waitFrame(setup, (f) =>
+      f.includes(`↳ gamma (1 task) ${GLYPH.expand}`),
+    )
+    // Total shrinks 10 -> 8 (max 4 -> 2): the stale offset clamps, no blank
+    // rows, and the collapsed header stays visible.
+    await waitFor(() => box.scrollTop === 2)
+    await loop(setup.renderer)
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain(`↳ beta (1 task) ${GLYPH.expand}`)
+    expect(frame).toContain(`↳ gamma (1 task) ${GLYPH.expand}`)
+    disposeReconcile()
+    dispose()
   }, 20000)
 })

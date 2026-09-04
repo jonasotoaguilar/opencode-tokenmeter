@@ -34,14 +34,18 @@
  *     the row cycles the durable
  *     `tokenmeter.sidebar.expanded` preference via the entry-passed handler.
  *     Expanded, ALL groups render inside a real `<scrollbox>` sized for
- *     roughly two compact agent entries (viewport 4); nothing is sliced and
- *     no clipped cue is rendered. Each compact agent entry (GroupRows,
+ *     up to three collapsed agent entries (viewport 6); nothing is sliced
+ *     and no clipped cue is rendered. One wheel gesture always advances
+ *     exactly two rows via the declarative scroll acceleration. Each compact
+ *     agent entry (GroupRows,
  *     group-rows.tsx) is a `↳`-indented header
  *     `↳ <name> (<T> tasks) ▶` whose per-agent chevron trails the header
  *     and flips `▼` while open, plus its elastic
  *     compact L1; clicking an entry
  *     replaces its compact lines with the mode-aware detail rows (compact:
- *     three, precise: five — L1 once). Exclusivity is index-keyed
+ *     three, precise: five — L1 once). Toggling an agent reveals its full
+ *     entry: the scrollbox moves the minimum distance needed to show the
+ *     whole expanded entry. Exclusivity is index-keyed
  *     (`openGroupIndex: number | null`): opening one agent closes the other
  *     and clicking the open agent closes it; the open agent is transient —
  *     reset on mount/session change, never written to kv.
@@ -74,11 +78,28 @@ import {
   sessionOpen,
   setSectionOpen,
 } from "../sections"
-import { settings } from "../settings"
+import { type NumbersPref, settings } from "../settings"
 import { snapshot } from "../store"
 import { contentWidth, truncateToColumns } from "../text"
 import { GroupRows } from "./group-rows"
 import { Section, SectionSummary } from "./section"
+
+// Row geometry of one agent entry — the single height truth shared by the
+// viewport size and the toggle reveal: collapsed is 2 rows (header +
+// compact L1), expanded compact is 4 (header + 3 detail), expanded precise
+// is 6 (header + 5 detail).
+const COLLAPSED_AGENT_ROWS = 2
+const COMPACT_OPEN_AGENT_ROWS = 4
+const PRECISE_OPEN_AGENT_ROWS = 6
+// The scrollbox shows up to three collapsed agents.
+const SUBAGENTS_VIEWPORT_ROWS = 6
+
+function agentEntryRows(open: boolean, numbers: NumbersPref): number {
+  if (!open) return COLLAPSED_AGENT_ROWS
+  return numbers === "precise"
+    ? PRECISE_OPEN_AGENT_ROWS
+    : COMPACT_OPEN_AGENT_ROWS
+}
 
 export function UsagePanel(props) {
   const theme = () => props.theme()
@@ -160,26 +181,136 @@ export function UsagePanel(props) {
     reset() {},
   }
 
-  // Single shared layout derivation for viewport height and scroll
-  // overflow: `overflow = totalRows > 4`, `height = min(totalRows, 4)`.
-  // One collapsed group is 2 rows, expanded compact is 4 (header + 3
-  // detail), expanded precise is 6 (header + 5). The single memo is the
-  // only row-count truth: both the height binding and the scroll gate read
-  // it, preventing a hidden duplicate geometry.
-  const subagentsLayout = createMemo(() => {
+  // Header offsets (first row of each agent) and total rows for the current
+  // groups/open state — the only row truth besides `agentEntryRows`:
+  // viewport height and the toggle reveal both derive from it.
+  const subagentsGeometry = () => {
     const snapVal = view()
-    if (!snapVal) return { height: 4, overflow: false }
-    const groups = snapVal.groups
-    if (groups.length === 0) return { height: 0, overflow: false }
+    const groups = snapVal?.groups ?? []
     const open = openGroupIndex()
     const numbers = settings().numbers
+    const starts: number[] = []
     let total = 0
     for (let i = 0; i < groups.length; i++) {
-      if (i === open) total += numbers === "precise" ? 6 : 4
-      else total += 2
+      starts.push(total)
+      total += agentEntryRows(i === open, numbers)
     }
-    return { height: Math.min(total, 4), overflow: total > 4 }
+    return { starts, total }
+  }
+
+  // Single shared layout derivation for viewport height and scroll
+  // overflow: `overflow = totalRows > 6`, `height = min(totalRows, 6)`.
+  // The single memo is the only row-count truth: both the height binding
+  // and the scroll gate read it, preventing a hidden duplicate geometry.
+  const subagentsLayout = createMemo(() => {
+    const { total } = subagentsGeometry()
+    if (total === 0) return { height: 0, overflow: false }
+    return {
+      height: Math.min(total, SUBAGENTS_VIEWPORT_ROWS),
+      overflow: total > SUBAGENTS_VIEWPORT_ROWS,
+    }
   })
+
+  // Minimal box handle for the toggle reveal only: the wheel path stays
+  // fully declarative (`scrollAcceleration.tick() => 2`), so the ref never
+  // intercepts gestures — it only exposes the scroll position for the
+  // post-toggle adjustment below.
+  let subagentsBox: {
+    scrollTop: number
+    scrollTo: (position: number) => void
+    scrollHeight: number
+  } | null = null
+
+  const attachSubagentsBox = (box) => {
+    subagentsBox = box ?? null
+  }
+
+  // Toggle reveal: opens scroll the MINIMUM distance to show the FULL entry
+  // (header + all detail rows — 4 rows compact, 6 precise): no-op while the
+  // entry already fits, jump to the entry start when clipped above, advance
+  // just enough when the tail overflows below. Collapses only clamp a stale
+  // offset back into [0, total - viewport] so no blank rows appear.
+  //
+  // Timing: Solid effects and click handlers run BEFORE the reconciler
+  // commits the new rows on the renderer loop, so an immediate scrollTo
+  // clamps to the stale pre-toggle height (the box still reports the old
+  // scrollHeight). The effect below therefore only ARMS the reveal keyed by
+  // (open index, total rows) — wheel gestures never change that key, so
+  // manual scrolling is never yanked back — and the scheduled application
+  // waits until the committed scrollHeight matches the expected total
+  // (bounded retries), then applies once against fresh bounds.
+  let revealKey = ""
+  const applyReveal = (
+    box: { scrollTop: number; scrollTo: (position: number) => void },
+    index: number | null,
+    starts: number[],
+    total: number,
+    viewport: number,
+  ) => {
+    const max = Math.max(0, total - viewport)
+    let top = Math.min(Math.max(0, box.scrollTop), max)
+    if (index !== null) {
+      const start = starts[index] ?? 0
+      const end = start + agentEntryRows(true, settings().numbers)
+      if (start < top) top = start
+      else if (end > top + viewport) top = end - viewport
+    }
+    const target = Math.min(Math.max(0, top), max)
+    if (target !== box.scrollTop) box.scrollTo(target)
+  }
+  const scheduleReveal = (
+    box: {
+      scrollTop: number
+      scrollTo: (position: number) => void
+      scrollHeight: number
+    },
+    key: string,
+    index: number | null,
+    starts: number[],
+    total: number,
+    viewport: number,
+    attempt = 0,
+  ) => {
+    setTimeout(
+      () => {
+        // A remount or a newer toggle supersedes this attempt.
+        if (subagentsBox !== box || revealKey !== key) return
+        if (box.scrollHeight !== total) {
+          if (attempt < 8)
+            scheduleReveal(
+              box,
+              key,
+              index,
+              starts,
+              total,
+              viewport,
+              attempt + 1,
+            )
+          return
+        }
+        applyReveal(box, index, starts, total, viewport)
+      },
+      attempt === 0 ? 0 : 30,
+    )
+  }
+  createEffect(() => {
+    const index = openGroupIndex()
+    const { starts, total } = subagentsGeometry()
+    const viewport = subagentsLayout().height
+    const box = subagentsBox
+    if (!box || viewport === 0) return
+    const key = `${index}:${total}`
+    if (key === revealKey) return
+    revealKey = key
+    scheduleReveal(box, key, index, starts, total, viewport)
+  })
+
+  // Index-keyed toggle (pinned shape — the theme-contract hygiene test
+  // asserts it): opening one agent closes the other by construction; the
+  // reveal effect above runs on the committed post-toggle rows.
+  const onToggleGroup = (index: () => number) => () => {
+    setOpenGroupIndex(openGroupIndex() === index() ? null : index())
+  }
 
   return (
     <box flexDirection="column">
@@ -265,6 +396,7 @@ export function UsagePanel(props) {
                         height={subagentsLayout().height}
                         scrollY={subagentsLayout().overflow}
                         scrollAcceleration={subagentsScrollAccel}
+                        ref={attachSubagentsBox}
                         verticalScrollbarOptions={{
                           visible: subagentsLayout().overflow,
                         }}
@@ -276,11 +408,7 @@ export function UsagePanel(props) {
                               inner={inner}
                               theme={theme}
                               open={() => openGroupIndex() === index()}
-                              onToggle={() =>
-                                setOpenGroupIndex(
-                                  openGroupIndex() === index() ? null : index(),
-                                )
-                              }
+                              onToggle={onToggleGroup(index)}
                             />
                           )}
                         </For>

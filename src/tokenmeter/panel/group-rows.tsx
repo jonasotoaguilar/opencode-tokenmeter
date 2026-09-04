@@ -45,7 +45,7 @@ const GROUP_INDENT = 2
 const AGENT_METRIC_INDENT = 4
 
 // The scrollbox renders a one-column scrollbar whenever its content
-// overflows the viewport (an open agent's six rows always do), so every
+// overflows the six-row viewport, so every
 // row budget inside the scrollbox reserves that column — a full-budget row
 // must never clip into the scrollbar.
 const SCROLLBAR_COL = 1
