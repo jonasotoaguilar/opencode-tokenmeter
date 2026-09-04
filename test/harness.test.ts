@@ -2061,9 +2061,10 @@ describe("glyph and label hygiene (no unreliable glyphs, no text labels)", () =>
     // rows: height = min(actual visible rows, 6) so a single collapsed group
     // occupies 2 rows, not 6 with blank space (#25). Overflow gates the
     // scrollbar: scrollY is only enabled when totalRows > 6 (#33). One wheel
-    // gesture snaps to the next/previous agent header on real entry heights
-    // (collapsed 2, expanded compact 4, expanded precise 6), clamped; the
-    // toggle anchor keeps the header visible with detail opening downward.
+    // gesture always advances exactly 2 rows (fixed acceleration), clamped;
+    // the toggle reveal auto-scrolls the minimum distance to show the full
+    // expanded entry (4 rows compact, 6 precise), and collapsing clamps back
+    // with no blank rows.
     expect(panelSrc).toContain("<scrollbox")
     expect(panelSrc).toContain("subagentsLayout")
     expect(panelSrc).toContain("height={subagentsLayout().height}")

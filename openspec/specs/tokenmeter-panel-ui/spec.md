@@ -84,12 +84,12 @@ The section MUST render ONLY while the snapshot has at least one group: with zer
 
 ### Requirement: Agent list real scrollbox
 
-The expanded list MUST render in a real scroll container (sized for up to three collapsed entries — 6 rows, one scrollbar column reserved so rows never clip into it), containing ALL agents; MUST NOT slice data, hide counts, or render a `(N more — scroll)` cue. One scroll gesture MUST advance to the next/previous agent header using the real entry heights (collapsed 2 rows, expanded compact 4, expanded precise 6), clamped to the content bounds. Toggling an agent MUST keep its header visible with the detail opening downward.
+The expanded list MUST render in a real scroll container (sized for up to three collapsed entries — 6 rows, one scrollbar column reserved so rows never clip into it), containing ALL agents; MUST NOT slice data, hide counts, or render a `(N more — scroll)` cue. One scroll gesture MUST always advance exactly 2 rows, clamped to the content bounds. Toggling an agent MUST auto-scroll the minimum distance needed to show its full expanded entry (header + all detail rows — 4 rows in compact, 6 in precise); when the entry already fits, the offset MUST NOT move; collapsing MUST clamp back with no blank rows.
 
 - **Scenario: All agents reachable** — GIVEN 8 agents; WHEN expanded; THEN all 8 render in the scroll container, reachable by scrolling; AND no hidden agents or cue.
 - **Scenario: Fewer than viewport** — GIVEN 1 agent; WHEN expanded; THEN it renders fully without scroll interaction.
-- **Scenario: Snap by agent boundary** — GIVEN 4 collapsed agents; WHEN one scroll gesture goes down; THEN the second agent header sits at the top; WHEN it goes up; THEN the first header returns.
-- **Scenario: Toggle keeps the header** — GIVEN a scrolled list with an open bottom agent; WHEN the agent is collapsed; THEN the viewport clamps back with the header visible and no blank rows.
+- **Scenario: Fixed two-row steps** — GIVEN 4 collapsed agents; WHEN one scroll gesture goes down; THEN the offset advances exactly 2 rows (0 → 2); WHEN it goes up; THEN it returns exactly 2 rows (2 → 0); AND the same fixed steps hold while an agent is expanded.
+- **Scenario: Toggle reveals the full entry** — GIVEN the third agent visible in the last two rows; WHEN it is expanded in compact mode; THEN the viewport moves 2 rows down to show its header + 3 detail rows; AND in precise mode the 6-row entry fills the viewport alone; AND collapsing clamps back with the header visible and no blank rows.
 
 ### Requirement: Compact width safety and elastic detail
 

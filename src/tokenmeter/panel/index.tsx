@@ -35,16 +35,17 @@
  *     `tokenmeter.sidebar.expanded` preference via the entry-passed handler.
  *     Expanded, ALL groups render inside a real `<scrollbox>` sized for
  *     up to three collapsed agent entries (viewport 6); nothing is sliced
- *     and no clipped cue is rendered. One wheel gesture snaps to the
- *     next/previous agent header using the real entry heights, clamped to
- *     the content bounds. Each compact agent entry (GroupRows,
+ *     and no clipped cue is rendered. One wheel gesture always advances
+ *     exactly two rows via the declarative scroll acceleration. Each compact
+ *     agent entry (GroupRows,
  *     group-rows.tsx) is a `↳`-indented header
  *     `↳ <name> (<T> tasks) ▶` whose per-agent chevron trails the header
  *     and flips `▼` while open, plus its elastic
  *     compact L1; clicking an entry
  *     replaces its compact lines with the mode-aware detail rows (compact:
- *     three, precise: five — L1 once) while keeping the header visible —
- *     the detail opens downward. Exclusivity is index-keyed
+ *     three, precise: five — L1 once). Toggling an agent reveals its full
+ *     entry: the scrollbox moves the minimum distance needed to show the
+ *     whole expanded entry. Exclusivity is index-keyed
  *     (`openGroupIndex: number | null`): opening one agent closes the other
  *     and clicking the open agent closes it; the open agent is transient —
  *     reset on mount/session change, never written to kv.
@@ -84,9 +85,9 @@ import { GroupRows } from "./group-rows"
 import { Section, SectionSummary } from "./section"
 
 // Row geometry of one agent entry — the single height truth shared by the
-// viewport size, the wheel-boundary math, and the toggle anchor: collapsed
-// is 2 rows (header + compact L1), expanded compact is 4 (header + 3
-// detail), expanded precise is 6 (header + 5 detail).
+// viewport size and the toggle reveal: collapsed is 2 rows (header +
+// compact L1), expanded compact is 4 (header + 3 detail), expanded precise
+// is 6 (header + 5 detail).
 const COLLAPSED_AGENT_ROWS = 2
 const COMPACT_OPEN_AGENT_ROWS = 4
 const PRECISE_OPEN_AGENT_ROWS = 6
@@ -172,17 +173,17 @@ export function UsagePanel(props) {
   const chevron = () =>
     props.subagentsPref() === "expanded" ? GLYPH.collapse : GLYPH.expand
 
-  // Residual acceleration for gestures the boundary snap does not own
-  // (shift-modified scrolls, delegated to the host handler): the ScrollBox
-  // wheel path uses scrollAcceleration, not the scrollbar's scrollStep.
+  // One wheel/touchpad tick = one collapsed agent (2 rows). The ScrollBox
+  // wheel path uses scrollAcceleration, not the scrollbar's scrollStep, so a
+  // fixed multiplier of 2 is the smallest supported declarative option.
   const subagentsScrollAccel = {
     tick: () => 2,
     reset() {},
   }
 
   // Header offsets (first row of each agent) and total rows for the current
-  // groups/open state — the only boundary truth: viewport height, wheel
-  // stepping, and toggle anchoring all derive from it via `agentEntryRows`.
+  // groups/open state — the only row truth besides `agentEntryRows`:
+  // viewport height and the toggle reveal both derive from it.
   const subagentsGeometry = () => {
     const snapVal = view()
     const groups = snapVal?.groups ?? []
@@ -210,106 +211,105 @@ export function UsagePanel(props) {
     }
   })
 
-  // The installed wheel path multiplies the gesture delta by
-  // `scrollAcceleration.tick()` — a direction-blind scalar that cannot
-  // express variable agent heights — so plain up/down gestures are snapped
-  // here to agent header boundaries instead: down lands on the next header,
-  // up on the previous one, clamped to [0, total - viewport]. Shift-modified
-  // gestures fall through to the host handler untouched.
+  // Minimal box handle for the toggle reveal only: the wheel path stays
+  // fully declarative (`scrollAcceleration.tick() => 2`), so the ref never
+  // intercepts gestures — it only exposes the scroll position for the
+  // post-toggle adjustment below.
   let subagentsBox: {
     scrollTop: number
     scrollTo: (position: number) => void
-    onMouseEvent: (event: unknown) => void
+    scrollHeight: number
   } | null = null
-
-  const stepSubagentsScroll = (direction: "up" | "down", times: number) => {
-    const box = subagentsBox
-    if (!box) return
-    const { starts, total } = subagentsGeometry()
-    const max = Math.max(0, total - subagentsLayout().height)
-    let top = Math.min(Math.max(0, box.scrollTop), max)
-    const steps = Math.max(1, Math.floor(times))
-    for (let i = 0; i < steps; i++) {
-      if (direction === "down") {
-        let next: number | undefined
-        for (const s of starts) {
-          if (s > top) {
-            next = s
-            break
-          }
-        }
-        top = next === undefined ? max : Math.min(next, max)
-      } else {
-        let prev: number | undefined
-        for (const s of starts) {
-          if (s < top) prev = s
-          else break
-        }
-        top = prev === undefined ? 0 : prev
-      }
-    }
-    box.scrollTo(top)
-  }
 
   const attachSubagentsBox = (box) => {
     subagentsBox = box ?? null
-    const target = box as {
-      onMouseEvent: (event: unknown) => void
-      _tmWheelWrapped?: boolean
-    } | null
-    if (target && !target._tmWheelWrapped) {
-      target._tmWheelWrapped = true
-      const hostWheel = target.onMouseEvent.bind(target)
-      target.onMouseEvent = (event) => {
-        const gesture = event as {
-          type?: string
-          scroll?: { direction?: string; delta?: number }
-          modifiers?: { shift?: boolean }
-        } | null
-        const direction = gesture?.scroll?.direction
-        if (
-          gesture?.type === "scroll" &&
-          !gesture?.modifiers?.shift &&
-          (direction === "up" || direction === "down")
-        ) {
-          stepSubagentsScroll(direction, gesture?.scroll?.delta ?? 1)
+  }
+
+  // Toggle reveal: opens scroll the MINIMUM distance to show the FULL entry
+  // (header + all detail rows — 4 rows compact, 6 precise): no-op while the
+  // entry already fits, jump to the entry start when clipped above, advance
+  // just enough when the tail overflows below. Collapses only clamp a stale
+  // offset back into [0, total - viewport] so no blank rows appear.
+  //
+  // Timing: Solid effects and click handlers run BEFORE the reconciler
+  // commits the new rows on the renderer loop, so an immediate scrollTo
+  // clamps to the stale pre-toggle height (the box still reports the old
+  // scrollHeight). The effect below therefore only ARMS the reveal keyed by
+  // (open index, total rows) — wheel gestures never change that key, so
+  // manual scrolling is never yanked back — and the scheduled application
+  // waits until the committed scrollHeight matches the expected total
+  // (bounded retries), then applies once against fresh bounds.
+  let revealKey = ""
+  const applyReveal = (
+    box: { scrollTop: number; scrollTo: (position: number) => void },
+    index: number | null,
+    starts: number[],
+    total: number,
+    viewport: number,
+  ) => {
+    const max = Math.max(0, total - viewport)
+    let top = Math.min(Math.max(0, box.scrollTop), max)
+    if (index !== null) {
+      const start = starts[index] ?? 0
+      const end = start + agentEntryRows(true, settings().numbers)
+      if (start < top) top = start
+      else if (end > top + viewport) top = end - viewport
+    }
+    const target = Math.min(Math.max(0, top), max)
+    if (target !== box.scrollTop) box.scrollTo(target)
+  }
+  const scheduleReveal = (
+    box: {
+      scrollTop: number
+      scrollTo: (position: number) => void
+      scrollHeight: number
+    },
+    key: string,
+    index: number | null,
+    starts: number[],
+    total: number,
+    viewport: number,
+    attempt = 0,
+  ) => {
+    setTimeout(
+      () => {
+        // A remount or a newer toggle supersedes this attempt.
+        if (subagentsBox !== box || revealKey !== key) return
+        if (box.scrollHeight !== total) {
+          if (attempt < 8)
+            scheduleReveal(
+              box,
+              key,
+              index,
+              starts,
+              total,
+              viewport,
+              attempt + 1,
+            )
           return
         }
-        hostWheel(event)
-      }
-    }
+        applyReveal(box, index, starts, total, viewport)
+      },
+      attempt === 0 ? 0 : 30,
+    )
   }
-
-  // Toggling an agent keeps its header visible: OpenTUI preserves scrollTop
-  // while the content grows/shrinks, so after the open state flips the
-  // header offset is measured in post-toggle rows and the viewport is pulled
-  // just enough to contain the header row — the detail always opens
-  // downward, never pushing the header's first rows out of view.
-  const anchorSubagentsHeader = (index: number) => {
-    if (!subagentsBox) return
+  createEffect(() => {
+    const index = openGroupIndex()
     const { starts, total } = subagentsGeometry()
-    const header = starts[index] ?? 0
     const viewport = subagentsLayout().height
-    const apply = () => {
-      const box = subagentsBox
-      if (!box || viewport === 0) return
-      const max = Math.max(0, total - viewport)
-      let top = Math.min(Math.max(0, box.scrollTop), max)
-      if (top > header) top = header
-      else if (header > top + viewport - 1)
-        top = Math.max(0, header - viewport + 1)
-      box.scrollTo(top)
-    }
-    apply()
-    queueMicrotask(apply)
-  }
+    const box = subagentsBox
+    if (!box || viewport === 0) return
+    const key = `${index}:${total}`
+    if (key === revealKey) return
+    revealKey = key
+    scheduleReveal(box, key, index, starts, total, viewport)
+  })
 
   // Index-keyed toggle (pinned shape — the theme-contract hygiene test
-  // asserts it): opening one agent closes the other by construction, then
-  // the header anchor runs on post-toggle rows.
+  // asserts it): opening one agent closes the other by construction; the
+  // reveal effect above runs on the committed post-toggle rows.
   const onToggleGroup = (index: () => number) => () => {
     setOpenGroupIndex(openGroupIndex() === index() ? null : index())
-    anchorSubagentsHeader(index())
   }
 
   return (
