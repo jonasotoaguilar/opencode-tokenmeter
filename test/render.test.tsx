@@ -3950,8 +3950,8 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
     await waitForFrameDriven(setup, (frame) =>
       frame.includes("6K in · 300 out"),
     )
-    // explore's open detail fills the 4-row viewport: general sits below the
-    // fold now, so the REAL scroll container is the only way down to it.
+    // explore's open detail plus general exactly fill the 6-row viewport;
+    // scrolling the REAL scroll container to the bottom keeps it reachable.
     const scrollbox = findScrollbox(setup)
     expect(scrollbox).not.toBeNull()
     must(scrollbox).scrollTo(must(scrollbox).scrollHeight)
@@ -4112,9 +4112,9 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
     // ALL agents are children of the scroll container — nothing sliced: 8
     // agents × 2 compact rows = 16 rows in the content.
     expect(must(scrollbox).getChildren().length).toBe(16)
-    // The viewport is roughly two compact agents: taller content than the
-    // fixed viewport proves real scrolling is required.
-    expect(must(scrollbox).scrollHeight).toBeGreaterThan(4)
+    // The viewport holds up to three collapsed agents: taller content than
+    // the fixed viewport proves real scrolling is required.
+    expect(must(scrollbox).scrollHeight).toBeGreaterThan(6)
     const top = setup.captureCharFrame()
     expect(top).toContain(`↳ build (1 task) ${GLYPH.expand}`)
     expect(top).toContain(`↳ code (1 task) ${GLYPH.expand}`)
@@ -4158,15 +4158,15 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
     expect(frame).toContain("4K tokens · $0.00")
     const scrollbox = findScrollbox(setup)
     expect(scrollbox).not.toBeNull()
-    expect(must(scrollbox).scrollHeight).toBeLessThanOrEqual(4)
+    expect(must(scrollbox).scrollHeight).toBeLessThanOrEqual(6)
     disposeReconcile()
     dispose()
   }, 20000)
 
-  test("REGRESSION #25: viewport height is min(actual rows, 4) — single collapsed group is 2 rows, not 4 with blank space", async () => {
-    // Fixed height={4} reserved 2 blank rows for a single collapsed group.
+  test("REGRESSION #25: viewport height is min(actual rows, 6) — single collapsed group is 2 rows, not 6 with blank space", async () => {
+    // Fixed height={6} reserved blank rows for fewer groups.
     // The viewport must shrink to the actual content: 1 collapsed = 2 rows,
-    // 2 collapsed = 4 rows, 3+ collapsed = 4 capped with scroll.
+    // 2 collapsed = 4 rows, 3+ collapsed = 6 capped with scroll.
     // Expanded compact is 4 rows (header + 3 detail), precise is 6.
     const assertHeight = async (
       groups: Array<{
@@ -4217,12 +4217,22 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
         { id: "c2", agent: "b", input: 4000, output: 200 },
         { id: "c3", agent: "c", input: 4000, output: 200 },
       ],
-      4,
       6,
+      6,
+    )
+    await assertHeight(
+      [
+        { id: "d1", agent: "a", input: 4000, output: 200 },
+        { id: "d2", agent: "b", input: 4000, output: 200 },
+        { id: "d3", agent: "c", input: 4000, output: 200 },
+        { id: "d4", agent: "d", input: 4000, output: 200 },
+      ],
+      6,
+      8,
     )
   }, 20000)
 
-  test("REGRESSION #33: scrollbar never visible for totalRows<=4 — overflow-gated", async () => {
+  test("REGRESSION #33: scrollbar never visible for totalRows<=6 — overflow-gated", async () => {
     const gateWait = async (
       n: number,
       s: Awaited<ReturnType<typeof testRender>>,
@@ -4284,6 +4294,15 @@ describe("subagents scrollbox (global disclosure, per-agent compact rows, exclus
         { id: "g1", agent: "a", input: 4000, output: 200 },
         { id: "g2", agent: "b", input: 4000, output: 200 },
         { id: "g3", agent: "c", input: 4000, output: 200 },
+      ],
+      false,
+    )
+    await check(
+      [
+        { id: "g1", agent: "a", input: 4000, output: 200 },
+        { id: "g2", agent: "b", input: 4000, output: 200 },
+        { id: "g3", agent: "c", input: 4000, output: 200 },
+        { id: "g4", agent: "d", input: 4000, output: 200 },
       ],
       true,
     )
